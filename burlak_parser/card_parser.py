@@ -544,18 +544,18 @@ def _collect_raw_rows(
 
 # ─── Поиск файлов ────────────────────────────────────────────────────────────
 
-def _find_excel_files(path: str, extract_dir: Optional[str] = None, _seen_sigs: Optional[set] = None) -> List[str]:
+def _find_excel_files(path: str, extract_dir: Optional[str] = None, _seen_names: Optional[set] = None) -> List[str]:
     """Найти все .xlsx и .xls файлы рекурсивно (папка или ZIP).
 
     Поддерживает вложенные ZIP-архивы (рекурсивно) с извлечением
     в отдельные поддиректории.
-    Проверяет дубликаты по сигнатуре (размер + первые 4096 байт).
+    Проверяет дубликаты по ИМЕНИ файла (базовое имя без пути).
     Фильтрует временные файлы (~$) и не-Excel форматы.
     Удаляет мусор только из временных директорий извлечения.
     """
     files: List[str] = []
-    if _seen_sigs is None:
-        _seen_sigs = set()
+    if _seen_names is None:
+        _seen_names = set()
 
     if os.path.isfile(path) and path.lower().endswith(".zip"):
         if extract_dir is None:
@@ -567,10 +567,10 @@ def _find_excel_files(path: str, extract_dir: Optional[str] = None, _seen_sigs: 
         with zipfile.ZipFile(path, "r", metadata_encoding="gbk") as z:
             z.extractall(extract_dir)
 
-        _walk_extracted_dir(extract_dir, extract_dir, files, _seen_sigs, is_temp=True)
+        _walk_extracted_dir(extract_dir, extract_dir, files, _seen_names, is_temp=True)
 
     elif os.path.isdir(path):
-        _walk_extracted_dir(path, extract_dir or path, files, _seen_sigs, is_temp=False)
+        _walk_extracted_dir(path, extract_dir or path, files, _seen_names, is_temp=False)
 
     elif os.path.isfile(path) and path.lower().endswith((".xlsx", ".xls")):
         files.append(path)
@@ -578,8 +578,15 @@ def _find_excel_files(path: str, extract_dir: Optional[str] = None, _seen_sigs: 
     return files
 
 
-def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _seen_sigs: set, is_temp: bool) -> None:
-    """Обойти директорию, фильтруя только .xlsx/.xls/.zip, с дедупликацией."""
+def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _seen_names: set, is_temp: bool, is_nested: bool = False) -> None:
+    """Обойти директорию, фильтруя только .xlsx/.xls/.zip.
+
+    Основные файлы (is_nested=False) собираются ВСЕ без дедупликации.
+    Вложенные файлы (is_nested=True) проверяются на дубликат по имени
+    относительно уже собранных основных.
+    """
+    nested_zips: List[str] = []
+
     for root, _, filenames in os.walk(walk_root):
         for fn in filenames:
             if fn.startswith("~$"):
@@ -588,40 +595,32 @@ def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _se
             ext = os.path.splitext(fn)[1].lower()
 
             if ext in (".xlsx", ".xls"):
-                sig = _file_signature(full_path)
-                if sig and sig in _seen_sigs:
-                    logger.debug("Пропуск дубликата: %s", fn)
+                if is_nested and fn in _seen_names:
+                    logger.debug("Пропуск дубликата из вложенного архива: %s", fn)
                     if is_temp:
                         _safe_remove(full_path)
                 else:
-                    if sig:
-                        _seen_sigs.add(sig)
+                    _seen_names.add(fn)
                     files.append(full_path)
             elif ext == ".zip":
-                nested_dir = os.path.join(extract_base, f"_nested_{_safe_name(fn)}")
-                os.makedirs(nested_dir, exist_ok=True)
-                try:
-                    with zipfile.ZipFile(full_path, "r", metadata_encoding="gbk") as z:
-                        z.extractall(nested_dir)
-                    _walk_extracted_dir(nested_dir, extract_base, files, _seen_sigs, is_temp=True)
-                except Exception as e:
-                    logger.warning("Не удалось распаковать вложенный архив %s: %s", fn, e)
-                if is_temp:
-                    _safe_remove(full_path)
+                nested_zips.append(full_path)
             else:
                 if is_temp:
                     _safe_remove(full_path)
 
-
-def _file_signature(file_path: str) -> Optional[str]:
-    """Быстрая сигнатура файла: размер + первые 4096 байт."""
-    try:
-        size = os.path.getsize(file_path)
-        with open(file_path, "rb") as f:
-            head = f.read(4096)
-        return f"{size}:{head.hex()}"
-    except Exception:
-        return None
+    # Обрабатываем вложенные ZIP ПОСЛЕ основных файлов
+    for full_path in nested_zips:
+        fn = os.path.basename(full_path)
+        nested_dir = os.path.join(extract_base, f"_nested_{_safe_name(fn)}")
+        os.makedirs(nested_dir, exist_ok=True)
+        try:
+            with zipfile.ZipFile(full_path, "r", metadata_encoding="gbk") as z:
+                z.extractall(nested_dir)
+            _walk_extracted_dir(nested_dir, extract_base, files, _seen_names, is_temp=True, is_nested=True)
+        except Exception as e:
+            logger.warning("Не удалось распаковать вложенный архив %s: %s", fn, e)
+        if is_temp:
+            _safe_remove(full_path)
 
 
 def _safe_remove(file_path: str) -> None:

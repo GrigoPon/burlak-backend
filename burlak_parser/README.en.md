@@ -2,7 +2,7 @@
 
 BOM parsing and reconciliation with assembly operation cards for automotive manufacturing.
 
-Nested ZIP archive support with recursive extraction. File deduplication by signature (size + content). Professional dashboard in Excel report with metric cards.
+Filename-based deduplication. Nested ZIP archives are processed after main files to prevent duplicate insertion before originals.
 
 ---
 
@@ -26,19 +26,11 @@ python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [OPTIONS]
 
 ### File Discovery
 
-`_find_excel_files()`:
-- Recursively extracts ZIP archives, including nested ones
-- Deduplicates files by signature (file size + first 4096 bytes)
-- Filters temp files (~$) and non-Excel formats
-- Extracted files go to a temp directory, cleaned up on completion
-
-### Report Dashboard
-
-The Summary sheet is redesigned as a professional dashboard:
-- Header with metadata (configs, parts in BOM and cards)
-- Metric cards: total discrepancies, quantity mismatch, only in BOM, only in cards
-- Processed/corrupted file count
-- Config table with alternating row colors
+Directory and ZIP traversal algorithm:
+1. Collect all main files (from root directory and top-level ZIP) without dedup
+2. Process nested ZIP archives — files are checked for duplicate names against already-collected main files
+3. Temp files (~$) and non-Excel formats are discarded
+4. Temp directories are cleaned up on completion
 
 ---
 
@@ -49,10 +41,10 @@ burlak_parser/
 ├── __init__.py
 ├── main.py
 ├── bom_parser.py
-├── card_parser.py       # Nested ZIPs, signature dedup
+├── card_parser.py       # Filename-based dedup
 ├── file_classifier.py
 ├── fuzzy_matcher.py
 ├── splitter.py
 ├── comparator.py
-└── report_generator.py  # Dashboard
+└── report_generator.py
 ```
