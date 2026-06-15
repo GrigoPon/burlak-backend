@@ -90,6 +90,13 @@ def generate_discrepancy_report(comparison: ComparisonResult,
         'valign': 'vcenter',
         'font_size': 10,
     })
+    fuzzy_fmt = workbook.add_format({
+        'border': 1,
+        'bg_color': '#E8F5E9',  # Зелёный (найдено предполагаемое совпадение)
+        'text_wrap': True,
+        'valign': 'vcenter',
+        'font_size': 10,
+    })
     bom_part_fmt = workbook.add_format({
         'border': 1,
         'text_wrap': True,
@@ -150,9 +157,10 @@ def generate_discrepancy_report(comparison: ComparisonResult,
         'Кол-во по BOM',
         'Кол-во по картам',
         'Номера операционных карт',
+        'Fuzzy-совпадение',
         'Тип ошибки',
     ]
-    col_widths = [22, 30, 30, 14, 14, 45, 20]
+    col_widths = [22, 30, 30, 14, 14, 45, 22, 22]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths)):
         ws.set_column(col_idx, col_idx, width)
@@ -164,7 +172,9 @@ def generate_discrepancy_report(comparison: ComparisonResult,
     # Данные
     for row_idx, disc in enumerate(comparison.discrepancies, 1):
         # Выбираем формат в зависимости от типа ошибки
-        if disc.discrepancy_type == DiscrepancyType.ONLY_IN_BOM:
+        if disc.discrepancy_type in (DiscrepancyType.FUZZY_IN_BOM, DiscrepancyType.FUZZY_IN_CARDS):
+            fmt = fuzzy_fmt
+        elif disc.discrepancy_type == DiscrepancyType.ONLY_IN_BOM:
             fmt = bom_only_fmt
         elif disc.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS:
             fmt = cards_only_fmt
@@ -177,7 +187,8 @@ def generate_discrepancy_report(comparison: ComparisonResult,
         ws.write(row_idx, 3, disc.qty_bom, cell_num_fmt)
         ws.write(row_idx, 4, disc.qty_cards, cell_num_fmt)
         ws.write(row_idx, 5, ', '.join(disc.card_numbers), fmt)
-        ws.write(row_idx, 6, disc.discrepancy_type, fmt)
+        ws.write(row_idx, 6, disc.fuzzy_match, fmt)
+        ws.write(row_idx, 7, disc.discrepancy_type, fmt)
 
     # === Лист 3: Все детали BOM ===
     ws_bom = workbook.add_worksheet('Все детали BOM')

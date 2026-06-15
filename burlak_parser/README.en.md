@@ -2,7 +2,7 @@
 
 BOM parsing and reconciliation with assembly operation cards.
 
-BOM files may contain both real configurations (numeric quantities) and VIN columns (S / - values). The parser automatically detects the boundary and excludes VIN breakdown, keeping only actual configurations.
+Fuzzy part-number matching via difflib.SequenceMatcher. Template sheet filtering (cover, TOC, record sheets, blank forms). Multi-sheet file splitting via ProcessPoolExecutor.
 
 ---
 
@@ -21,12 +21,40 @@ Dependencies: openpyxl, pandas, xlsxwriter, tqdm.
 ## Usage
 
 ```
-python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [--config <name>]
+python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [OPTIONS]
 ```
 
-### BOM Parsing
+### Options
 
-The parser finds all columns to the right of the part number and checks their content for numeric values. Columns containing only `S` (Same) and `-` (not applicable) — VIN breakdown — are automatically excluded. Only real configurations with part quantities remain.
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--bom` | Path to BOM file (.xlsx) | required |
+| `--cards` | Cards folder or ZIP | required |
+| `--config` | Configuration name | interactive |
+| `--output` | Output directory | `./output` |
+| `--skip-templates` | Filter template sheets | True |
+| `--no-skip-templates` | Include templates | — |
+| `--no-fuzzy` | Disable fuzzy matching | — |
+| `--no-split` | Skip splitting | — |
+| `--verbose` | Debug output | — |
+
+---
+
+## Fuzzy Matching
+
+Uses difflib.SequenceMatcher:
+- **Normalization:** remove hyphens, spaces, dots, slashes, special chars
+- **Comparison:** ratio() of two normalized strings
+- **Types:** FUZZY_IN_BOM, FUZZY_IN_CARDS
+- Controlled by `--no-fuzzy` flag
+
+## Template Filtering
+
+`_is_template_sheet()` detects service sheets by keywords: 空表, 封面, 目录, 记录表, Sheet1. Controlled by `--skip-templates`.
+
+## Parallel Splitting
+
+ProcessPoolExecutor for multi-sheet file splitting. `_split_single_sheet()` is a picklable top-level function.
 
 ---
 
@@ -36,8 +64,8 @@ The parser finds all columns to the right of the part number and checks their co
 burlak_parser/
 ├── __init__.py
 ├── main.py
-├── bom_parser.py        # Auto-exclude VIN columns
-├── card_parser.py       # ZIP splitting, improved empty-sheet detection
-├── comparator.py
-└── report_generator.py
+├── bom_parser.py
+├── card_parser.py       # Template filtering, ProcessPoolExecutor
+├── comparator.py        # Fuzzy matching
+└── report_generator.py  # Fuzzy column
 ```

@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -179,6 +180,31 @@ TABLE_COLUMN_PATTERNS = [
     [r"料号|零件号|part\s*no", r"物料名称|零件名称", r"数量|用量|qty"],
     [r"序.*号", r"零件号|part\s*no", r"零件名称", r"数量|用量"],
 ]
+
+
+# ─── Шаблоны названий листов, которые пропускаются при разделении ──────
+# Это служебные/пустые листы, не содержащие операционных данных.
+SKIP_TEMPLATE_PATTERNS: List[str] = [
+    "空表",          # Пустой бланк / шаблон
+    "填写范本",      # Образец заполнения
+    "封面",          # Обложка
+    "目录",          # Оглавление
+    "文件发放回收记录表",  # Журнал документооборота
+    "变更记录",      # История изменений (служебный лист)
+]
+
+
+def _is_template_sheet(sheet_name: str) -> bool:
+    """Проверить, является ли лист шаблоном/служебным.
+
+    Сравнивает имя листа со списком известных шаблонных паттернов.
+    Использует поиск подстроки (не точное совпадение), чтобы ловить
+    варианты типа «空表 (2)».
+    """
+    for pattern in SKIP_TEMPLATE_PATTERNS:
+        if pattern in sheet_name:
+            return True
+    return False
 
 
 @dataclass
@@ -908,39 +934,83 @@ def _extract_single_sheet_via_zip(source_path: str, output_path: str, keep_sheet
             zout.writestr(name, data)
 
 
+def _split_single_sheet(args: Tuple[str, str, str]) -> Optional[str]:
+    """Обработать один лист: ZIP-экстракция, при ошибке — fallback.
+
+    Вынесена как отдельная функция для ProcessPoolExecutor (picklable).
+
+    Args:
+        args: Кортеж (source_path, output_path, sheet_name).
+
+    Returns:
+        output_path при успехе, None при ошибке.
+    """
+    source_path, output_path, sheet_name = args
+
+    try:
+        _extract_single_sheet_via_zip(source_path, output_path, sheet_name)
+        return output_path
+    except Exception as e:
+        # Fallback: openpyxl + копирование форматирования
+        try:
+            src_wb = openpyxl.load_workbook(source_path)
+            new_wb = openpyxl.Workbook()
+            new_ws = new_wb.active
+            if new_ws is not None:
+                new_ws.title = sheet_name
+            src_ws = src_wb[sheet_name]
+            _copy_ws_with_formatting(src_ws, new_ws)
+            new_wb.save(output_path)
+            new_wb.close()
+            src_wb.close()
+            return output_path
+        except Exception as e2:
+            logger.error(
+                "Не удалось извлечь лист '%s' из %s: %s",
+                sheet_name, source_path, e2,
+            )
+            return None
+
+
 def split_cards_to_files(cards_data: CardsData,
                           output_dir: str,
-                          split_all_non_empty: bool = True) -> List[str]:
+                          split_all_non_empty: bool = True,
+                          skip_templates: bool = True,
+                          parallel: bool = True,
+                          max_workers: int = 0) -> List[str]:
     """Разделить многолистовые файлы на отдельные .xlsx файлы.
 
     Каждый лист операционной карты = отдельный .xlsx файл.
-    Пропускаются только полностью пустые листы.
+    Пропускаются: полностью пустые листы, шаблоны (при skip_templates).
     .xls файлы не разделяются (только .xlsx поддерживает запись).
 
     При split_all_non_empty=True разделяются ВСЕ непустые листы,
-    включая служебные листы без каталожных номеров (например, CP7/CP8).
+    включая служебные листы без каталожных номеров (CP7/CP8).
 
-    Файлы создаются через прямую манипуляцию ZIP (без openpyxl save/load),
-    что гарантирует 100% сохранение форматирования, изображений и стилей.
+    Файлы создаются через прямую манипуляцию ZIP — 100% сохранность.
 
     Args:
         cards_data: Данные распарсенных карт.
         output_dir: Директория для сохранения разделённых файлов.
-        split_all_non_empty: Если True, разделяет все непустые листы;
-                             если False — только листы с найденной таблицей деталей.
+        split_all_non_empty: True — все непустые; False — только с деталями.
+        skip_templates: True — пропускать шаблонные листы (空表, 封面...).
+        parallel: True — использовать многопроцессорную обработку.
+        max_workers: Кол-во процессов (0 = авто = cpu_count).
 
     Returns:
         Список путей к созданным файлам.
     """
     os.makedirs(output_dir, exist_ok=True)
-    created_files: List[str] = []
+
+    # Собираем все задачи (листы для разделения)
+    tasks: List[Tuple[str, str, str]] = []  # (source, output, sheet_name)
 
     for result in cards_data.card_results:
         if not result.file_path.lower().endswith(".xlsx"):
-            logger.debug("Пропускаем разделение .xls файла: %s", result.file_path)
             continue
 
         for sheet_info in result.sheets:
+            # Фильтрация
             if split_all_non_empty:
                 if not sheet_info.has_data:
                     continue
@@ -948,8 +1018,11 @@ def split_cards_to_files(cards_data: CardsData,
                 if not sheet_info.is_valid:
                     continue
 
-            sheet_name = sheet_info.sheet_name
+            # Пропуск шаблонов
+            if skip_templates and _is_template_sheet(sheet_info.sheet_name):
+                continue
 
+            sheet_name = sheet_info.sheet_name
             safe_card = re.sub(r"[^\w\-]", "_", result.card_number)[:50]
             safe_sheet = re.sub(r"[^\w\-]", "_", sheet_name)[:50]
             output_filename = f"{safe_card}_{safe_sheet}.xlsx"
@@ -961,40 +1034,37 @@ def split_cards_to_files(cards_data: CardsData,
                 output_path = os.path.join(output_dir, f"{base}_{counter}{ext}")
                 counter += 1
 
-            try:
-                _extract_single_sheet_via_zip(
-                    result.file_path, output_path, sheet_name,
-                )
-                created_files.append(output_path)
-                logger.debug("Создан файл листа: %s", os.path.basename(output_path))
+            tasks.append((result.file_path, output_path, sheet_name))
 
-            except Exception as e:
-                logger.warning(
-                    "ZIP split failed для '%s' из %s: %s. Пробуем fallback...",
-                    sheet_name, result.file_path, e,
-                )
-                # Fallback: openpyxl + _copy_ws_with_formatting
-                try:
-                    src_wb = openpyxl.load_workbook(result.file_path)
-                    new_wb = openpyxl.Workbook()
-                    new_ws = new_wb.active
-                    if new_ws is not None:
-                        new_ws.title = sheet_name
-                    src_ws = src_wb[sheet_name]
-                    _copy_ws_with_formatting(src_ws, new_ws)
-                    new_wb.save(output_path)
-                    new_wb.close()
-                    src_wb.close()
-                    created_files.append(output_path)
-                    logger.debug(
-                        "Создан файл листа (fallback): %s",
-                        os.path.basename(output_path),
-                    )
-                except Exception as e2:
-                    logger.error(
-                        "Не удалось сохранить лист '%s' из %s: %s",
-                        sheet_name, result.file_path, e2,
-                    )
+    if not tasks:
+        logger.info("Нет листов для разделения")
+        return []
+
+    created_files: List[str] = []
+
+    if parallel and len(tasks) > 1:
+        # Многопроцессорная обработка
+        import multiprocessing
+        if max_workers <= 0:
+            max_workers = min(multiprocessing.cpu_count(), len(tasks), 8)
+        logger.info("Параллельное разделение: %d задач, %d процессов",
+                     len(tasks), max_workers)
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_split_single_sheet, t): t for t in tasks}
+            with tqdm(total=len(tasks), desc="Разделение", unit="лист") as pbar:
+                for future in as_completed(futures):
+                    result_path = future.result()
+                    if result_path:
+                        created_files.append(result_path)
+                    pbar.update(1)
+    else:
+        # Последовательная обработка
+        iterator = tqdm(tasks, desc="Разделение", unit="лист")
+        for task in iterator:
+            result_path = _split_single_sheet(task)
+            if result_path:
+                created_files.append(result_path)
 
     logger.info("Создано отдельных файлов: %d", len(created_files))
     return created_files

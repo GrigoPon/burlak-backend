@@ -84,7 +84,9 @@ def run_pipeline(bom_path: str,
                  cards_path: str,
                  config_name: Optional[str] = None,
                  output_dir: Optional[str] = None,
-                 auto_split: bool = True) -> None:
+                 auto_split: bool = True,
+                 skip_templates: bool = True,
+                 use_fuzzy: bool = True) -> None:
     """Запустить полный конвейер обработки.
 
     Args:
@@ -147,7 +149,7 @@ def run_pipeline(bom_path: str,
     if auto_split:
         print("✂️  Разделение многолистовых карт на отдельные файлы...")
         split_dir = os.path.join(output_dir, "split_cards")
-        created_files = split_cards_to_files(cards, split_dir)
+        created_files = split_cards_to_files(cards, split_dir, skip_templates=skip_templates)
         print(f"   Создано отдельных файлов: {len(created_files)}")
 
         # Создаём ZIP-архив
@@ -158,7 +160,7 @@ def run_pipeline(bom_path: str,
 
     # Шаг 3: Сверка
     print("🔍 Шаг 3: Сверка BOM и операционных карт...")
-    comparison = compare(bom_config_parts, cards, config_name=selected_config)
+    comparison = compare(bom_config_parts, cards, config_name=selected_config, use_fuzzy=use_fuzzy)
 
     # Вывод сводки
     print(f"\n📊 Результаты сверки:")
@@ -167,9 +169,11 @@ def run_pipeline(bom_path: str,
     print(f"  Деталей в картах:       {comparison.total_cards_parts:>6}")
     print(f"  Совпало:                {comparison.matched_parts:>6}")
     print(f"  Расхождений:            {len(comparison.discrepancies):>6}")
+    print(f"    ├ Конфликт количества:{sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}")
+    if comparison.fuzzy_matches_found:
+        print(f"    ├ Fuzzy-совпадений:   {comparison.fuzzy_matches_found:>6}")
     print(f"    ├ Только в BOM:       {sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM):>6}")
-    print(f"    ├ Только в картах:    {sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}")
-    print(f"    └ Конфликт количества:{sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}")
+    print(f"    └ Только в картах:    {sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}")
 
     # Шаг 4: Формирование отчёта
     print("\n📄 Шаг 4: Формирование отчётов...")
@@ -243,6 +247,21 @@ def main() -> None:
         help="Не разделять многолистовые карты на отдельные файлы",
     )
     parser.add_argument(
+        "--skip-templates",
+        action="store_true", default=True,
+        help="Пропускать шаблонные листы при разделении (空表, 封面...) — по умолчанию",
+    )
+    parser.add_argument(
+        "--no-skip-templates",
+        action="store_false", dest="skip_templates",
+        help="НЕ пропускать шаблонные листы (разделять всё)",
+    )
+    parser.add_argument(
+        "--no-fuzzy",
+        action="store_false", dest="use_fuzzy", default=True,
+        help="Отключить нечёткий поиск парт-номеров",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Подробный вывод (debug)",
@@ -266,6 +285,8 @@ def main() -> None:
             config_name=args.config,
             output_dir=args.output,
             auto_split=not args.no_split,
+            skip_templates=args.skip_templates,
+            use_fuzzy=args.use_fuzzy,
         )
     except KeyboardInterrupt:
         print("\n\n⚠️  Прервано пользователем.")
