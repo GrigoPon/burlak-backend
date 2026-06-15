@@ -13,13 +13,17 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
+import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
+from copy import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import openpyxl
 from tqdm import tqdm
@@ -183,7 +187,8 @@ class CardSheetInfo:
     card_number: str  # Номер карты (из документа / имени файла)
     sheet_name: str   # Имя листа
     operation_name: str = ""  # Название операции
-    is_valid: bool = False    # Содержит ли лист полезные данные
+    is_valid: bool = False    # Найдена таблица с деталями
+    has_data: bool = False    # Есть ли какие-либо данные на листе (даже без таблицы деталей)
 
 
 @dataclass
@@ -383,24 +388,26 @@ def parse_card_file(file_path: str) -> CardParseResult:
                 card_number=card_number or basename,
                 sheet_name=sheet_name,
                 is_valid=False,
+                has_data=False,
             ))
             continue
 
         # Проверяем, есть ли вообще какие-то данные (первые 5 строк)
-        has_data = False
+        sheet_has_data = False
         for r in range(1, min(max_row, 5) + 1):
             for c in range(1, min(max_col, 10) + 1):
                 if ws.cell_value(r, c) is not None:
-                    has_data = True
+                    sheet_has_data = True
                     break
-            if has_data:
+            if sheet_has_data:
                 break
 
-        if not has_data:
+        if not sheet_has_data:
             sheets_info.append(CardSheetInfo(
                 card_number=card_number or basename,
                 sheet_name=sheet_name,
                 is_valid=False,
+                has_data=False,
             ))
             continue
 
@@ -416,6 +423,7 @@ def parse_card_file(file_path: str) -> CardParseResult:
                 sheet_name=sheet_name,
                 operation_name="Лист без таблицы деталей",
                 is_valid=False,
+                has_data=True,
             ))
             continue
 
@@ -518,6 +526,7 @@ def parse_card_file(file_path: str) -> CardParseResult:
             sheet_name=sheet_name,
             operation_name=operation_name,
             is_valid=len(merged_parts) > 0,
+            has_data=True,
         ))
 
     reader.close()
@@ -631,16 +640,280 @@ def parse_cards(input_path: str,
     )
 
 
-def split_cards_to_files(cards_data: CardsData, output_dir: str) -> List[str]:
+def _copy_ws_with_formatting(src_ws: Any, dst_ws: Any) -> None:
+    """Скопировать содержимое листа с сохранением форматирования.
+
+    Копирует:
+      - Значения ячеек
+      - Стили (шрифт, границы, заливка, выравнивание, формат числа)
+      - Объединённые ячейки
+      - Ширину колонок
+      - Высоту строк
+      - Заморозку панелей
+      - Изображения (насколько возможно)
+
+    Args:
+        src_ws: Исходный лист (openpyxl Worksheet).
+        dst_ws: Целевой лист (openpyxl Worksheet).
+    """
+    # Копируем значения ячеек со стилями
+    for row in src_ws.iter_rows(min_row=1,
+                                 max_row=src_ws.max_row or 0,
+                                 max_col=src_ws.max_column or 0):
+        for cell in row:
+            new_cell = dst_ws.cell(row=cell.row, column=cell.column)
+            new_cell.value = cell.value
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.border = copy(cell.border)
+                new_cell.fill = copy(cell.fill)
+                new_cell.number_format = cell.number_format
+                new_cell.protection = copy(cell.protection)
+                new_cell.alignment = copy(cell.alignment)
+
+    # Копируем ширину колонок
+    for col_letter, col_dim in src_ws.column_dimensions.items():
+        dst_ws.column_dimensions[col_letter] = copy(col_dim)
+
+    # Копируем высоту строк
+    for row_num, row_dim in src_ws.row_dimensions.items():
+        dst_ws.row_dimensions[row_num] = copy(row_dim)
+
+    # Копируем объединённые ячейки
+    for merge_range in src_ws.merged_cells.ranges:
+        dst_ws.merge_cells(str(merge_range))
+
+    # Копируем заморозку панелей
+    if src_ws.freeze_panes:
+        dst_ws.freeze_panes = src_ws.freeze_panes
+
+    # Копируем настройки страницы
+    if src_ws.page_setup:
+        dst_ws.page_setup = copy(src_ws.page_setup)
+    if src_ws.page_margins:
+        dst_ws.page_margins = copy(src_ws.page_margins)
+
+    # Копируем область печати
+    if src_ws.print_area:
+        dst_ws.print_area = src_ws.print_area
+
+    # Пытаемся скопировать изображения
+    # ВАЖНО: изображения сохраняются ТОЛЬКО в основном методе (shutil.copy2).
+    # В этом fallback-методе изображения копируются только
+    # если они не привязаны к родительскому Workbook.
+    if hasattr(src_ws, '_images'):
+        for img in src_ws._images:
+            try:
+                dst_ws.add_image(copy(img))
+            except Exception:
+                logger.debug("Не удалось скопировать изображение (fallback)")
+
+
+def _extract_single_sheet_via_zip(source_path: str, output_path: str, keep_sheet_name: str) -> None:
+    """Выделить один лист из .xlsx через прямую манипуляцию ZIP.
+
+    .xlsx — это ZIP-архив XML-файлов. Этот метод НЕ использует openpyxl
+    для сохранения, поэтому изображения, стили и всё форматирование
+    сохраняются на 100%.
+
+    Алгоритм:
+      1. Скопировать исходный файл.
+      2. Прочитать .xlsx как ZIP.
+      3. Найти в xl/workbook.xml <sheet> для keep_sheet_name.
+      4. Удалить все остальные <sheet>.
+      5. Удалить .xml файлы ненужных листов.
+      6. Обновить xl/_rels/workbook.xml.rels.
+      7. Обновить [Content_Types].xml.
+      8. Записать изменённый ZIP.
+
+    Args:
+        source_path: Путь к исходному .xlsx файлу.
+        output_path: Путь для сохранения результата.
+        keep_sheet_name: Имя листа, который нужно оставить.
+
+    Raises:
+        ValueError: Если лист не найден.
+    """
+    # Пространства имён XML
+    NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+    NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+    ET.register_namespace('', NS_MAIN)
+    ET.register_namespace('r', NS_R)
+    ET.register_namespace('ct', NS_CT)
+
+    # Копируем исходный файл (shutil копирует байты, не трогая ZIP)
+    shutil.copy2(source_path, output_path)
+
+    # Читаем ZIP в память
+    with open(output_path, 'rb') as f:
+        zip_data = f.read()
+
+    with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+        zip_entries = {name: zf.read(name) for name in zf.namelist()}
+
+    # ── 1. Найти целевой лист ──
+    wb_xml = zip_entries['xl/workbook.xml']
+    wb_root = ET.fromstring(wb_xml)
+
+    sheets_elem = wb_root.find(f'{{{NS_MAIN}}}sheets')
+    if sheets_elem is None:
+        raise ValueError("Не найдена секция <sheets> в workbook.xml")
+
+    target_r_id: Optional[str] = None
+    target_sheet_file: Optional[str] = None
+    all_sheet_elements: List[ET.Element] = []
+    sheets_to_delete: List[Tuple[str, str, ET.Element]] = []  # (name, rId, elem)
+
+    for sheet_el in sheets_elem.findall(f'{{{NS_MAIN}}}sheet'):
+        name = sheet_el.get('name', '')
+        r_id = sheet_el.get(f'{{{NS_R}}}id')
+        if r_id is None:
+            r_id = sheet_el.get('r:id')  # Fallback
+        all_sheet_elements.append(sheet_el)
+        if name == keep_sheet_name:
+            target_r_id = r_id
+        else:
+            sheets_to_delete.append((name, r_id, sheet_el))
+
+    if target_r_id is None:
+        raise ValueError(f"Лист '{keep_sheet_name}' не найден в файле")
+
+    # Если лист единственный — файл уже готов (shutil.copy2 сделал копию)
+    if not sheets_to_delete:
+        return
+
+    # ── 2. Найти целевой worksheet файл через relationships ──
+    rels_xml = zip_entries.get('xl/_rels/workbook.xml.rels')
+    if rels_xml is None:
+        raise ValueError("Не найден xl/_rels/workbook.xml.rels")
+
+    rels_root = ET.fromstring(rels_xml)
+
+    r_id_to_target: Dict[str, str] = {}  # rId -> Target
+    r_id_to_elem: Dict[str, ET.Element] = {}
+    sheet_r_ids: Set[str] = set()
+    WORKSHEET_TYPE = f"{NS_R}/worksheet"
+
+    for rel_el in rels_root:
+        rid = rel_el.get('Id', '')
+        target = rel_el.get('Target', '')
+        r_type = rel_el.get('Type', '')
+        r_id_to_target[rid] = target
+        r_id_to_elem[rid] = rel_el
+        if r_type == WORKSHEET_TYPE:
+            sheet_r_ids.add(rid)
+
+    if target_r_id not in r_id_to_target:
+        raise ValueError(f"rId '{target_r_id}' не найден в .rels")
+
+    target_sheet_file = 'xl/' + r_id_to_target[target_r_id]
+
+    # ── 3. Удалить другие листы из workbook.xml ──
+    for name, r_id, sheet_el in sheets_to_delete:
+        sheets_elem.remove(sheet_el)
+
+    # ── 4. Удалить relationship'ы для ненужных листов ──
+    keep_r_ids: Set[str] = {target_r_id}
+    for rel_el in list(rels_root):
+        rid = rel_el.get('Id', '')
+        r_type = rel_el.get('Type', '')
+        if r_type == WORKSHEET_TYPE and rid not in keep_r_ids:
+            rels_root.remove(rel_el)
+
+    # ── 5. Собрать список файлов для удаления ──
+    files_to_remove: Set[str] = set()
+    for name, r_id, sheet_el in sheets_to_delete:
+        if r_id in r_id_to_target:
+            # Удаляем файл листа (например, xl/worksheets/sheet2.xml)
+            removed_sheet = 'xl/' + r_id_to_target[r_id]
+            files_to_remove.add(removed_sheet)
+
+            # Удаляем .rels файл листа
+            base = os.path.basename(removed_sheet)
+            removed_rels = f"xl/worksheets/_rels/{base}.rels"
+            if removed_rels in zip_entries:
+                files_to_remove.add(removed_rels)
+
+                # Находим связанные drawings
+                sheet_rels_xml = zip_entries[removed_rels]
+                try:
+                    sr_root = ET.fromstring(sheet_rels_xml)
+                    for sr_el in sr_root:
+                        sr_target = sr_el.get('Target', '')
+                        # Резолвим относительный путь (../drawings/drawing1.xml)
+                        sr_dir = os.path.dirname(removed_rels)
+                        resolved = os.path.normpath(os.path.join(sr_dir, sr_target))
+                        resolved = '/'.join(resolved.split(os.sep))
+                        files_to_remove.add(resolved)
+                        # Также удаляем .rels для drawing
+                        drawing_base = os.path.basename(resolved)
+                        drawing_rels = f"xl/drawings/_rels/{drawing_base}.rels"
+                        if drawing_rels in zip_entries:
+                            files_to_remove.add(drawing_rels)
+                except Exception:
+                    pass
+
+    # ── 6. Удалить calcChain.xml (Excel перегенерирует)
+    zip_entries.pop('xl/calcChain.xml', None)
+    files_to_remove.add('xl/calcChain.xml')
+
+    # ── 7. Обновить [Content_Types].xml ──
+    ct_xml = zip_entries.get('[Content_Types].xml')
+    if ct_xml is not None:
+        ct_root = ET.fromstring(ct_xml)
+        for override_el in ct_root.findall(f'{{{NS_CT}}}Override'):
+            part_name = override_el.get('PartName', '')
+            # Убираем ведущий слеш
+            if part_name.startswith('/'):
+                part_name = part_name[1:]
+            if part_name in files_to_remove:
+                ct_root.remove(override_el)
+        zip_entries['[Content_Types].xml'] = ET.tostring(
+            ct_root, encoding='UTF-8', xml_declaration=True,
+        )
+
+    # ── 8. Удалить файлы из архива ──
+    for fname in list(files_to_remove):
+        zip_entries.pop(fname, None)
+
+    # ── 9. Записать обновлённые XML ──
+    zip_entries['xl/workbook.xml'] = ET.tostring(
+        wb_root, encoding='UTF-8', xml_declaration=True,
+    )
+    zip_entries['xl/_rels/workbook.xml.rels'] = ET.tostring(
+        rels_root, encoding='UTF-8', xml_declaration=True,
+    )
+
+    # ── 10. Записать новый ZIP ──
+    os.remove(output_path)
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for name, data in zip_entries.items():
+            zout.writestr(name, data)
+
+
+def split_cards_to_files(cards_data: CardsData,
+                          output_dir: str,
+                          split_all_non_empty: bool = True) -> List[str]:
     """Разделить многолистовые файлы на отдельные .xlsx файлы.
 
     Каждый лист операционной карты = отдельный .xlsx файл.
-    Пропускаются пустые листы.
+    Пропускаются только полностью пустые листы.
     .xls файлы не разделяются (только .xlsx поддерживает запись).
+
+    При split_all_non_empty=True разделяются ВСЕ непустые листы,
+    включая служебные листы без каталожных номеров (например, CP7/CP8).
+
+    Файлы создаются через прямую манипуляцию ZIP (без openpyxl save/load),
+    что гарантирует 100% сохранение форматирования, изображений и стилей.
 
     Args:
         cards_data: Данные распарсенных карт.
         output_dir: Директория для сохранения разделённых файлов.
+        split_all_non_empty: Если True, разделяет все непустые листы;
+                             если False — только листы с найденной таблицей деталей.
 
     Returns:
         Список путей к созданным файлам.
@@ -653,27 +926,18 @@ def split_cards_to_files(cards_data: CardsData, output_dir: str) -> List[str]:
             logger.debug("Пропускаем разделение .xls файла: %s", result.file_path)
             continue
 
-        try:
-            wb = openpyxl.load_workbook(result.file_path)
-        except Exception as e:
-            logger.warning("Не удалось открыть %s: %s", result.file_path, e)
-            continue
-
         for sheet_info in result.sheets:
-            if not sheet_info.is_valid:
-                continue
+            if split_all_non_empty:
+                if not sheet_info.has_data:
+                    continue
+            else:
+                if not sheet_info.is_valid:
+                    continue
 
-            new_wb = openpyxl.Workbook()
-            new_ws = new_wb.active
-
-            src_ws = wb[sheet_info.sheet_name]
-            for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row or 0,
-                                         max_col=src_ws.max_column or 0):
-                for cell in row:
-                    new_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            sheet_name = sheet_info.sheet_name
 
             safe_card = re.sub(r"[^\w\-]", "_", result.card_number)[:50]
-            safe_sheet = re.sub(r"[^\w\-]", "_", sheet_info.sheet_name)[:50]
+            safe_sheet = re.sub(r"[^\w\-]", "_", sheet_name)[:50]
             output_filename = f"{safe_card}_{safe_sheet}.xlsx"
             output_path = os.path.join(output_dir, output_filename)
 
@@ -683,11 +947,40 @@ def split_cards_to_files(cards_data: CardsData, output_dir: str) -> List[str]:
                 output_path = os.path.join(output_dir, f"{base}_{counter}{ext}")
                 counter += 1
 
-            new_wb.save(output_path)
-            new_wb.close()
-            created_files.append(output_path)
+            try:
+                _extract_single_sheet_via_zip(
+                    result.file_path, output_path, sheet_name,
+                )
+                created_files.append(output_path)
+                logger.debug("Создан файл листа: %s", os.path.basename(output_path))
 
-        wb.close()
+            except Exception as e:
+                logger.warning(
+                    "ZIP split failed для '%s' из %s: %s. Пробуем fallback...",
+                    sheet_name, result.file_path, e,
+                )
+                # Fallback: openpyxl + _copy_ws_with_formatting
+                try:
+                    src_wb = openpyxl.load_workbook(result.file_path)
+                    new_wb = openpyxl.Workbook()
+                    new_ws = new_wb.active
+                    if new_ws is not None:
+                        new_ws.title = sheet_name
+                    src_ws = src_wb[sheet_name]
+                    _copy_ws_with_formatting(src_ws, new_ws)
+                    new_wb.save(output_path)
+                    new_wb.close()
+                    src_wb.close()
+                    created_files.append(output_path)
+                    logger.debug(
+                        "Создан файл листа (fallback): %s",
+                        os.path.basename(output_path),
+                    )
+                except Exception as e2:
+                    logger.error(
+                        "Не удалось сохранить лист '%s' из %s: %s",
+                        sheet_name, result.file_path, e2,
+                    )
 
     logger.info("Создано отдельных файлов: %d", len(created_files))
     return created_files

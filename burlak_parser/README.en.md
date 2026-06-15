@@ -1,8 +1,8 @@
 # Burlak Parser
 
-Bill-of-Materials (BOM) parsing and reconciliation with assembly operation cards.
+BOM parsing and reconciliation with assembly operation cards.
 
-Cross-references catalog part numbers from a BOM file against part numbers in operation cards (xlsx/xls). Identifies discrepancies: parts missing from cards, extra parts in cards, quantity mismatches.
+Multi-sheet xlsx card files are split into individual sheets with full formatting preservation — images, styles, merged cells, page setup — via direct ZIP structure manipulation.
 
 ---
 
@@ -29,40 +29,28 @@ python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [--config <name
 | Parameter | Description |
 |-----------|-------------|
 | `--bom` | Path to BOM file (.xlsx) |
-| `--cards` | Path to cards folder or ZIP archive |
-| `--config` | Configuration name (interactive if omitted) |
+| `--cards` | Cards folder or ZIP archive |
+| `--config` | Configuration name |
+| `--output` | Output directory (default: `./output`) |
+| `--no-split` | Skip multi-sheet splitting |
+| `--verbose` | Debug output |
 
 ### Output
 
-Artifacts in `./output/`:
-1. `report.txt` — text discrepancy report
-2. `discrepancy_report.xlsx` — Excel report (3 sheets: summary, discrepancies, all BOM parts)
-3. `split_cards/` — split single-sheet files
-4. `split_cards.zip` — archive of split files
+1. `report.txt`
+2. `discrepancy_report.xlsx` (3 sheets)
+3. `split_cards/` — split single-sheet files (formatting preserved)
+4. `split_cards.zip`
 
 ---
 
-## How it works
+## Sheet Splitting
 
-### Step 1: BOM Parsing
+Two methods:
 
-`bom_parser.py` reads the xlsx specification, finds the header row (零件号, PartNo), identifies columns: part number, name (CN), name (EN), configuration columns.
+**Primary (ZIP manipulation).** xlsx is a ZIP archive of XML files. The method copies the source file byte-by-byte, then removes all sheets except the target from the ZIP structure. Preserves 100% of original formatting: fonts, colors, borders, fills, alignment, merged cells, column widths, row heights, freeze panes, images, page setup.
 
-### Step 2: Card Parsing
-
-`card_parser.py` scans files in the folder or ZIP archive. For each file: identifies card number, finds the parts table by keywords (料号, 零件号, 用量, qty), extracts part number, quantity, name. Merges multi-line part numbers. Aggregates duplicates.
-
-### Step 3: Sheet Splitting
-
-Each multi-sheet xlsx is converted into individual files (one sheet = one file). Empty sheets are skipped. xls files are not split.
-
-### Step 4: Comparison
-
-Three discrepancy types: only in BOM, only in cards, quantity mismatch.
-
-### Step 5: Report
-
-Text report + Excel report with color-coded discrepancies + ZIP archive.
+**Fallback (openpyxl).** If the ZIP method fails, creates a new Workbook and deep-copies cell styles.
 
 ---
 
@@ -73,7 +61,7 @@ burlak_parser/
 ├── __init__.py
 ├── main.py
 ├── bom_parser.py
-├── card_parser.py
+├── card_parser.py       # ZIP extraction, deep style copy
 ├── comparator.py
 └── report_generator.py
 ```
