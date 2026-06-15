@@ -738,6 +738,107 @@ def _format_multi_config_report(result: MultiConfigComparisonResult) -> str:
 
 # ─── Сервис ──────────────────────────────────────────────────────────────────
 
+
+@dataclass
+class IntegrityCheck:
+    """Результат проверки целостности данных сверки.
+
+    Проверяет, что каждая деталь из BOM учтена:
+    либо совпала с картами, либо зафиксирована в расхождениях.
+
+    Attributes:
+        is_ok: True если все проверки пройдены.
+        total_configs: Сколько комплектаций проверено.
+        configs_ok: Сколько комплектаций прошло проверку.
+        config_issues: Список проблем по каждой комплектации.
+        global_issue: Глобальная проблема (если есть).
+        details_by_config: Детали по каждой комплектации.
+    """
+    is_ok: bool = True
+    total_configs: int = 0
+    configs_ok: int = 0
+    config_issues: List[str] = field(default_factory=list)
+    global_issue: str = ""
+    details_by_config: List[Dict[str, object]] = field(default_factory=list)
+
+
+def verify_integrity(result: MultiConfigComparisonResult) -> IntegrityCheck:
+    """Верификация целостности результатов сверки.
+
+    Проверяет два условия:
+      1. Для каждой комплектации:
+         matched_parts + ONLY_IN_BOM + QUANTITY_MISMATCH + FUZZY_MATCH == total_bom_parts
+         (ONLY_IN_CARDS не входит, т.к. это детали из карт, отсутствующие в BOM)
+      2. Глобально: сумма всех типов расхождений == общее количество расхождений
+
+    Args:
+        result: Результат мульти-конфигурационной сверки.
+
+    Returns:
+        IntegrityCheck с результатами всех проверок.
+    """
+    total_discrepancies = len(result.all_discrepancies)
+    configs_ok = 0
+    config_issues: List[str] = []
+    details_by_config: List[Dict[str, object]] = []
+
+    # Проверка 1: по каждой комплектации
+    for cr in result.config_results:
+        only_bom_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
+        qty_mismatch_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
+        fuzzy_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
+        accounted_bom = cr.matched_parts + only_bom_count + qty_mismatch_count + fuzzy_count
+        expected = cr.total_bom_parts
+
+        config_ok = (accounted_bom == expected)
+        if config_ok:
+            configs_ok += 1
+        else:
+            diff = accounted_bom - expected
+            issue = (
+                f"{cr.config_name[:50]}: учтено {accounted_bom}, "
+                f"ожидалось {expected} (diff={diff})"
+            )
+            config_issues.append(issue)
+
+        details_by_config.append({
+            "config_name": cr.config_name,
+            "is_ok": config_ok,
+            "total_bom_parts": expected,
+            "accounted": accounted_bom,
+            "diff": accounted_bom - expected,
+            "matched": cr.matched_parts,
+            "only_in_bom": only_bom_count,
+            "qty_mismatch": qty_mismatch_count,
+            "fuzzy_match": fuzzy_count,
+        })
+
+    # Проверка 2: глобальная — сумма типов == общее количество
+    qty_m = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
+    only_b = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
+    only_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS)
+    fuzzy_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
+    sum_check = qty_m + only_b + only_c + fuzzy_c
+
+    global_issue = ""
+    if sum_check != total_discrepancies:
+        global_issue = (
+            f"Сумма типов расхождений ({sum_check}) "
+            f"не равна общему количеству ({total_discrepancies})"
+        )
+
+    is_ok = (len(config_issues) == 0 and global_issue == "")
+
+    return IntegrityCheck(
+        is_ok=is_ok,
+        total_configs=len(result.config_results),
+        configs_ok=configs_ok,
+        config_issues=config_issues,
+        global_issue=global_issue,
+        details_by_config=details_by_config,
+    )
+
+
 class MatchingEngine:
     """Сервис сверки BOM и операционных карт.
 

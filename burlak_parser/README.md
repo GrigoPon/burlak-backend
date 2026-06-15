@@ -2,7 +2,9 @@
 
 Система разбора ведомостей материалов (BOM) и сверки с операционными картами сборки для автомобильного производства.
 
-Сохранение оригинального формата номера детали (с дефисами) в результатах сверки. Детальная статистика разделения листов. Верификация целостности результатов. Расширенный набор тестов с conftest.py и автоматической очисткой временных файлов.
+Загрузка данных из байтового потока (load_from_bytes) и асинхронная загрузка (load_async) для интеграции с HTTP-серверами. Детальная статистика разделения (SplitStatistics) с причинами пропуска листов. Функция verify_integrity() для верификации целостности результатов. Context manager для сервисов.
+
+Обработка всех комплектаций за один запуск, эвристическое определение колонок на трёх языках, безопасное нечёткое сравнение номеров, ZIP-разделение с полным сохранением форматирования.
 
 ---
 
@@ -35,60 +37,77 @@ python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [OPTIONS]
 
 ### Параметры
 
-| Параметр | Описание |
-|----------|----------|
-| `--bom` | Путь к BOM-файлу (.xlsx) |
-| `--cards` | Папка/ZIP с операционными картами |
-| `--output` | Директория результатов |
-| `--single-config` | Режим одной комплектации |
-| `--config` | Название комплектации |
-| `--no-split` | Не разделять карты |
-| `--no-fuzzy` | Отключить нечёткое сравнение |
-| `--workers` | Количество процессов |
-| `--verbose` | Подробный лог |
+| Параметр | Кратко | Описание |
+|----------|--------|----------|
+| `--bom` | `-b` | Путь к BOM-файлу (.xlsx) |
+| `--cards` | `-c` | Папка/ZIP с операционными картами |
+| `--output` | `-o` | Директория результатов (default: `./output`) |
+| `--single-config` | `-s` | Режим одной комплектации |
+| `--config` | `-k` | Название комплектации (для --single-config) |
+| `--no-split` | | Не разделять карты |
+| `--no-fuzzy` | | Отключить нечёткое сравнение |
+| `--workers` | `-w` | Количество процессов (default: auto) |
+| `--split-stats` | `-S` | Детальная статистика разделения |
+| `--verbose` | `-v` | Подробный лог (debug) |
+
+### Режимы
+
+- **По умолчанию** — обработка всех комплектаций одновременно
+- `--single-config` — только одна комплектация
+
+### Вывод
+
+1. `report.txt` — текстовый отчёт
+2. `discrepancies.xlsx` — 4 листа: сводка, по комплектациям, расхождения, fuzzy matches
+3. `split_cards/` — разделённые однолистовые файлы
+4. `split_cards.zip` — архив
 
 ---
 
-## Оригинальный формат номера
+## In-memory API
 
-`CardsData.original_part_numbers` отслеживает оригинальный формат номера детали (с дефисами) и его нормализованную версию. Все типы расхождений используют оригинальный номер из BOM — `1234-56-78` остаётся в отчёте как есть, не превращаясь в `12345678`.
+Сервисы поддерживают загрузку из байтового потока без сохранения на диск:
 
-## Статистика разделения
+```python
+from burlak_parser.bom_parser import BOMService
+from burlak_parser.card_parser import CardService
 
-После разделения файлов выводится статистика:
-- Количество операционных карт, разбивка по форматам (xlsx/xls)
-- Среднее количество листов на файл
-- Количество служебных файлов (пропущено)
+# Синхронная загрузка
+service = BOMService()
+data = service.load_from_bytes(bom_bytes)
 
-## Верификация целостности
+# Асинхронная загрузка
+data = await service.load_async(bom_bytes)
 
-После сверки выполняется проверка:
+# Context manager
+async with CardService() as service:
+    data = await service.load_async(cards_bytes)
+    # cleanup() вызывается автоматически
+```
+
+## SplitStatistics
+
+`CardSplitter.split_many_parallel()` возвращает кортеж `(files, errors)`. Каждый файл сопровождается структурой `FileSplitStats`:
+- Количество листов, разделено, пропущено
+- Причины пропуска (template, empty, service)
+- Размер файла, формат
+
+`SplitStatistics` агрегирует данные: топ причин пропусков, топ файлов по количеству пропусков.
+
+## verify_integrity()
+
+Проверяет целостность результатов сверки:
 - Каждая деталь из BOM имеет запись в результатах
 - Суммы количества сходятся
 - Нет дублирующихся записей
 
-## Нормализация путей в splitter
+Возвращает `IntegrityCheck` со статусом passed/failed.
 
-`_collect_related_files()` нормализует абсолютные пути (`/xl/...`) и относительные пути в ZIP-архиве для корректного сбора связанных файлов (sharedStrings, styles, drawings).
+## Особенности
 
----
-
-## Тесты
-
-```
-tests/
-├── __init__.py
-├── conftest.py           # Автоочистка временных файлов
-├── test_bom_parser.py
-├── test_card_parser.py
-├── test_comparator.py
-├── test_fuzzy_matcher.py
-├── test_heuristic_analyzer.py
-├── test_file_classifier.py
-├── test_main.py
-├── test_report_generator.py
-└── test_splitter.py      # 12 тестовых классов
-```
+- Шаблонные листы с данными обрабатываются (не пропускаются)
+- Служебные файлы не разделяются
+- Оригинальный формат номера детали (с дефисами) сохраняется в отчёте
 
 ---
 
@@ -97,13 +116,25 @@ tests/
 ```
 burlak_parser/
 ├── __init__.py
-├── main.py
-├── bom_parser.py
-├── card_parser.py         # Оригинальные номера
-├── file_classifier.py
-├── fuzzy_matcher.py
-├── splitter.py            # Статистика разделения
-├── comparator.py          # Оригинальные номера в расхождениях
-├── report_generator.py
-└── heuristic_analyzer.py
+├── main.py                 # CLI, --split-stats
+├── bom_parser.py           # BOMService, load_from_bytes, load_async
+├── card_parser.py          # CardService, load_from_bytes, load_async
+├── file_classifier.py      # FileClassifier
+├── fuzzy_matcher.py        # FuzzyMatcher
+├── splitter.py             # CardSplitter, SplitStatistics
+├── comparator.py           # MatchingEngine
+├── report_generator.py     # Reporter
+└── heuristic_analyzer.py   # HeuristicAnalyzer
+tests/
+├── __init__.py
+├── conftest.py
+├── test_bom_parser.py
+├── test_card_parser.py
+├── test_comparator.py
+├── test_fuzzy_matcher.py
+├── test_heuristic_analyzer.py
+├── test_file_classifier.py
+├── test_main.py
+├── test_report_generator.py
+└── test_splitter.py
 ```

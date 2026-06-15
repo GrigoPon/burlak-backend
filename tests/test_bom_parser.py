@@ -38,6 +38,15 @@ from burlak_parser.bom_parser import (
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
 
+def _safe_remove(path: str) -> None:
+    """Безопасно удалить файл."""
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _save_workbook(wb: Workbook, file_path: str) -> str:
     """Сохранить Workbook во временный .xlsx файл и вернуть путь."""
     wb.save(file_path)
@@ -435,7 +444,7 @@ class TestParseBomServiceSheets:
 
 class TestParseBomEmptySheet:
     @pytest.fixture
-    def empty_sheet_xlsx(self) -> str:
+    def empty_sheet_xlsx(self, tmp_path) -> str:
         wb = Workbook()
         ws1 = wb.active
         ws1.title = "Main"
@@ -446,8 +455,7 @@ class TestParseBomEmptySheet:
 
         ws2 = wb.create_sheet(title="EmptySheet")
         # No data at all
-        path = os.path.join(tempfile.mkdtemp(dir="/home/rpaup/projects/burlak"), "empty_test.xlsx")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        path = os.path.join(str(tmp_path), "empty_test.xlsx")
         wb.save(path)
         return path
 
@@ -1173,6 +1181,99 @@ class TestBOMServiceExtended:
         svc = BOMService()
         with pytest.raises(RuntimeError, match="не загружен"):
             svc.get_all_configs()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  19b. BOMService — load_from_bytes, cleanup, context manager, async
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBOMServiceServer:
+    """Тесты серверной функциональности BOMService:
+      - load_from_bytes (in-memory upload)
+      - cleanup (автоудаление temp-файлов)
+      - context manager (with)
+      - async (load_async)
+    """
+
+    @pytest.fixture
+    def bom_bytes(self) -> bytes:
+        """Создать BOM-файл в памяти, вернуть байты."""
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "BOM"
+            ws.cell(row=1, column=1, value="序号")
+            ws.cell(row=1, column=2, value="零部件件号")
+            ws.cell(row=1, column=3, value="零件名称")
+            ws.cell(row=1, column=4, value="Config1")
+            ws.cell(row=1, column=5, value="Config2")
+            ws.cell(row=2, column=1, value="1")
+            ws.cell(row=2, column=2, value="P001")
+            ws.cell(row=2, column=3, value="Part1")
+            ws.cell(row=2, column=4, value="1")
+            ws.cell(row=2, column=5, value="2")
+            ws.cell(row=3, column=1, value="2")
+            ws.cell(row=3, column=2, value="P002")
+            ws.cell(row=3, column=3, value="Part2")
+            ws.cell(row=3, column=4, value="1")
+            ws.cell(row=3, column=5, value="1")
+            ws.cell(row=4, column=1, value="3")
+            ws.cell(row=4, column=2, value="P003")
+            ws.cell(row=4, column=3, value="Part3")
+            ws.cell(row=4, column=4, value="2")
+            ws.cell(row=4, column=5, value="0")
+            wb.save(path)
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            _safe_remove(path)
+
+    def test_load_from_bytes(self, bom_bytes: bytes):
+        """Загрузка BOM из байтов (in-memory upload)."""
+        svc = BOMService()
+        bom = svc.load_from_bytes(bom_bytes, filename="uploaded_bom.xlsx")
+        assert svc.is_loaded
+        assert len(bom.parts) == 3
+        assert "P001" in bom.parts
+        assert len(bom.config_names) == 2
+
+    def test_cleanup_removes_temp_files(self, bom_bytes: bytes):
+        """cleanup() удаляет созданные temp-файлы."""
+        svc = BOMService()
+        svc.load_from_bytes(bom_bytes)
+        assert len(svc._temp_paths) == 1
+        temp_path = svc._temp_paths[0]
+        assert os.path.isfile(temp_path), "Temp file should exist before cleanup"
+        svc.cleanup()
+        assert not os.path.isfile(temp_path), "Temp file should be removed after cleanup"
+        assert len(svc._temp_paths) == 0, "Temp paths list should be cleared"
+
+    def test_context_manager_cleans_up(self, bom_bytes: bytes):
+        """Выход из with-блока вызывает cleanup."""
+        with BOMService() as svc:
+            svc.load_from_bytes(bom_bytes)
+            assert len(svc._temp_paths) == 1
+            temp_path = svc._temp_paths[0]
+            assert os.path.isfile(temp_path)
+        # После выхода из with — файл должен быть удалён
+        assert not os.path.isfile(temp_path), "Temp file should be removed after context exit"
+
+    def test_load_async(self, bom_bytes: bytes):
+        """Асинхронная загрузка BOM из байтов."""
+        import asyncio
+
+        async def run():
+            svc = BOMService()
+            bom = await svc.load_async(bom_bytes, filename="async_bom.xlsx")
+            return svc, bom
+
+        svc, bom = asyncio.run(run())
+        assert svc.is_loaded
+        assert len(bom.parts) == 3
+        assert "P001" in bom.parts
+        svc.cleanup()
 
 
 # ═══════════════════════════════════════════════════════════════════════

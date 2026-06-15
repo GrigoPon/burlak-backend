@@ -64,7 +64,6 @@ class TestFileClassification:
         assert fc.parent_folder == "to"
         assert fc.is_operational_card is True
         assert fc.is_service_file is False
-        assert fc.is_final_check is False
         assert fc.should_split is True
         assert fc.should_parse_parts is True
         assert fc.operation_number == "A001"
@@ -183,12 +182,10 @@ class TestClassifyServiceFile:
         assert fc.is_service_file is True
 
     def test_chinese_empty_template(self):
-        """空表 -> service file, template (should NOT split even in CP7/CP8)."""
+        """空表 -> service file, template — не разделяется."""
         fc = classify_file("空表.xlsx")
         assert fc.is_service_file is True
         assert fc.should_parse_parts is False
-        # Not in CP7/CP8, so should_split is False
-        # (template=True but is_final_check=False → should_split=False)
         assert fc.should_split is False
 
     def test_chinese_fill_template(self):
@@ -244,55 +241,7 @@ class TestClassifyServiceFile:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  4. classify_file — CP7/CP8 folders
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestClassifyFinalCheck:
-    def test_cp7_file_splits_but_not_parsed(self):
-        """File in CP7 folder -> split but NOT parse (no card number)."""
-        fc = classify_file("/path/CP7/check_file.xlsx")
-        assert fc.is_operational_card is False
-        assert fc.is_final_check is True
-        assert fc.should_parse_parts is False
-        assert fc.should_split is True  # split even without parsing
-
-    def test_cp8_file_splits(self):
-        """File in CP8 folder -> split but not parse."""
-        fc = classify_file("/path/CP8/flash_file.xlsx")
-        assert fc.is_final_check is True
-        assert fc.should_split is True
-        assert fc.should_parse_parts is False
-
-    def test_cp7_template_not_split(self):
-        """Template (空表) in CP7 -> NOT split (template overrides)."""
-        fc = classify_file("/path/CP7/空表.xlsx")
-        assert fc.is_final_check is True
-        assert fc.is_service_file is True
-        assert fc.should_split is False  # template → no split
-        assert fc.should_parse_parts is False
-
-    def test_cp7_fill_form_not_split(self):
-        """范本 in CP7 -> NOT split."""
-        fc = classify_file("/path/CP7/填写范本.xlsx")
-        assert fc.is_final_check is True
-        assert fc.should_split is False
-
-    def test_cp7_with_instruction_not_split(self):
-        """填写说明 in CP7 -> NOT split."""
-        fc = classify_file("/path/CP7/填写说明.xlsx")
-        assert fc.is_final_check is True
-        assert fc.should_split is False
-
-    def test_cp7_with_card_number_parsed(self):
-        """File with operation number in CP7 -> operational card, parsed."""
-        fc = classify_file("/path/CP7/038-проверка.xlsx")
-        assert fc.is_operational_card is True
-        assert fc.should_parse_parts is True
-        assert fc.should_split is True
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  5. classify_file — heuristic (extract_card_number_from_filepath)
+#  4. classify_file — heuristic (extract_card_number_from_filepath)
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestClassifyHeuristic:
@@ -539,9 +488,9 @@ class TestFilterFunctions:
     def test_get_parseable_files(self):
         """Filter classifications for parseable files."""
         classifications = [
-            FileClassification("op1.xlsx", "op1", ".", True, False, False, True, True),
-            FileClassification("service.xlsx", "service", ".", False, True, False, False, False),
-            FileClassification("op2.xlsx", "op2", ".", True, False, False, True, True),
+            FileClassification("op1.xlsx", "op1", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
+            FileClassification("service.xlsx", "service", ".", is_operational_card=False, is_service_file=True, should_split=False, should_parse_parts=False),
+            FileClassification("op2.xlsx", "op2", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
         ]
         parseable = get_parseable_files(classifications)
         assert parseable == ["op1.xlsx", "op2.xlsx"]
@@ -553,19 +502,19 @@ class TestFilterFunctions:
     def test_get_splittable_files(self):
         """Filter classifications for splittable files."""
         classifications = [
-            FileClassification("op.xlsx", "op", ".", True, False, False, True, True),
-            FileClassification("service.xlsx", "service", ".", False, True, False, False, False),
-            FileClassification("cp8.xlsx", "cp8", ".", False, False, True, True, False),
+            FileClassification("op.xlsx", "op", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
+            FileClassification("service.xlsx", "service", ".", is_operational_card=False, is_service_file=True, should_split=False, should_parse_parts=False),
+            FileClassification("unknown.xlsx", "unknown", ".", is_operational_card=False, is_service_file=False, should_split=True, should_parse_parts=False),
         ]
         splittable = get_splittable_files(classifications)
         assert len(splittable) == 2
         assert splittable[0].file_path == "op.xlsx"
-        assert splittable[1].file_path == "cp8.xlsx"
+        assert splittable[1].file_path == "unknown.xlsx"
 
     def test_get_splittable_files_returns_classifications(self):
         """get_splittable_files returns FileClassification objects, not paths."""
         classifications = [
-            FileClassification("op.xlsx", "op", ".", True, False, False, True, True),
+            FileClassification("op.xlsx", "op", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
         ]
         result = get_splittable_files(classifications)
         assert isinstance(result[0], FileClassification)

@@ -322,7 +322,9 @@ def generate_discrepancy_report(
         ws_bom.autofilter(0, 0, len(sorted_parts), len(bom_headers) - 1)
 
         for ri, (pn, part) in enumerate(sorted_parts, 1):
-            ws_bom.write(ri, 0, pn, cell_fmt)
+            # Используем оригинальный формат номера из BOM (с тире и т.д.)
+            original_no = part.part_number if part.part_number else pn
+            ws_bom.write(ri, 0, original_no, cell_fmt)
             ws_bom.write(ri, 1, part.name_cn, cell_fmt)
             ws_bom.write(ri, 2, part.name_en, cell_fmt)
             for ci, cn in enumerate(bom.config_names[:MAX_CONFIGS_IN_MATRIX], 3):
@@ -419,7 +421,9 @@ def generate_legacy_report(
             ws_bom.set_column(ci, ci, w)
             ws_bom.write(0, ci, h, header_fmt)
         for ri, (pn, part) in enumerate(sorted(bom_parts.items()), 1):
-            ws_bom.write(ri, 0, pn, cell_fmt)
+            # Используем оригинальный формат номера из BOM (с тире и т.д.)
+            original_no = part.part_number if part.part_number else pn
+            ws_bom.write(ri, 0, original_no, cell_fmt)
             ws_bom.write(ri, 1, part.name_cn, cell_fmt)
             ws_bom.write(ri, 2, part.name_en, cell_fmt)
             ws_bom.write(ri, 3, part.quantity, cell_num_fmt)

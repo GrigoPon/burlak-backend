@@ -38,10 +38,12 @@ from burlak_parser.card_parser import (
 from burlak_parser.comparator import (
     Discrepancy,
     DiscrepancyType,
+    IntegrityCheck,
     MatchingEngine,
     MultiConfigComparisonResult,
     compare_all_configs,
     compare_single_config,
+    verify_integrity,
 )
 from burlak_parser.fuzzy_matcher import FuzzyMatcher
 from burlak_parser.report_generator import (
@@ -138,6 +140,7 @@ def run_pipeline(
     use_fuzzy: bool = True,
     single_config: bool = False,
     max_workers: Optional[int] = None,
+    show_split_stats: bool = False,
 ) -> None:
     """Запустить полный конвейер обработки.
 
@@ -150,6 +153,7 @@ def run_pipeline(
         use_fuzzy: Использовать нечеткое сравнение.
         single_config: Только одна комплектация (старый режим).
         max_workers: Количество процессов для параллелизации.
+        show_split_stats: Показывать детальную статистику split.
     """
     start_time = time.time()
 
@@ -224,22 +228,46 @@ def run_pipeline(
             cards, split_dir, max_workers=max_workers,
         )
 
-        # Детальная статистика split
-        operational_count = cards.total_cards_processed - cards.service_files_skipped
-        xlsx_count = sum(1 for r in cards.card_results if not r.is_service_file and r.file_path.lower().endswith('.xlsx'))
-        xls_count = sum(1 for r in cards.card_results if not r.is_service_file and r.file_path.lower().endswith('.xls'))
-        corrupted_split = len(cards.corrupted_files) if cards.corrupted_files else 0
+        # ── Статистика split ──
+        split_stats = cards.split_stats
 
         print(f"   Создано отдельных файлов: {len(created_files)}")
-        print(f"   Статистика:")
-        print(f"     - Операционных карт (всего): {operational_count}")
-        print(f"     - .xlsx файлов (разделяемых): {xlsx_count}")
-        print(f"     - .xls файлов (не разделяются): {xls_count}")
-        print(f"     - Повреждённых при разделении: {corrupted_split}")
-        if xlsx_count > 0:
-            print(f"     - Среднее листов на файл: {len(created_files)/max(xlsx_count,1):.1f}")
+        print(f"   .xlsx файлов: {split_stats.total_xlsx}")
+        print(f"   .xls файлов (не разделяются): {split_stats.total_xls}")
+        print(f"   Повреждённых при split: {split_stats.total_errors}")
 
-        print("\U0001f4e6 Создание ZIP-архива...")
+        if show_split_stats and split_stats is not None:
+            # ── Детальная статистика split ──
+            print(f"\n   📊 Детальная статистика split:")
+            print(f"     - Всего файлов в картах: {len(cards.card_results)}")
+            print(f"     - Служебных файлов (пропущено): {split_stats.total_service_files}")
+            print(f"     - Всего листов: {split_stats.total_sheets_all}")
+            print(f"       ├ Разделено: {split_stats.total_sheets_split}")
+            print(f"       └ Пропущено: {split_stats.total_sheets_skipped}")
+
+            # Причины пропуска листов
+            if split_stats.total_sheets_skipped > 0:
+                print(f"\n   🔍 Причины пропуска листов:")
+                for reason, count in split_stats.get_top_skip_reasons():
+                    print(f"     - {reason}: {count}")
+
+            # Топ файлов по пропускам
+            top_skips = split_stats.get_files_with_most_skips(5)
+            if top_skips:
+                print(f"\n   📁 Файлы с наибольшим числом пропущенных листов:")
+                for fname, total, skipped in top_skips:
+                    print(f"     - {fname[:55]:55s} всего={total} пропущено={skipped}")
+
+            # Файлы с ошибками
+            error_files = [fs for fs in split_stats.file_stats if fs.has_error]
+            if error_files:
+                print(f"\n   ❌ Файлы с ошибками ({len(error_files)}):")
+                for fs in error_files[:5]:
+                    print(f"     - {fs.file_name[:55]}: {fs.error_message[:80]}")
+                if len(error_files) > 5:
+                    print(f"     ... и ещё {len(error_files) - 5}")
+
+        print(f"\n\U0001f4e6 Создание ZIP-архива...")
         zip_path = os.path.join(output_dir, "split_cards.zip")
         create_split_cards_archive(split_dir, zip_path)
         print()
@@ -300,39 +328,17 @@ def run_pipeline(
     # ── Верификация целостности ──
     print(f"\n\U0001f50d Верификация целостности:")
     print(f"{'\u2500' * 60}")
-    integrity_ok = True
-    total_discrepancies = len(result.all_discrepancies)
-    configs_ok = 0
-    for cr in result.config_results:
-        # ONLY_IN_CARDS не входят в BOM — учитываем только BOM-расхождения
-        only_bom_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
-        qty_mismatch_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
-        fuzzy_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
-        accounted_bom = cr.matched_parts + only_bom_count + qty_mismatch_count + fuzzy_count
-        expected = cr.total_bom_parts
-        if accounted_bom != expected:
-            logger.warning(
-                "Нарушение целостности: %s: учтено %d, ожидалось %d (diff=%d)",
-                cr.config_name[:50], accounted_bom, expected, accounted_bom - expected,
-            )
-            integrity_ok = False
-        else:
-            configs_ok += 1
 
-    # Проверка: сумма расхождений по типам должна равняться общему количеству
-    qty_m = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
-    only_b = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
-    only_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS)
-    fuzzy_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
-    sum_check = qty_m + only_b + only_c + fuzzy_c
-    if sum_check != total_discrepancies:
-        logger.warning("Нарушение целостности: сумма типов (%d) != общее (%d)", sum_check, total_discrepancies)
-        integrity_ok = False
+    integrity = verify_integrity(result)
 
-    if integrity_ok:
-        print(f"  \u2705 {configs_ok}/{result.total_configs} конфигураций: matched + discrepancies = total_bom_parts")
+    if integrity.is_ok:
+        print(f"  \u2705 {integrity.configs_ok}/{integrity.total_configs} конфигураций: matched + discrepancies = total_bom_parts")
         print(f"  \u2705 Сумма типов расхождений совпадает с общим количеством")
     else:
+        for issue in integrity.config_issues:
+            logger.warning("Нарушение целостности: %s", issue)
+        if integrity.global_issue:
+            logger.warning("Нарушение целостности: %s", integrity.global_issue)
         print(f"  \u26a0\ufe0f  Обнаружены нарушения целостности (см. лог)")
     print()
 
@@ -378,6 +384,12 @@ def main() -> None:
 
   # С указанием количества процессов
   python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --workers 8
+
+  # Детальная статистика split (причины пропуска листов, топ файлов)
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --split-stats
+
+  # Без разделения многолистовых файлов
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --no-split
         """,
     )
 
@@ -427,6 +439,11 @@ def main() -> None:
         action="store_true",
         help="Подробный вывод (debug)",
     )
+    parser.add_argument(
+        "--split-stats", "-S",
+        action="store_true",
+        help="Показать детальную статистику разделения файлов (топ причин, пропуски, ошибки)",
+    )
 
     args = parser.parse_args()
 
@@ -449,6 +466,7 @@ def main() -> None:
             use_fuzzy=not args.no_fuzzy,
             single_config=args.single_config,
             max_workers=args.workers,
+            show_split_stats=args.split_stats,
         )
     except KeyboardInterrupt:
         print("\n\n\u26a0\ufe0f  Прервано пользователем.")

@@ -33,6 +33,10 @@ from burlak_parser.card_parser import (
     CardSheetInfo,
     ExcelReader,
     ExcelSheet,
+    FileSplitStats,
+    SKIP_REASON_NO_DATA,
+    SKIP_REASON_TEMPLATE,
+    SplitStatistics,
     TEMPLATE_SHEET_KEYWORDS,
     _check_sheet_has_data,
     _collect_all_tables,
@@ -330,9 +334,9 @@ class TestCollectAllTablesEdgeCoverage:
 class TestFindExcelFilesAutoExtract:
     """_find_excel_files с ZIP без extract_dir → auto tempdir (line 608)."""
 
-    def test_zip_without_extract_dir(self):
+    def test_zip_without_extract_dir(self, tmp_path):
         """extract_dir is None → tempfile.mkdtemp."""
-        tmpdir = tempfile.mkdtemp(prefix="find_autoextract_")
+        tmpdir = str(tmp_path)
         try:
             xlsx = os.path.join(tmpdir, "card.xlsx")
             _touch_excel(xlsx)
@@ -354,9 +358,9 @@ class TestFindExcelFilesAutoExtract:
 class TestWalkExtractedDirNestedZipError:
     """_walk_extracted_dir: ошибка распаковки вложенного ZIP (строки 666-667)."""
 
-    def test_corrupt_nested_zip_handled(self):
+    def test_corrupt_nested_zip_handled(self, tmp_path):
         """Повреждённый вложенный ZIP → except ловит ошибку."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_corrupt_")
+        tmpdir = str(tmp_path)
         try:
             # Создаём невалидный ZIP (просто текстовый файл с расширением .zip)
             bad_zip = os.path.join(tmpdir, "bad.zip")
@@ -406,14 +410,14 @@ class TestSafeRemoveException:
 class TestParseCardsErrors:
     """parse_cards: ошибки в параллельном парсинге и обработка служебных файлов."""
 
-    def test_parallel_parsing_valid(self):
+    def test_parallel_parsing_valid(self, tmp_path):
         """Параллельный парсинг валидных файлов.
 
         Заменяет test_parallel_parsing_error (строки 776-780 — except блок
         в параллельном ProcessPoolExecutor, который невозможно покрыть
         без monkeypatch, т.к. локальные функции не pickled-ятся).
         """
-        tmpdir = tempfile.mkdtemp(prefix="parse_par_val_")
+        tmpdir = str(tmp_path)
         try:
             for fn in ["001-card.xlsx", "002-card.xlsx"]:
                 fp = os.path.join(tmpdir, fn)
@@ -433,9 +437,9 @@ class TestParseCardsErrors:
         finally:
             _rmtree(tmpdir)
 
-    def test_service_files_parsed(self):
+    def test_service_files_parsed(self, tmp_path):
         """Служебные файлы обрабатываются через parse_cards (блок 806-816)."""
-        tmpdir = tempfile.mkdtemp(prefix="parse_svc_")
+        tmpdir = str(tmp_path)
         try:
             svc_path = os.path.join(tmpdir, "template.xlsx")
             wb = Workbook()
@@ -458,21 +462,20 @@ class TestParseCardsErrors:
         finally:
             _rmtree(tmpdir)
 
-    def test_service_file_error_handling(self, monkeypatch):
+    def test_service_file_error_handling(self, monkeypatch, tmp_path):
         """Ошибка при обработке служебного файла → except (строки 815-816)."""
         # Мокаем parse_card_file для служебных файлов
-        # ВАЖНО: имена параметров должны совпадать с parse_card_file(file_path, is_service_file, is_final_check)
         original_parse = parse_card_file
-        def mock_parse(fp, is_service_file=False, is_final_check=False):
+        def mock_parse(fp, is_service_file=False):
             if is_service_file:
                 raise ValueError("Mock service file error")
-            return original_parse(fp, is_service_file, is_final_check)
+            return original_parse(fp, is_service_file=is_service_file)
         monkeypatch.setattr(
             "burlak_parser.card_parser.parse_card_file",
             mock_parse,
         )
 
-        tmpdir = tempfile.mkdtemp(prefix="parse_svc_err_")
+        tmpdir = str(tmp_path)
         try:
             svc_path = os.path.join(tmpdir, "template.xlsx")
             wb = Workbook()
@@ -501,22 +504,21 @@ class TestParseCardsErrors:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSplitCardsToFiles:
-    """split_cards_to_files — все ветки (строки 938-990).
+    """split_cards_to_files — все ветки.
 
     Покрывает:
-      - 938: non-.xlsx skip
-      - 941: is_final_check skip
-      - 944: is_service_file skip
-      - 949: template sheet keyword skip
-      - 954-955: split_all_non_empty=False branch
-      - 966: empty tasks → return []
-      - 973-974: parallel split path
-      - 980-982: split error handling
-      - 985: corrupted warning
-      - 990: corrupted_files = None → list()
+      - non-.xlsx skip
+      - is_service_file skip
+      - template sheet keyword skip
+      - split_all_non_empty=False branch
+      - empty tasks → return []
+      - parallel split path
+      - split error handling
+      - corrupted warning
+      - corrupted_files = None → list()
     """
 
-    def test_skips_non_xlsx(self):
+    def test_skips_non_xlsx(self, tmp_path):
         """Файл не .xlsx → continue (line 938)."""
         result = CardParseResult(
             card_number="C001",
@@ -526,67 +528,53 @@ class TestSplitCardsToFiles:
             aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
             assert files == [], "Non-.xlsx should be skipped, no tasks"
         finally:
             _rmtree(tmpdir)
 
-    def test_skips_final_check(self):
-        """is_final_check=True → continue (line 941)."""
+    def test_skips_all_service_files(self, tmp_path):
+        """is_service_file=True → все служебные файлы пропускаются."""
         result = CardParseResult(
             card_number="C002",
             file_path="test.xlsx",
-            sheets=[],
-            parts=[],
-            aggregated_parts={},
-            is_final_check=True,
-        )
-        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
-        try:
-            files = split_cards_to_files(cd, tmpdir, max_workers=1)
-            assert files == [], "Final check files should be skipped"
-        finally:
-            _rmtree(tmpdir)
-
-    def test_skips_service_file(self):
-        """is_service_file=True → continue (line 944)."""
-        result = CardParseResult(
-            card_number="C003",
-            file_path="test.xlsx",
-            sheets=[],
+            sheets=[CardSheetInfo("C002", "Sheet1", has_data=True)],
             parts=[],
             aggregated_parts={},
             is_service_file=True,
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
-            assert files == [], "Service files should be skipped"
+            assert files == [], "All service files should be skipped"
         finally:
             _rmtree(tmpdir)
 
-    def test_skips_template_sheet(self):
-        """Имя листа содержит '空表' → continue (line 949)."""
+    def test_skips_empty_template_sheet(self, tmp_path):
+        """Пустой template-лист (has_data=False) всё ещё пропускается."""
         result = CardParseResult(
             card_number="C004",
             file_path="test.xlsx",
-            sheets=[CardSheetInfo("C004", "空表_Sheet1", has_data=True)],
+            sheets=[CardSheetInfo("C004", "空表_Empty", has_data=False)],
             parts=[],
             aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
-            assert files == [], "Template sheet should be skipped"
+            assert files == [], "Empty template sheet should be skipped"
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_sheets_skipped == 1
+            assert "空表_Empty" in stats.file_stats[0].skip_reasons.get(SKIP_REASON_TEMPLATE, [])
         finally:
             _rmtree(tmpdir)
 
-    def test_split_all_non_empty_false(self, monkeypatch):
+    def test_split_all_non_empty_false(self, monkeypatch, tmp_path):
         """split_all_non_empty=False → проверяет is_valid (lines 954-955)."""
         from burlak_parser import splitter as splitter_mod
 
@@ -607,14 +595,14 @@ class TestSplitCardsToFiles:
             aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, split_all_non_empty=False, max_workers=1)
             assert len(files) == 1
         finally:
             _rmtree(tmpdir)
 
-    def test_empty_tasks_returns_empty(self):
+    def test_empty_tasks_returns_empty(self, tmp_path):
         """Все задачи отфильтрованы → tasks=[] → return [] (line 966)."""
         # Все файлы .xls (не .xlsx) → continue → tasks = []
         result = CardParseResult(
@@ -625,20 +613,20 @@ class TestSplitCardsToFiles:
             aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
             assert files == []
         finally:
             _rmtree(tmpdir)
 
-    def test_parallel_split_path(self, monkeypatch):
-        """workers > 1 и tasks > 1 → parallel path (lines 973-974)."""
+    def test_parallel_split_path(self, monkeypatch, tmp_path):
+        """workers > 1 и tasks > 1 → parallel path."""
         from burlak_parser import splitter as splitter_mod
 
         class MockSplitter:
             def split_many_parallel(self, tasks):
-                return ["out1.xlsx", "out2.xlsx"]
+                return (["out1.xlsx", "out2.xlsx"], [])
 
         monkeypatch.setattr(
             splitter_mod, "CardSplitter",
@@ -657,14 +645,14 @@ class TestSplitCardsToFiles:
             parts=[], aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[r1, r2])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=2)
             assert len(files) == 2
         finally:
             _rmtree(tmpdir)
 
-    def test_split_error_handling(self, monkeypatch):
+    def test_split_error_handling(self, monkeypatch, tmp_path):
         """split_file бросает исключение → except (lines 980-982)."""
         from burlak_parser import splitter as splitter_mod
 
@@ -683,7 +671,7 @@ class TestSplitCardsToFiles:
             parts=[], aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             # Ошибка должна быть залогирована, функция не падает
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
@@ -693,7 +681,7 @@ class TestSplitCardsToFiles:
         finally:
             _rmtree(tmpdir)
 
-    def test_corrupted_files_none_case(self, monkeypatch):
+    def test_corrupted_files_none_case(self, monkeypatch, tmp_path):
         """cards_data.corrupted_files is None → else branch (line 990)."""
         from burlak_parser import splitter as splitter_mod
 
@@ -714,7 +702,7 @@ class TestSplitCardsToFiles:
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         assert cd.corrupted_files is None, "Default should be None"
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
             assert files == []
@@ -809,7 +797,6 @@ class TestCardParseResult:
         )
         assert result.card_number == "C001"
         assert result.is_service_file is False
-        assert result.is_final_check is False
         assert result.parts == []
 
     def test_with_parts(self):
@@ -824,11 +811,9 @@ class TestCardParseResult:
             parts=parts,
             aggregated_parts={"P001": 1.0, "P002": 2.0},
             is_service_file=True,
-            is_final_check=True,
-        )
+            )
         assert len(result.parts) == 2
-        assert result.is_service_file is True
-        assert result.is_final_check is True
+        assert result.is_service_file is True is True
 
 
 class TestCardsData:
@@ -1837,6 +1822,164 @@ class TestCardService:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  10b. CardService — load_from_bytes, cleanup, context manager, async
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCardServiceServer:
+    """Тесты серверной функциональности CardService:
+      - load_from_bytes (in-memory upload) для .xlsx
+      - load_from_bytes для ZIP
+      - cleanup (автоудаление temp-файлов)
+      - context manager (with)
+      - async (load_async)
+    """
+
+    @pytest.fixture
+    def dir_with_cards(self, tmp_path) -> str:
+        """Создать временную директорию с .xlsx файлами (нормальные имена).
+
+        Использует pytest tmp_path — автоочистка после теста.
+        """
+        # Создаём файл с распознаваемым именем (цифры в начале)
+        xlsx_path = os.path.join(tmp_path, "001-card.xlsx")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.cell(row=1, column=1, value="物料编码")
+        ws.cell(row=1, column=2, value="零件名称")
+        ws.cell(row=1, column=3, value="数量")
+        ws.cell(row=2, column=1, value="P001")
+        ws.cell(row=2, column=2, value="Part1")
+        ws.cell(row=2, column=3, value=2.0)
+        ws.cell(row=3, column=1, value="P002")
+        ws.cell(row=3, column=2, value="Part2")
+        ws.cell(row=3, column=3, value=1.0)
+        wb.save(xlsx_path)
+        return str(tmp_path)
+
+    @pytest.fixture
+    def zip_bytes(self, tmp_path) -> bytes:
+        """Создать ZIP с .xlsx файлами (нормальные имена), вернуть байты."""
+        xlsx_path = os.path.join(tmp_path, "001-card.xlsx")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.cell(row=1, column=1, value="物料编码")
+        ws.cell(row=1, column=2, value="数量")
+        ws.cell(row=2, column=1, value="P001")
+        ws.cell(row=2, column=2, value=2.0)
+        ws.cell(row=3, column=1, value="P002")
+        ws.cell(row=3, column=2, value=1.0)
+        wb.save(xlsx_path)
+
+        zip_path = os.path.join(tmp_path, "cards.zip")
+        import zipfile
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.write(xlsx_path, "001-card.xlsx")
+        with open(zip_path, "rb") as f:
+            return f.read()
+
+    def test_load_from_directory(self, dir_with_cards: str):
+        """Загрузка карт из директории с .xlsx файлами.
+
+        Использует load() с правильным путём — файлы с номерами операций.
+        """
+        svc = CardService(max_workers=1)
+        cards = svc.load(dir_with_cards)
+        assert svc.is_loaded
+        assert cards.total_cards_processed >= 1
+        assert "P001" in cards.all_parts
+        assert cards.all_parts["P001"] == 2.0
+        assert "P002" in cards.all_parts
+        assert cards.all_parts["P002"] == 1.0
+
+    def test_load_zip_from_bytes(self, zip_bytes: bytes):
+        """Загрузка ZIP-архива из байтов (in-memory upload).
+
+        ZIP содержит файлы с распознаваемыми именами → парсинг успешен.
+        """
+        svc = CardService(max_workers=1)
+        cards = svc.load_from_bytes(zip_bytes, filename="cards.zip")
+        assert svc.is_loaded
+        assert cards.total_cards_processed >= 1
+        assert "P001" in cards.all_parts
+        svc.cleanup()
+
+    def test_cleanup_removes_temp_files(self, zip_bytes: bytes):
+        """cleanup() удаляет созданные temp-файлы (ZIP + извлечённый файл)."""
+        svc = CardService(max_workers=1)
+        svc.load_from_bytes(zip_bytes, filename="cards.zip")
+        assert len(svc._temp_paths) >= 1
+        temp_path = svc._temp_paths[0]
+        assert os.path.isfile(temp_path)
+        svc.cleanup()
+        assert not os.path.isfile(temp_path)
+        assert len(svc._temp_paths) == 0
+
+    def test_cleanup_removes_temp_dirs(self, zip_bytes: bytes):
+        """cleanup() удаляет temp-директории, созданные для ZIP."""
+        svc = CardService(max_workers=1)
+        svc.load_from_bytes(zip_bytes, filename="cards.zip")
+        assert len(svc._temp_dirs) >= 1
+        temp_dir = svc._temp_dirs[0]
+        assert os.path.isdir(temp_dir)
+        svc.cleanup()
+        assert not os.path.isdir(temp_dir)
+        assert len(svc._temp_dirs) == 0
+
+    def test_context_manager_cleans_up(self, zip_bytes: bytes):
+        """Выход из with-блока вызывает cleanup."""
+        with CardService(max_workers=1) as svc:
+            svc.load_from_bytes(zip_bytes, filename="cards.zip")
+            temp_path = svc._temp_paths[0]
+            assert os.path.isfile(temp_path)
+        assert not os.path.isfile(temp_path)
+
+    def test_load_async(self, zip_bytes: bytes):
+        """Асинхронная загрузка ZIP из байтов."""
+        import asyncio
+
+        async def run():
+            svc = CardService(max_workers=1)
+            cards = await svc.load_async(zip_bytes, filename="async_cards.zip")
+            return svc, cards
+
+        svc, cards = asyncio.run(run())
+        assert svc.is_loaded
+        assert "P001" in cards.all_parts
+        svc.cleanup()
+
+    def test_load_from_bytes_invalid_zip(self):
+        """Загрузка невалидного ZIP — должна выбросить исключение."""
+        import zipfile
+        data = b"not a real zip file"
+        svc = CardService(max_workers=1)
+        with pytest.raises((zipfile.BadZipFile, ValueError)):
+            svc.load_from_bytes(data, filename="cards.zip")
+        svc.cleanup()
+
+    def test_load_xlsx_without_card_data(self, tmp_path):
+        """Загрузка .xlsx без распознаваемых заголовков деталей.
+
+        Файл находится, классифицируется, но деталей не содержит.
+        """
+        xlsx_path = os.path.join(tmp_path, "001-card.xlsx")
+        wb = Workbook()
+        ws = wb.active
+        ws.cell(row=1, column=1, value="A")
+        ws.cell(row=1, column=2, value="B")
+        wb.save(xlsx_path)
+        with open(xlsx_path, "rb") as f:
+            data = f.read()
+
+        svc = CardService(max_workers=1)
+        cards = svc.load_from_bytes(data, filename="001-card.xlsx")
+        assert svc.is_loaded
+        assert "P001" not in cards.all_parts
+        svc.cleanup()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  11. _find_excel_files
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1865,9 +2008,9 @@ class TestFindExcelFiles:
         finally:
             _safe_remove(path)
 
-    def test_directory_with_xlsx(self):
+    def test_directory_with_xlsx(self, tmp_path):
         """Directory containing .xlsx files should find them."""
-        tmpdir = tempfile.mkdtemp(prefix="card_dir_")
+        tmpdir = str(tmp_path)
         try:
             path1 = os.path.join(tmpdir, "card1.xlsx")
             path2 = os.path.join(tmpdir, "card2.xlsx")
@@ -1881,9 +2024,9 @@ class TestFindExcelFiles:
         finally:
             _rmtree(tmpdir)
 
-    def test_directory_with_nested_xlsx(self):
+    def test_directory_with_nested_xlsx(self, tmp_path):
         """Directory with nested .xlsx files should find all."""
-        tmpdir = tempfile.mkdtemp(prefix="card_nest_")
+        tmpdir = str(tmp_path)
         try:
             subdir = os.path.join(tmpdir, "sub")
             os.makedirs(subdir)
@@ -1899,9 +2042,9 @@ class TestFindExcelFiles:
         finally:
             _rmtree(tmpdir)
 
-    def test_directory_empty_returns_empty(self):
+    def test_directory_empty_returns_empty(self, tmp_path):
         """Empty directory returns empty list."""
-        tmpdir = tempfile.mkdtemp(prefix="card_empty_")
+        tmpdir = str(tmp_path)
         try:
             files = _find_excel_files(tmpdir)
             assert files == [], f"Expected empty for empty dir, got {len(files)}"
@@ -1918,6 +2061,164 @@ class TestTemplateSheetKeywords:
         assert "空表" in TEMPLATE_SHEET_KEYWORDS
         assert "填写范本" in TEMPLATE_SHEET_KEYWORDS
         assert "范本" in TEMPLATE_SHEET_KEYWORDS
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  35. Интеграционный тест: template-лист с данными попадает в split_cards
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestTemplateSheetSplitIntegration:
+    """Интеграционный тест: template-лист (空表) с данными включается в split_cards.
+
+    Отличие от unit-тестов: использует реальный .xlsx файл и настоящий CardSplitter
+    (не мокированный), чтобы проверить полный pipeline парсинга → split.
+    """
+
+    def test_template_sheet_with_data_included_in_split(self, tmp_path):
+        """Создаём реальный .xlsx с листом '空表' и данными → split_cards создаёт файл.
+
+        Проверяет полную цепочку:
+          1. parse_card_file корректно определяет has_data=True для '空表' листа
+          2. split_cards_to_files НЕ пропускает '空表' лист (т.к. есть данные)
+          3. В output-директории создаётся .xlsx файл для этого листа
+        """
+        tmpdir = str(tmp_path)
+        try:
+            # ── 1. Создаём реальный .xlsx файл ──
+            fd, xlsx_path = tempfile.mkstemp(suffix='.xlsx', prefix='int_template_')
+            os.close(fd)
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = '空表'  # template name
+            # Заполняем данными (как реальная T1L карта)
+            ws.cell(row=1, column=1, value='物料编码')
+            ws.cell(row=1, column=2, value='零件名称')
+            ws.cell(row=1, column=3, value='数量')
+            ws.cell(row=2, column=1, value='P001')
+            ws.cell(row=2, column=2, value='Болт')
+            ws.cell(row=2, column=3, value=2.0)
+            ws.cell(row=3, column=1, value='P002')
+            ws.cell(row=3, column=2, value='Гайка')
+            ws.cell(row=3, column=3, value=4.0)
+            wb.save(xlsx_path)
+
+            # ── 2. Парсим файл ──
+            result = parse_card_file(xlsx_path)
+            assert len(result.sheets) == 1, f"Expected 1 sheet, got {len(result.sheets)}"
+            s = result.sheets[0]
+            assert '空表' in s.sheet_name, f"Expected '空表' sheet, got {s.sheet_name}"
+            assert s.has_data, "Template sheet with real data should have has_data=True"
+            assert s.is_valid, "Template sheet with valid parts should be is_valid=True"
+            assert len(result.parts) >= 2, f"Expected at least 2 parts, got {len(result.parts)}"
+
+            # ── 3. Запускаем split_cards_to_files ──
+            output_dir = os.path.join(tmpdir, 'split_output')
+            cd = CardsData(
+                all_parts=result.aggregated_parts,
+                part_sources={
+                    pn: [(result.card_number, xlsx_path, qty)]
+                    for pn, qty in result.aggregated_parts.items()
+                },
+                card_results=[result],
+            )
+
+            created_files = split_cards_to_files(cd, output_dir, max_workers=1)
+
+            # ── 4. Проверяем что файлы созданы ──
+            assert len(created_files) > 0,                 "Template sheet with data should produce split files, got 0"
+
+            # Проверяем что созданный файл существует и читается
+            for fpath in created_files:
+                assert os.path.isfile(fpath), f"Split file not found: {fpath}"
+                # Открываем и проверяем что там есть данные
+                wb_check = openpyxl.load_workbook(fpath, data_only=True)
+                ws_check = wb_check.active
+                assert ws_check is not None
+                # Должны быть хотя бы заголовки и данные
+                assert ws_check.cell(1, 1).value is not None, f"Split file {fpath} has no headers"
+                assert ws_check.cell(2, 1).value is not None, f"Split file {fpath} has no data"
+                wb_check.close()
+
+            # ── 5. Проверяем статистику split ──
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_files_created > 0
+            assert stats.total_sheets_skipped == 0,                 f"Template sheet with data should NOT be skipped, but got {stats.total_sheets_skipped} skipped"
+
+        finally:
+            _safe_remove(xlsx_path)
+            _rmtree(tmpdir)
+
+    def test_header_only_sheet_content_still_split(self, tmp_path):
+        """Header-only sheet в '空表' листе: has_data=True → split включается, файл создаётся.
+
+        Даже один заголовок даёт has_data=True, и лист не пропускается как пустой.
+        """
+        tmpdir = str(tmp_path)
+        try:
+            fd, xlsx_path = tempfile.mkstemp(suffix='.xlsx', prefix='int_template_hdr_')
+            os.close(fd)
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = '空表'
+            ws.cell(row=1, column=1, value='Header')
+            wb.save(xlsx_path)
+
+            result = parse_card_file(xlsx_path)
+            assert result.sheets[0].has_data, "Header-only sheet should have has_data=True"
+
+            cd = CardsData(
+                all_parts={},
+                part_sources={},
+                card_results=[result],
+            )
+            output_dir = os.path.join(tmpdir, 'split_hdr')
+            created_files = split_cards_to_files(cd, output_dir, max_workers=1)
+
+            # has_data=True → лист включается в split, файл создаётся
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_files_created >= 1,                 f"Header-only template should be included, got {stats.total_files_created}"
+            assert len(created_files) >= 1
+
+        finally:
+            _safe_remove(xlsx_path)
+            _rmtree(tmpdir)
+    def test_mkdtemp_creates_in_system_temp(self):
+        """mkdtemp() без dir= создаёт временную папку в tempfile.gettempdir(), а не в CWD."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            assert os.path.isdir(tmpdir), f"mkdtemp should create a directory, got {tmpdir}"
+            abs_path = os.path.abspath(tmpdir)
+            temp_dir = os.path.abspath(tempfile.gettempdir())
+            # Путь должен начинаться с системной temp-директории
+            assert abs_path.startswith(temp_dir + os.sep), \
+                f"mkdtemp() created {abs_path}, expected under {temp_dir}"
+            # Путь НЕ должен быть в CWD
+            cwd = os.path.abspath(os.getcwd())
+            assert not abs_path.startswith(cwd + os.sep), \
+                f"mkdtemp() created {abs_path} in CWD {cwd}, expected in system temp"
+        finally:
+            _rmtree(tmpdir)
+
+    def test_mkdtemp_with_dir_creates_in_specified_dir(self):
+        """mkdtemp(dir=...) создаёт папку в указанной директории (для контраста)."""
+        custom_dir = tempfile.mkdtemp()
+        try:
+            tmpdir = tempfile.mkdtemp(dir=custom_dir)
+            try:
+                abs_path = os.path.abspath(tmpdir)
+                custom_abs = os.path.abspath(custom_dir)
+                assert abs_path.startswith(custom_abs + os.sep), \
+                    f"mkdtemp(dir=...) created {abs_path}, expected under {custom_abs}"
+            finally:
+                _rmtree(tmpdir)
+        finally:
+            _rmtree(custom_dir)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2144,9 +2445,9 @@ class TestWalkExtractedDir:
       - Дубликаты во вложенных архивах
     """
 
-    def test_skips_temp_files(self):
+    def test_skips_temp_files(self, tmp_path):
         """Файлы, начинающиеся с ~$, пропускаются."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_temp_")
+        tmpdir = str(tmp_path)
         try:
             open(os.path.join(tmpdir, "~$tempfile.xlsx"), "w").close()
             open(os.path.join(tmpdir, "normal.xlsx"), "w").close()
@@ -2157,9 +2458,9 @@ class TestWalkExtractedDir:
         finally:
             _rmtree(tmpdir)
 
-    def test_cleans_non_excel_in_temp(self):
+    def test_cleans_non_excel_in_temp(self, tmp_path):
         """В temp-директории не-Excel файлы удаляются."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_clean_")
+        tmpdir = str(tmp_path)
         try:
             junk_path = os.path.join(tmpdir, "readme.txt")
             open(junk_path, "w").close()
@@ -2175,9 +2476,9 @@ class TestWalkExtractedDir:
         finally:
             _rmtree(tmpdir)
 
-    def test_keeps_non_excel_in_non_temp(self):
+    def test_keeps_non_excel_in_non_temp(self, tmp_path):
         """В НЕ-temp директории не-Excel файлы НЕ удаляются."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_keep_")
+        tmpdir = str(tmp_path)
         try:
             txt_path = os.path.join(tmpdir, "notes.txt")
             open(txt_path, "w").close()
@@ -2188,9 +2489,9 @@ class TestWalkExtractedDir:
         finally:
             _rmtree(tmpdir)
 
-    def test_nested_zip_processed(self):
+    def test_nested_zip_processed(self, tmp_path):
         """Вложенный ZIP распаковывается и файлы собираются."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_nest_")
+        tmpdir = str(tmp_path)
         try:
             # Create inner zip
             inner_xlsx = os.path.join(tmpdir, "inner.xlsx")
@@ -2217,9 +2518,9 @@ class TestWalkExtractedDir:
         finally:
             _rmtree(tmpdir)
 
-    def test_nested_duplicate_detected(self):
+    def test_nested_duplicate_detected(self, tmp_path):
         """Дубликат имени во вложенном ZIP пропускается."""
-        tmpdir = tempfile.mkdtemp(prefix="walk_dup_")
+        tmpdir = str(tmp_path)
         try:
             seen = {"same_name.xlsx"}
             # Create inner zip with duplicate name
@@ -2299,9 +2600,9 @@ class TestFindExcelFilesExtended:
         finally:
             _safe_remove(path)
 
-    def test_zip_with_nested_content(self):
+    def test_zip_with_nested_content(self, tmp_path):
         """ZIP с вложенными .xlsx извлекается и файлы находятся."""
-        tmpdir = tempfile.mkdtemp(prefix="find_zip_")
+        tmpdir = str(tmp_path)
         try:
             # Create xlsx files inside temp dir
             xlsx1 = os.path.join(tmpdir, "card1.xlsx")
@@ -2325,9 +2626,9 @@ class TestFindExcelFilesExtended:
         finally:
             _rmtree(tmpdir)
 
-    def test_directory_with_mixed_formats(self):
+    def test_directory_with_mixed_formats(self, tmp_path):
         """Директория с .xlsx, .xls и .txt — только Excel файлы."""
-        tmpdir = tempfile.mkdtemp(prefix="find_mix_")
+        tmpdir = str(tmp_path)
         try:
             _touch_excel(os.path.join(tmpdir, "card1.xlsx"))
             open(os.path.join(tmpdir, "card2.xls"), "w").close()
@@ -2355,9 +2656,9 @@ class TestParseCards:
       - original_part_numbers
     """
 
-    def test_sequential_parsing(self):
+    def test_sequential_parsing(self, tmp_path):
         """Парсинг с max_workers=1 использует последовательный путь."""
-        tmpdir = tempfile.mkdtemp(prefix="parse_seq_")
+        tmpdir = str(tmp_path)
         try:
             path1 = os.path.join(tmpdir, "001-card.xlsx")
             wb = Workbook()
@@ -2388,9 +2689,9 @@ class TestParseCards:
         finally:
             _rmtree(tmpdir)
 
-    def test_parallel_parsing(self):
+    def test_parallel_parsing(self, tmp_path):
         """Парсинг с max_workers=2 использует параллельный путь."""
-        tmpdir = tempfile.mkdtemp(prefix="parse_par_")
+        tmpdir = str(tmp_path)
         try:
             path1 = os.path.join(tmpdir, "001-par.xlsx")
             wb = Workbook()
@@ -2595,7 +2896,7 @@ class TestSafeName:
 class TestSafeRemove:
     def test_remove_existing_file(self):
         """Удаление существующего файла."""
-        fd, path = tempfile.mkstemp(prefix="safe_", dir="/home/rpaup/projects/burlak")
+        fd, path = tempfile.mkstemp(prefix="safe_")
         os.close(fd)
         assert os.path.isfile(path)
         _safe_remove(path)
@@ -2617,9 +2918,9 @@ class TestCardServiceExtended:
     Files must have digit-prefixed names and recognizable headers.
     """
 
-    def test_load_directory_with_cards(self):
+    def test_load_directory_with_cards(self, tmp_path):
         """Загрузка директории с картами через CardService."""
-        tmpdir = tempfile.mkdtemp(prefix="svc_parse_", dir="/home/rpaup/projects/burlak")
+        tmpdir = str(tmp_path)
         try:
             path = os.path.join(tmpdir, "001-card.xlsx")
             wb = Workbook()
@@ -2641,5 +2942,312 @@ class TestCardServiceExtended:
             sources = svc.get_part_sources()
             assert "P001" in sources
             assert len(svc.get_card_results()) >= 1
+        finally:
+            _rmtree(tmpdir)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  34. SplitStatistics — детальная статистика разделения
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSplitStatistics:
+    """split_cards_to_files — детальная per-file статистика (SplitStatistics).
+
+    Проверяет:
+      - SplitStatistics создаётся и заполняется
+      - .xls файлы корректно помечаются как неподдерживаемые
+      - Служебные файлы (is_service_file) корректно помечаются
+      - Шаблонные листы корректно учитываются в skip_reasons
+      - Пустые листы корректно учитываются в skip_reasons
+      - Агрегированные счётчики (total_xlsx, total_xls, total_sheets_all, и т.д.)
+      - get_top_skip_reasons() возвращает корректные данные
+      - get_files_with_most_skips() возвращает корректные данные
+    """
+
+    def test_xlsx_files_processed(self, monkeypatch, tmp_path):
+        """.xlsx файлы правильно считаются в статистике (total_xlsx)."""
+        from burlak_parser import splitter as splitter_mod
+
+        class MockSplitter:
+            def split_file(self, src, out, sheets, label):
+                return [os.path.join(out, f"{label}_{s}.xlsx") for s in sheets]
+
+        monkeypatch.setattr(
+            splitter_mod, "CardSplitter",
+            lambda **kw: MockSplitter(),
+        )
+
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[CardSheetInfo("C001", "S1", has_data=True)],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_xlsx == 1
+            assert stats.total_xls == 0
+            assert stats.total_sheets_all == 1
+            assert stats.total_sheets_split == 1
+            assert stats.total_sheets_skipped == 0
+            assert stats.total_files_created == 1
+            assert len(stats.file_stats) == 1
+            assert stats.file_stats[0].is_xlsx is True
+            assert stats.file_stats[0].sheets_split == 1
+            assert stats.file_stats[0].sheets_skipped == 0
+        finally:
+            _rmtree(tmpdir)
+
+    def test_xls_files_marked_skipped(self, tmp_path):
+        """.xls файлы помечаются как неподдерживаемые (split_reason)."""
+        result = CardParseResult(
+            card_number="C001", file_path="test.xls",
+            sheets=[CardSheetInfo("C001", "S1", has_data=True)],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_xlsx == 0
+            assert stats.total_xls == 1
+            assert stats.total_sheets_all == 1
+            assert stats.total_files_created == 0
+            assert len(stats.file_stats) == 1
+            fs = stats.file_stats[0]
+            assert fs.is_xlsx is False
+            assert fs.sheets_split == 0
+            assert fs.sheets_skipped == 1
+            assert "не .xlsx" in fs.split_reason.lower() or "не xlsx" in fs.split_reason.lower()
+        finally:
+            _rmtree(tmpdir)
+
+    def test_service_files_marked_skipped(self, tmp_path):
+        """Служебные файлы помечаются как пропущенные (split_reason)."""
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[CardSheetInfo("C001", "S1", has_data=True)],
+            parts=[], aggregated_parts={},
+            is_service_file=True,
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_service_files == 1
+            assert stats.total_xlsx == 1
+            assert stats.total_files_created == 0
+            fs = stats.file_stats[0]
+            assert fs.is_service_file is True
+            assert fs.sheets_split == 0
+            assert fs.sheets_skipped == 1
+            assert "служебный" in fs.split_reason.lower()
+        finally:
+            _rmtree(tmpdir)
+
+    def test_template_sheets_with_data_are_now_included(self, tmp_path):
+        """Шаблонные листы с данными БОЛЬШЕ НЕ пропускаются (has_data=True → включены в split)."""
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[
+                CardSheetInfo("C001", "空表_Sheet1", has_data=True),   # has data → NOT skipped anymore
+                CardSheetInfo("C001", "Sheet2", has_data=True),
+            ],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_sheets_all == 2
+            assert stats.total_sheets_split == 2, "Both sheets have data → both should split"
+            assert stats.total_sheets_skipped == 0
+            fs = stats.file_stats[0]
+            assert SKIP_REASON_TEMPLATE not in fs.skip_reasons,                 "Template sheet with data should NOT be in skip_reasons"
+            assert fs.sheets_split == 2
+            assert fs.sheets_skipped == 0
+        finally:
+            _rmtree(tmpdir)
+
+    def test_template_sheets_without_data_still_skipped(self, tmp_path):
+        """Шаблонные листы БЕЗ данных по-прежнему пропускаются."""
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[
+                CardSheetInfo("C001", "空表_Empty", has_data=False),  # no data → skipped
+                CardSheetInfo("C001", "Sheet2", has_data=True),
+            ],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_sheets_all == 2
+            assert stats.total_sheets_split == 1
+            assert stats.total_sheets_skipped == 1
+            fs = stats.file_stats[0]
+            assert SKIP_REASON_TEMPLATE in fs.skip_reasons
+            assert "空表_Empty" in fs.skip_reasons[SKIP_REASON_TEMPLATE]
+            assert fs.sheets_split == 1
+            assert fs.sheets_skipped == 1
+        finally:
+            _rmtree(tmpdir)
+
+    def test_empty_sheets_recorded_in_skip_reasons(self, tmp_path):
+        """Пустые листы корректно записываются в skip_reasons."""
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[
+                CardSheetInfo("C001", "S1", has_data=True),
+                CardSheetInfo("C001", "S2", has_data=False),
+                CardSheetInfo("C001", "S3", has_data=False),
+            ],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_sheets_all == 3
+            assert stats.total_sheets_split == 1
+            assert stats.total_sheets_skipped == 2
+            fs = stats.file_stats[0]
+            assert SKIP_REASON_NO_DATA in fs.skip_reasons
+            assert len(fs.skip_reasons[SKIP_REASON_NO_DATA]) == 2
+            assert "S2" in fs.skip_reasons[SKIP_REASON_NO_DATA]
+            assert "S3" in fs.skip_reasons[SKIP_REASON_NO_DATA]
+        finally:
+            _rmtree(tmpdir)
+
+    def test_get_top_skip_reasons(self):
+        """get_top_skip_reasons() возвращает причины отсортированные по частоте."""
+        stats = SplitStatistics(
+            file_stats=[
+                FileSplitStats(
+                    file_path="t.xlsx", file_name="t.xlsx", card_number="C",
+                    is_xlsx=True, is_service_file=False, 
+                    total_sheets=3, sheets_split=1, sheets_skipped=2,
+                    skip_reasons={SKIP_REASON_NO_DATA: ["S1", "S2"]},
+                ),
+            ],
+            total_xlsx=1, total_xls=0,
+            total_sheets_all=3, total_sheets_split=1, total_sheets_skipped=2,
+            total_files_created=1,
+        )
+        top = stats.get_top_skip_reasons(5)
+        assert len(top) >= 1
+        # The most common reason should be SKIP_REASON_NO_DATA with count 2
+        reason_name, count = top[0]
+        assert count == 2
+        assert reason_name == SKIP_REASON_NO_DATA
+
+    def test_get_files_with_most_skips(self):
+        """get_files_with_most_skips() возвращает файлы отсортированные по skips."""
+        stats = SplitStatistics(
+            file_stats=[
+                FileSplitStats(
+                    file_path="a.xlsx", file_name="a.xlsx", card_number="C1",
+                    is_xlsx=True, is_service_file=False,
+                    total_sheets=10, sheets_split=2, sheets_skipped=8,
+                ),
+                FileSplitStats(
+                    file_path="b.xlsx", file_name="b.xlsx", card_number="C2",
+                    is_xlsx=True, is_service_file=False,
+                    total_sheets=5, sheets_split=4, sheets_skipped=1,
+                ),
+                FileSplitStats(
+                    file_path="c.xlsx", file_name="c.xlsx", card_number="C3",
+                    is_xlsx=False, is_service_file=True,
+                    total_sheets=3, sheets_split=0, sheets_skipped=3,
+                    split_reason="skip",
+                ),
+            ],
+            total_xlsx=2, total_xls=1,
+            total_sheets_all=18, total_sheets_split=6, total_sheets_skipped=12,
+            total_files_created=6,
+        )
+        top = stats.get_files_with_most_skips(2)
+        assert len(top) == 2
+        assert top[0][0] == "a.xlsx"  # most skips (8)
+        assert top[0][2] == 8
+        # c.xlsx has 3 skips, b.xlsx has 1 skip -> second is c.xlsx
+        assert top[1][0] == "c.xlsx"  # second most (3 skips)
+        assert top[1][2] == 3
+
+    def test_error_files_marked(self, monkeypatch, tmp_path):
+        """Ошибки при split_file отмечаются в file_stats."""
+        from burlak_parser import splitter as splitter_mod
+
+        class MockSplitter:
+            def split_file(self, src, out, sheets, label):
+                raise ValueError("Mock error during split")
+
+        monkeypatch.setattr(
+            splitter_mod, "CardSplitter",
+            lambda **kw: MockSplitter(),
+        )
+
+        result = CardParseResult(
+            card_number="C001", file_path="test.xlsx",
+            sheets=[CardSheetInfo("C001", "S1", has_data=True)],
+            parts=[], aggregated_parts={},
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_errors >= 1
+            error_file = [fs for fs in stats.file_stats if fs.has_error]
+            assert len(error_file) >= 1
+            assert error_file[0].file_name == "test.xlsx"
+            assert "Mock error" in error_file[0].error_message
+        finally:
+            _rmtree(tmpdir)
+
+    def test_cp7cp8_files_included_in_stats(self, monkeypatch, tmp_path):
+        """CP7/CP8 файлы включаются в статистику (не пропускаются)."""
+        from burlak_parser import splitter as splitter_mod
+
+        class MockSplitter:
+            def split_file(self, src, out, sheets, label):
+                return [os.path.join(out, f"{label}_S1.xlsx")]
+
+        monkeypatch.setattr(
+            splitter_mod, "CardSplitter",
+            lambda **kw: MockSplitter(),
+        )
+
+        result = CardParseResult(
+            card_number="CP001", file_path="cp7.xlsx",
+            sheets=[CardSheetInfo("CP001", "S1", has_data=True)],
+            parts=[], aggregated_parts={},
+            is_service_file=False,
+        )
+        cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
+        tmpdir = str(tmp_path)
+        try:
+            split_cards_to_files(cd, tmpdir, max_workers=1)
+            stats = cd.split_stats
+            assert stats is not None
+            assert stats.total_xlsx == 1
+            assert stats.total_files_created == 1
+            fs = stats.file_stats[0]
+            assert fs.sheets_split == 1
         finally:
             _rmtree(tmpdir)

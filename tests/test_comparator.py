@@ -42,6 +42,7 @@ from burlak_parser.comparator import (
     compare_single_config,
     compare_single_config_cached,
     format_discrepancy_report,
+    verify_integrity,
 )
 from burlak_parser.fuzzy_matcher import FuzzyMatcher
 
@@ -1466,3 +1467,210 @@ class TestFormatReportManyParts:
         report = format_discrepancy_report(mc)
         assert "... и ещё 5 деталей" in report
         assert "... и ещё 2 деталей" in report
+
+# ═══════════════════════════════════════════════════════════════════════
+#  20. verify_integrity — верификация целостности
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestVerifyIntegrity:
+    """verify_integrity — проверка целостности результатов сверки.
+
+    Покрывает:
+      - Все комплектации OK
+      - Нарушение в одной комплектации
+      - Нарушение глобальной суммы
+      - Пустой результат
+    """
+
+    def test_all_configs_ok(self):
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="Config1",
+                    discrepancies=[],
+                    total_bom_parts=3,
+                    total_cards_parts=3,
+                    matched_parts=3,
+                ),
+            ],
+            all_discrepancies=[],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert integrity.is_ok
+        assert integrity.configs_ok == 1
+        assert integrity.total_configs == 1
+        assert len(integrity.config_issues) == 0
+        assert integrity.global_issue == ""
+
+    def test_config_mismatch_detected(self):
+        disc = Discrepancy(
+            part_number="P001", name_cn="", name_en="",
+            qty_bom=1.0, qty_cards=0.0, card_numbers=[],
+            discrepancy_type=DiscrepancyType.ONLY_IN_BOM,
+            config_name="Config1",
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="Config1",
+                    discrepancies=[disc],
+                    total_bom_parts=5,
+                    total_cards_parts=4,
+                    matched_parts=3,
+                ),
+            ],
+            all_discrepancies=[disc],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert not integrity.is_ok
+        assert integrity.configs_ok == 0
+        assert len(integrity.config_issues) == 1
+        assert "Config1" in integrity.config_issues[0]
+        assert "учтено 4" in integrity.config_issues[0]
+        assert "ожидалось 5" in integrity.config_issues[0]
+
+    def test_global_sum_ok(self):
+        disc = Discrepancy(
+            part_number="P001", name_cn="", name_en="",
+            qty_bom=1.0, qty_cards=0.0, card_numbers=[],
+            discrepancy_type=DiscrepancyType.ONLY_IN_BOM,
+            config_name="Config1",
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="Config1",
+                    discrepancies=[disc],
+                    total_bom_parts=1,
+                    total_cards_parts=0,
+                    matched_parts=0,
+                ),
+            ],
+            all_discrepancies=[disc],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert integrity.is_ok
+
+    def test_empty_result(self):
+        result = MultiConfigComparisonResult(
+            config_results=[],
+            all_discrepancies=[],
+            total_configs=0,
+        )
+        integrity = verify_integrity(result)
+        assert integrity.is_ok
+        assert integrity.total_configs == 0
+        assert integrity.configs_ok == 0
+
+    def test_multiple_configs_mixed_results(self):
+        disc = Discrepancy(
+            part_number="P001", name_cn="", name_en="",
+            qty_bom=1.0, qty_cards=0.0, card_numbers=[],
+            discrepancy_type=DiscrepancyType.ONLY_IN_BOM,
+            config_name="Config1",
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="ConfigOK",
+                    discrepancies=[],
+                    total_bom_parts=2,
+                    total_cards_parts=2,
+                    matched_parts=2,
+                ),
+                ConfigComparisonResult(
+                    config_name="ConfigBad",
+                    discrepancies=[disc],
+                    total_bom_parts=10,
+                    total_cards_parts=5,
+                    matched_parts=4,
+                ),
+            ],
+            all_discrepancies=[disc],
+            total_configs=2,
+        )
+        integrity = verify_integrity(result)
+        assert not integrity.is_ok
+        assert integrity.configs_ok == 1
+        assert integrity.total_configs == 2
+        assert len(integrity.config_issues) == 1
+        assert "ConfigBad" in integrity.config_issues[0]
+
+    def test_config_has_correct_details(self):
+        """details_by_config содержит детали для конфигурации с нарушением."""
+        disc = Discrepancy(
+            part_number="P001", name_cn="", name_en="",
+            qty_bom=1.0, qty_cards=0.0, card_numbers=[],
+            discrepancy_type=DiscrepancyType.ONLY_IN_BOM,
+            config_name="Config1",
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="Config1",
+                    discrepancies=[disc],
+                    total_bom_parts=1,
+                    total_cards_parts=0,
+                    matched_parts=0,
+                ),
+            ],
+            all_discrepancies=[disc],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert integrity.is_ok, "matched(0) + only_in_bom(1) = 1 == total_bom_parts(1)"
+        assert integrity.details_by_config[0]["is_ok"] is True
+        assert integrity.details_by_config[0]["diff"] == 0
+
+    def test_details_by_config_structure(self):
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="TestConfig",
+                    discrepancies=[],
+                    total_bom_parts=5,
+                    total_cards_parts=5,
+                    matched_parts=5,
+                ),
+            ],
+            all_discrepancies=[],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert len(integrity.details_by_config) == 1
+        detail = integrity.details_by_config[0]
+        assert detail["config_name"] == "TestConfig"
+        assert detail["is_ok"] is True
+        assert detail["total_bom_parts"] == 5
+        assert detail["accounted"] == 5
+        assert detail["matched"] == 5
+        assert detail["diff"] == 0
+
+    def test_fuzzy_match_ok(self):
+        disc = Discrepancy(
+            part_number="5306200ED001", name_cn="", name_en="",
+            qty_bom=2.0, qty_cards=2.0, card_numbers=["C001"],
+            discrepancy_type=DiscrepancyType.FUZZY_MATCH,
+            config_name="Config1",
+            fuzzy_matched_to="5306200-ED001",
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="Config1",
+                    discrepancies=[disc],
+                    total_bom_parts=1,
+                    total_cards_parts=1,
+                    matched_parts=0,
+                    fuzzy_matched=1,
+                ),
+            ],
+            all_discrepancies=[disc],
+            total_configs=1,
+        )
+        integrity = verify_integrity(result)
+        assert integrity.is_ok, "Fuzzy match should be accounted in integrity check"
+        assert integrity.configs_ok == 1

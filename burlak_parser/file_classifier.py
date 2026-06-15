@@ -1,10 +1,11 @@
 """Модуль классификации файлов операционных карт.
 
 Определяет, является ли Excel-файл операционной картой (подлежит парсингу деталей)
-или служебным документом (игнорируется при парсинге, но может быть разделён на листы).
+или служебным документом (игнорируется при парсинге и разделении).
 
 УНИВЕРСАЛЬНАЯ классификация:
   - Не зависит от конкретных префиксов (SQRT, SQR, G01, T1L, SWM, и т.д.)
+  - Не зависит от структуры папок (нет хардкода CP7/CP8)
   - Использует эвристические паттерны для определения операционных карт
   - Поддерживает любые буквенно-цифровые комбинации в именах файлов
 
@@ -17,8 +18,8 @@
   - Имя файла содержит ключевые слова: 封面, 目录, 记录表, 空表
   - Файл не соответствует ни одному из паттернов операционной карты
 
-Исключение: папки CP7/CP8 — файлы проверок/прошивок/тестирования.
-Не содержат каталожных номеров, но ВСЕ РАВНО разделяются на листы.
+Правила идентификации остальных файлов:
+  - Если файл не является операционной картой и не служебный — пропускается
 """
 
 from __future__ import annotations
@@ -52,8 +53,7 @@ SERVICE_FILE_KEYWORDS = [
     "template",    # template
 ]
 
-# Папки финальных операций — файлы из них всегда разделяются на листы
-FINAL_CHECK_FOLDERS = {"CP7", "CP8", "cp7", "cp8"}
+
 
 # Универсальное регулярное выражение для номера операции:
 #   - 2+ цифры в начале имени (возможно с буквенным префиксом)
@@ -95,10 +95,10 @@ class FileClassification:
     parent_folder: str  # имя родительской папки
     is_operational_card: bool  # операционная карта (содержит таблицу деталей)
     is_service_file: bool  # служебный файл (без таблицы деталей)
-    is_final_check: bool  # файл из папки CP7/CP8
     should_split: bool  # нужно ли разделять на листы
     should_parse_parts: bool  # нужно ли парсить детали
     operation_number: str = ""  # номер операции (если определён)
+    is_final_check: bool = False  # устаревшее поле, всегда False
 
 
 def classify_file(file_path: str) -> FileClassification:
@@ -113,10 +113,6 @@ def classify_file(file_path: str) -> FileClassification:
     basename = os.path.basename(file_path)
     file_name = os.path.splitext(basename)[0]
     parent_dir = os.path.basename(os.path.dirname(file_path))
-
-    # Определяем, из какой папки файл (CP7/CP8 или вложенная)
-    path_parts = os.path.normpath(file_path).split(os.sep)
-    is_final_check = any(p in FINAL_CHECK_FOLDERS for p in path_parts)
 
     # Проверяем служебные ключевые слова
     is_service_file = _contains_service_keywords(file_name)
@@ -135,16 +131,10 @@ def classify_file(file_path: str) -> FileClassification:
         should_split = True
         is_service_file = False  # номер операции перекрывает ключевые слова
     elif is_service_file:
-        # Служебный файл без номера операции — не парсим детали
+        # Служебный файл без номера операции — не парсим детали, не разделяем
         is_operational = False
         should_parse = False
-        is_template = any(kw in file_name for kw in ["空表", "范本", "说明"])
-        should_split = is_final_check and not is_template
-    elif is_final_check:
-        # Файл из CP7/CP8 без номера операции — не парсим, но разделяем
-        is_operational = False
-        should_parse = False
-        should_split = True
+        should_split = False
     else:
         # Неизвестный формат — пробуем извлечь номер карты эвристически
         card_no = extract_card_number_from_filepath(file_path)
@@ -181,7 +171,7 @@ def classify_file(file_path: str) -> FileClassification:
         parent_folder=parent_dir,
         is_operational_card=is_operational,
         is_service_file=is_service_file,
-        is_final_check=is_final_check,
+        is_final_check=False,
         should_split=should_split,
         should_parse_parts=should_parse,
         operation_number=operation_number,

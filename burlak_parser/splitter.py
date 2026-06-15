@@ -111,16 +111,18 @@ class CardSplitter:
     def split_many_parallel(
         self,
         tasks: List[Tuple[str, str, List[str], str]],
-    ) -> List[str]:
+    ) -> Tuple[List[str], List[Tuple[str, str]]]:
         """Разделить множество файлов параллельно.
 
         Args:
             tasks: Список кортежей (source_path, output_dir, sheet_names, file_label).
 
         Returns:
-            Список всех созданных файлов.
+            Кортеж (all_created_files, errors) где errors — список
+            (source_path, error_message) для файлов, которые не удалось обработать.
         """
         all_created: List[str] = []
+        errors: List[Tuple[str, str]] = []
 
         with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {}
@@ -137,12 +139,14 @@ class CardSplitter:
                     result = future.result()
                     all_created.extend(result)
                 except Exception as e:
+                    err_msg = str(e)
                     logger.error(
                         "Ошибка параллельного разделения %s: %s",
-                        os.path.basename(source_path), e,
+                        os.path.basename(source_path), err_msg,
                     )
+                    errors.append((source_path, err_msg))
 
-        return all_created
+        return all_created, errors
 
     def _extract_sheet_via_zip(
         self, source_path: str, output_path: str, keep_sheet_name: str,

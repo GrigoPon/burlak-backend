@@ -1234,10 +1234,91 @@ class TestIntegrityChecks:
             "Expected diff message in log: учтено 2, ожидалось 5"
 
         # Строка 329-330: sum_check != total_discrepancies → logger.warning
-        assert "сумма типов" in caplog.text, \
+        assert "сумма типов" in caplog.text.lower(), \
             "Expected type sum mismatch warning in logs"
 
         # Строка 336: integrity_ok = False → print warning
         captured = capsys.readouterr()
         assert "нарушения целостности" in captured.out, \
             "Expected integrity warning in stdout"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  21. --help output — проверка всех CLI флагов и примеров
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestHelpOutput:
+    """Автоматическая проверка `--help` — все флаги и примеры."""
+
+    def test_help_contains_all_flags(self):
+        """--help содержит все 10 CLI флагов (long и short формы)."""
+        result = subprocess.run(
+            [sys.executable, "-m", "burlak_parser.main", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        output = result.stdout
+
+        # Проверяем все long флаги
+        long_flags = [
+            "--bom", "--cards", "--config", "--output",
+            "--single-config", "--no-split", "--no-fuzzy",
+            "--workers", "--verbose", "--split-stats",
+        ]
+        for flag in long_flags:
+            assert flag in output, f"Flag {flag} not found in --help output"
+
+        # Проверяем все short флаги
+        short_flags = ["-b", "-c", "-k", "-o", "-s", "-w", "-v", "-S"]
+        for flag in short_flags:
+            assert flag in output, f"Short flag {flag} not found in --help output"
+
+    def test_help_contains_epilog_examples(self):
+        """--help epilog содержит все примеры использования."""
+        result = subprocess.run(
+            [sys.executable, "-m", "burlak_parser.main", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        output = result.stdout
+
+        # Ключевые маркеры из epilog-примеров
+        examples = [
+            "--bom BOM.xlsx --cards ./cards/",
+            "--single-config",
+            "--config",
+            "--no-fuzzy",
+            "--workers",
+            "--split-stats",
+            "--no-split",
+        ]
+        for example in examples:
+            assert example in output, f"Example '{example}' not found in --help output"
+
+    def test_help_does_not_crash_without_args(self):
+        """Запуск без обязательных аргументов не падает (argparse сам выводит usage)."""
+        result = subprocess.run(
+            [sys.executable, "-m", "burlak_parser.main"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # Без --bom argparse завершается с кодом 2
+        assert result.returncode == 2
+        assert "usage:" in result.stdout or "usage:" in result.stderr
+
+    def test_help_via_h_flag(self):
+        """-h (short help) работает так же как --help."""
+        result = subprocess.run(
+            [sys.executable, "-m", "burlak_parser.main", "-h"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+        assert "Burlak Parser" in result.stdout
+        assert "--bom" in result.stdout

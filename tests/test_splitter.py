@@ -337,7 +337,8 @@ class TestSplitManyParallel:
         ]
 
         splitter = CardSplitter(max_workers=2)
-        created = splitter.split_many_parallel(tasks)
+        created, errors = splitter.split_many_parallel(tasks)
+        assert len(errors) == 0, f"Expected 0 errors, got {errors}"
         assert len(created) == 6, f"Expected 6 files from 3 cards × 2 ops, got {len(created)}"
         for fp in created:
             assert os.path.exists(fp), f"File {fp} missing"
@@ -349,13 +350,15 @@ class TestSplitManyParallel:
         tasks = [(multi_sheet_xlsx, output_dir, ["Sheet1"], "Card")]
 
         splitter = CardSplitter(max_workers=2)
-        created = splitter.split_many_parallel(tasks)
+        created, errors = splitter.split_many_parallel(tasks)
+        assert len(errors) == 0
         assert len(created) == 1
 
     def test_parallel_empty_tasks(self, tmp_dir: str):
         """Empty tasks list returns empty."""
         splitter = CardSplitter()
-        created = splitter.split_many_parallel([])
+        created, errors = splitter.split_many_parallel([])
+        assert len(errors) == 0
         assert created == []
 
 
@@ -876,18 +879,24 @@ class TestSplitManyParallelErrors:
     def test_nonexistent_file_handled(self, tmp_dir: str):
         """Non-existent file in parallel split is handled gracefully.
         
-        Error is caught inside split_file, worker returns empty list.
+        split_file catches FileNotFoundError internally, so no exception
+        propagates to as_completed — errors list remains empty.
         """
         output_dir = os.path.join(tmp_dir, "parallel_err")
         tasks = [
             ("/nonexistent/file.xlsx", output_dir, ["Sheet1"], "BadFile"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created = splitter.split_many_parallel(tasks)
+        created, errors = splitter.split_many_parallel(tasks)
         assert created == []
+        assert errors == [], "split_file catches errors internally"
 
     def test_mixed_success_and_failure(self, tmp_dir: str):
-        """When one task fails, other tasks still produce results."""
+        """When one task fails, other tasks still produce results.
+        
+        split_file catches per-file exceptions, so the failed task
+        returns [] normally without propagating an error.
+        """
         valid_path = _create_multi_sheet_xlsx(
             tmp_dir, "valid.xlsx",
             sheets={"Op1": [["A", "B"]], "Op2": [["C", "D"]]},
@@ -899,8 +908,9 @@ class TestSplitManyParallelErrors:
             (valid_path, output_dir, ["Op1", "Op2"], "Good"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created = splitter.split_many_parallel(tasks)
+        created, errors = splitter.split_many_parallel(tasks)
         assert len(created) == 2
+        assert errors == [], "split_file catches errors internally"
         for fp in created:
             assert os.path.exists(fp)
             assert _count_xlsx_sheets(fp) == 1

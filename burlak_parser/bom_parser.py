@@ -22,7 +22,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -371,12 +373,17 @@ def lookup_part_name(bom: BOMData, part_number: str) -> Tuple[str, str]:
 class BOMService:
     """Сервис парсинга BOM-файлов.
 
-    Подготовлен для миграции на серверную архитектуру (FastAPI + SQLite + Redis).
-    Инкапсулирует всю логику парсинга BOM в одном классе.
+    Готов к использованию в серверной архитектуре (FastAPI).
+    Поддерживает:
+      - Загрузку из файла (load)
+      - Загрузку из памяти (load_from_bytes) — для HTTP upload
+      - Асинхронную загрузку (load_async) — не блокирует event loop
+      - Автоочистку временных файлов (cleanup / context manager)
     """
 
     def __init__(self):
         self._bom: Optional[BOMData] = None
+        self._temp_paths: List[str] = []
 
     @property
     def bom(self) -> Optional[BOMData]:
@@ -397,6 +404,60 @@ class BOMService:
         """
         self._bom = parse_bom(file_path)
         return self._bom
+
+    def load_from_bytes(self, data: bytes, filename: str = "bom.xlsx") -> BOMData:
+        """Загрузить BOM из байтового содержимого (in-memory upload).
+
+        Сохраняет данные во временный файл, парсит, возвращает результат.
+        Временный файл будет удалён при вызове cleanup() или выходе из
+        контекстного менеджера.
+
+        Args:
+            data: Байтовое содержимое .xlsx файла.
+            filename: Имя файла для определения расширения.
+
+        Returns:
+            Распарсенные данные BOMData.
+        """
+        suffix = os.path.splitext(filename)[1] or ".xlsx"
+        fd, path = tempfile.mkstemp(suffix=suffix, prefix="bom_upload_")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(data)
+        self._temp_paths.append(path)
+        return self.load(path)
+
+    async def load_async(self, data: bytes, filename: str = "bom.xlsx") -> BOMData:
+        """Асинхронная загрузка BOM из байтов.
+
+        Парсинг CPU-bound — выполняется в отдельном потоке,
+        не блокируя event loop.
+
+        Args:
+            data: Байтовое содержимое .xlsx файла.
+            filename: Имя файла для определения расширения.
+
+        Returns:
+            Распарсенные данные BOMData.
+        """
+        import asyncio
+        return await asyncio.to_thread(self.load_from_bytes, data, filename)
+
+    def cleanup(self) -> None:
+        """Удалить все временные файлы, созданные при load_from_bytes."""
+        for path in self._temp_paths:
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        self._temp_paths.clear()
+
+    def __enter__(self) -> BOMService:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.cleanup()
 
     def get_config_names(self) -> List[str]:
         """Получить список названий всех найденных комплектаций."""

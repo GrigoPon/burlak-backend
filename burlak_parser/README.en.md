@@ -2,7 +2,9 @@
 
 BOM parsing and reconciliation with assembly operation cards for automotive manufacturing.
 
-Original part-number format (with dashes) preserved in comparison results. Detailed split statistics. Integrity verification. Expanded test suite with conftest.py and automatic temp file cleanup.
+In-memory data loading (load_from_bytes / load_async) for HTTP server integration. Detailed split statistics (SplitStatistics) with skip reasons. verify_integrity() function for result validation. Context manager support for services.
+
+All configurations processed in a single run, heuristic column detection in three languages, safe fuzzy matching, ZIP-based splitting with full formatting preservation.
 
 ---
 
@@ -33,45 +35,65 @@ pytest tests/
 python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [OPTIONS]
 ```
 
+### Options
+
+| Parameter | Short | Description |
+|-----------|-------|-------------|
+| `--bom` | `-b` | Path to BOM file (.xlsx) |
+| `--cards` | `-c` | Cards folder or ZIP |
+| `--output` | `-o` | Output directory |
+| `--single-config` | `-s` | Single config mode |
+| `--config` | `-k` | Config name |
+| `--no-split` | | Don't split cards |
+| `--no-fuzzy` | | Disable fuzzy matching |
+| `--workers` | `-w` | Process count |
+| `--split-stats` | `-S` | Detailed split statistics |
+| `--verbose` | `-v` | Debug log |
+
+### Output
+
+1. `report.txt`
+2. `discrepancies.xlsx` (4 sheets)
+3. `split_cards/`
+4. `split_cards.zip`
+
 ---
 
-## Original Part-Number Format
+## In-Memory API
 
-`CardsData.original_part_numbers` tracks the original (dashed) format alongside the normalized version. All discrepancy types use the original BOM part number — `1234-56-78` stays as-is in reports.
+Services support loading from byte streams without disk writes:
 
-## Split Statistics
+```python
+from burlak_parser.bom_parser import BOMService
+from burlak_parser.card_parser import CardService
 
-After splitting, console output shows:
-- Operational card count, format breakdown (xlsx/xls)
-- Average sheets per file
-- Service files skipped
+# Synchronous
+service = BOMService()
+data = service.load_from_bytes(bom_bytes)
 
-## Integrity Verification
+# Async
+data = await service.load_async(bom_bytes)
 
-Post-comparison check: every BOM part has a result entry, quantities are consistent, no duplicate records.
-
-## Path Normalization
-
-`_collect_related_files()` normalizes absolute and relative paths in ZIP archives for correct collection of related files (sharedStrings, styles, drawings).
-
----
-
-## Tests
-
+# Context manager
+async with CardService() as service:
+    data = await service.load_async(cards_bytes)
 ```
-tests/
-├── __init__.py
-├── conftest.py           # Auto cleanup fixture
-├── test_bom_parser.py
-├── test_card_parser.py
-├── test_comparator.py
-├── test_fuzzy_matcher.py
-├── test_heuristic_analyzer.py
-├── test_file_classifier.py
-├── test_main.py
-├── test_report_generator.py
-└── test_splitter.py      # 12 test classes
-```
+
+## SplitStatistics
+
+`CardSplitter.split_many_parallel()` returns `(files, errors)`. Each file has `FileSplitStats`: sheet count, split count, skip reasons (template, empty, service), file size, format.
+
+`SplitStatistics` aggregates: top skip reasons, top files by skips.
+
+## verify_integrity()
+
+Checks integrity of comparison results: every BOM part has a result, quantities are consistent, no duplicates. Returns `IntegrityCheck` with passed/failed status.
+
+## Notes
+
+- Template sheets with data are processed (not skipped)
+- Service files are not split
+- Original part-number format (with dashes) is preserved in reports
 
 ---
 
@@ -80,13 +102,25 @@ tests/
 ```
 burlak_parser/
 ├── __init__.py
-├── main.py
-├── bom_parser.py
-├── card_parser.py         # Original part numbers
-├── file_classifier.py
-├── fuzzy_matcher.py
-├── splitter.py            # Split statistics
-├── comparator.py          # Original numbers in discrepancies
-├── report_generator.py
-└── heuristic_analyzer.py
+├── main.py                 # CLI, --split-stats
+├── bom_parser.py           # BOMService, load_from_bytes, load_async
+├── card_parser.py          # CardService, load_from_bytes, load_async
+├── file_classifier.py      # FileClassifier
+├── fuzzy_matcher.py        # FuzzyMatcher
+├── splitter.py             # CardSplitter, SplitStatistics
+├── comparator.py           # MatchingEngine
+├── report_generator.py     # Reporter
+└── heuristic_analyzer.py   # HeuristicAnalyzer
+tests/
+├── __init__.py
+├── conftest.py
+├── test_bom_parser.py
+├── test_card_parser.py
+├── test_comparator.py
+├── test_fuzzy_matcher.py
+├── test_heuristic_analyzer.py
+├── test_file_classifier.py
+├── test_main.py
+├── test_report_generator.py
+└── test_splitter.py
 ```
