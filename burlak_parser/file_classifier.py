@@ -79,6 +79,12 @@ DIGIT_START_RE = re.compile(
     r"^(\d{2,})",
 )
 
+# Паттерн для поиска номера карты в любой части имени (не только в начале)
+# Например: "5. G01Pш╜жщЧич║┐х╖ешЙ║хНб" -> "G01P"
+CARD_NUMBER_ANYWHERE_RE = re.compile(
+    r"[A-Za-z]{1,4}\d{2,}[A-Za-z0-9]*",
+)
+
 
 @dataclass
 class FileClassification:
@@ -150,11 +156,24 @@ def classify_file(file_path: str) -> FileClassification:
             should_split = True
             operation_number = card_no
         else:
-            # Неизвестный формат — пропускаем
-            logger.warning("Неизвестный формат файла, пропускается: %s", basename)
-            is_operational = False
-            should_parse = False
-            should_split = False
+            # Дополнительная эвристика: ищем паттерн букв+цифр в любой части имени
+            # Для файлов с изменённой кодировкой, напр. "5. G01Pш╜жщЧич║┐х╖ешЙ║хНб"
+            alt_card_no = _find_card_number_in_name(file_name)
+            if alt_card_no:
+                logger.debug(
+                    "Файл определён как операционная карта (альт.эвристика): %s",
+                    basename,
+                )
+                is_operational = True
+                should_parse = True
+                should_split = True
+                operation_number = alt_card_no
+            else:
+                # Неизвестный формат — пропускаем
+                logger.warning("Неизвестный формат файла, пропускается: %s", basename)
+                is_operational = False
+                should_parse = False
+                should_split = False
 
     classification = FileClassification(
         file_path=file_path,
@@ -203,6 +222,29 @@ def _contains_service_keywords(file_name: str) -> bool:
         if kw in name_lower.replace("_", " ").replace("-", " "):
             return True
     return False
+
+
+def _find_card_number_in_name(file_name: str) -> str:
+    """Найти номер карты в любой части имени файла.
+
+    Для файлов с изменённой кодировкой, где стандартные паттерны
+    не срабатывают из-за небуквенных/нецифровых символов в начале.
+
+    Примеры:
+      "5. G01Pш╜жщЧич║┐х╖ешЙ║хНб" -> "G01P"
+      "5. T1L总装卡" -> "T1L"
+
+    Args:
+        file_name: Имя файла без расширения.
+
+    Returns:
+        Найденный номер карты или пустую строку.
+    """
+    # Ищем паттерн буква+цифры где угодно в имени
+    match = CARD_NUMBER_ANYWHERE_RE.search(file_name)
+    if match:
+        return match.group(0)
+    return ""
 
 
 def _extract_operation_number(file_name: str) -> str:

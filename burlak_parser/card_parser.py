@@ -344,9 +344,10 @@ def parse_card_file(
         if not card_number:
             card_number = _extract_card_number(file_path, ws)
 
-        # Ищем таблицу с деталями через эвристический анализатор
-        table_info = HeuristicAnalyzer.find_part_table(ws)
-        if table_info is None:
+        # Ищем таблицы с деталями через эвристический анализатор
+        # Поддерживает многооперационные листы (SWM карты)
+        first_table_info = HeuristicAnalyzer.find_part_table(ws)
+        if first_table_info is None:
             sheets_info.append(CardSheetInfo(
                 card_number=card_number or basename,
                 sheet_name=sheet_name,
@@ -356,16 +357,15 @@ def parse_card_file(
             ))
             continue
 
-        header_row, part_no_col, qty_col, name_col = table_info
+        header_row, part_no_col, qty_col, name_col = first_table_info
 
         # Извлекаем название операции
         operation_name = HeuristicAnalyzer.extract_operation_name(ws, header_row)
 
-        # Собираем строки таблицы
-        raw_rows = _collect_raw_rows(ws, header_row, max_row, max_col, part_no_col, qty_col, name_col, basename)
-
-        # Склеиваем перенесённые парт-номера
-        merged_parts = _merge_multiline_part_numbers(raw_rows)
+        # Собираем детали из ВСЕХ таблиц на листе (многооперационные карты)
+        merged_parts = _collect_all_tables(
+            ws, max_row, max_col, basename,
+        )
 
         # Добавляем в результаты
         for part_no, qty, name, _ in merged_parts:
@@ -427,22 +427,67 @@ def _collect_raw_rows(
     name_col: int,
     basename: str,
 ) -> List[Tuple[int, str, float, str, int]]:
-    """Собрать сырые строки таблицы деталей."""
+    """Собрать сырые строки таблицы деталей.
+
+    Останавливается при обнаружении границы секции:
+      - Строка с >= 2 непустыми ячейками, содержащая PART_NO_KEYWORD (новый заголовок)
+      - 3+ последовательных пустых строк в колонке part_no
+
+    Returns:
+        Список кортежей (row_idx, raw_part_no, qty, name, part_no_col).
+    """
     raw_rows: List[Tuple[int, str, float, str, int]] = []
     max_data_row = min(max_row, header_row + 500)
+    consecutive_empty_pn = 0
 
     for row_idx in range(header_row + 1, max_data_row + 1):
         try:
             raw_part_no = ws.cell_value(row_idx, part_no_col)
+
+            # ── Проверка на границу секции: новый заголовок ──
+            # Строка с >= 2 непустыми ячейками, содержащая PART_NO_KEYWORD
+            non_empty = 0
+            row_values_check: List[str] = []
+            for c in range(1, min(max_col + 1, 25)):
+                v = ws.cell_value(row_idx, c)
+                if v is not None:
+                    non_empty += 1
+                    row_values_check.append(str(v).strip().lower())
+
+            if non_empty >= 2:
+                # Проверяем, есть ли ячейка с PART_NO_KEYWORD И длина < 50 символов
+                # (чтобы не спутать с длинными описаниями, содержащими "деталь")
+                has_part_no_keyword_short = any(
+                    len(rv) < 50 and any(kw in rv for kw in HeuristicAnalyzer._get_part_no_keywords())
+                    for rv in row_values_check
+                )
+                if has_part_no_keyword_short:
+                    # Это новый заголовок таблицы — останавливаем сбор
+                    logger.debug(
+                        "Граница секции на строке %d (новый заголовок с PART_NO_KEYWORD)",
+                        row_idx,
+                    )
+                    break
+
             if raw_part_no is None:
+                # Проверка на пустую строку
                 all_empty = True
                 for c in range(1, min(max_col + 1, 20)):
                     if ws.cell_value(row_idx, c) is not None:
                         all_empty = False
                         break
                 if all_empty:
+                    consecutive_empty_pn += 1
+                    if consecutive_empty_pn >= 3:
+                        logger.debug(
+                            "Граница секции на строке %d (3+ пустых строк)", row_idx,
+                        )
+                        break
                     continue
                 continue
+
+            # Сброс счётчика пустых строк
+            consecutive_empty_pn = 0
 
             raw_part_no_str = str(raw_part_no).strip()
             if not raw_part_no_str:
@@ -476,6 +521,69 @@ def _collect_raw_rows(
             continue
 
     return raw_rows
+
+
+def _collect_all_tables(
+    ws: ExcelSheet,
+    max_row: int,
+    max_col: int,
+    basename: str,
+) -> List[Tuple[str, float, str, int]]:
+    """Собрать детали из ВСЕХ таблиц на листе (многооперационные карты).
+
+    Последовательно находит таблицы деталей через find_part_table(),
+    собирает строки из каждой, и агрегирует результаты.
+    Пропускает найденные таблицы, если в них нет валидных part-number.
+
+    Returns:
+        Список кортежей (part_no, qty, name, source_row) для всех найденных деталей.
+    """
+    all_parts: List[Tuple[str, float, str, int]] = []
+    total_part_nos_collected = 0
+    start_search = 1
+    max_tables = 10  # защита от бесконечного цикла
+
+    for table_idx in range(max_tables):
+        table_info = HeuristicAnalyzer.find_part_table(ws, start_row=start_search)
+        if table_info is None:
+            break
+
+        header_row, part_no_col, qty_col, name_col = table_info
+
+        # Если заголовок уже обработан — выходим
+        if header_row < start_search:
+            break
+
+        raw_rows = _collect_raw_rows(
+            ws, header_row, max_row, max_col,
+            part_no_col, qty_col, name_col, basename,
+        )
+
+        merged_parts = _merge_multiline_part_numbers(raw_rows)
+
+        if merged_parts:
+            total_part_nos_collected += len(merged_parts)
+            all_parts.extend(merged_parts)
+            logger.debug(
+                "Таблица #%d (R%d): %d деталей",
+                table_idx + 1, header_row, len(merged_parts),
+            )
+
+        # Продолжаем поиск со следующей строки после последней собранной
+        # (или после заголовка, если данных нет)
+        last_data_row = header_row
+        if raw_rows:
+            last_data_row = max(r[0] for r in raw_rows)
+        start_search = last_data_row + 1
+
+        # Если таблица оказалась пустой — выходим (защита от цикла)
+        if start_search >= max_row:
+            break
+
+    if total_part_nos_collected == 0:
+        logger.debug("Не найдено таблиц с деталями")
+
+    return all_parts
 
 
 # ─── Поиск файлов ────────────────────────────────────────────────────────────

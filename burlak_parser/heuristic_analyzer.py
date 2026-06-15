@@ -43,7 +43,7 @@ PART_NO_KEYWORDS: List[str] = [
     "item code", "material code", "material no", "material number",
     "component code", "component number", "code",
     # Русский
-    "код детали", "номер детали", "деталь", "код", "номер",
+    "код детали", "номер детали", "деталь", "код",
     "артикул", "каталожный номер",
 ]
 
@@ -52,6 +52,7 @@ PART_NO_KEYWORDS: List[str] = [
 PART_NO_ANTI_KEYWORDS: List[str] = [
     "cpac", "fnd", "gpc", "поставщик", "supplier",
     "vehicle", "материал", "описание",
+    "серийный", "serial",  # серийный номер, serial number — не part_no
 ]
 
 # --- Название детали ---
@@ -385,6 +386,8 @@ class HeuristicAnalyzer:
 
     # Максимальное количество строк для сканирования заголовков
     MAX_HEADER_SCAN_ROWS = 15
+    # Максимальная ширина сканирования колонок (для SWM-формата, где qty может быть в C30)
+    MAX_COL_SCAN_WIDTH = 40
     # Минимальный порог уверенности для определения колонки
     CONFIDENCE_THRESHOLD = 0.3
 
@@ -422,9 +425,9 @@ class HeuristicAnalyzer:
         scores.sort(key=lambda x: -x[1])
 
         # Возвращаем только строки со score выше порога
-        threshold = 0.3
+        threshold = 0.25
         if scores:
-            threshold = max(scores[0][1] * 0.4, 0.3)
+            threshold = max(scores[0][1] * 0.4, 0.25)
 
         result = [r for r, s in scores if s >= threshold]
 
@@ -660,16 +663,41 @@ class HeuristicAnalyzer:
                     }
                     col_types[key_map[col_type]] = best_col
 
-        # Фаза 3: Определение имени, если не найдено через заголовки
+        # Фаза 3: Fallback по содержимому для part_no (с проверкой заголовков!)
         if 'part_no' not in col_types:
-            # Экстренный fallback: ищем колонку, где больше всего похожих на part-no значений
-            col_types['part_no'] = HeuristicAnalyzer._find_part_no_by_content(ws, data_start, sample_end, max_col)
+            col_types['part_no'] = HeuristicAnalyzer._find_part_no_by_content(
+                ws, data_start, sample_end, max_col, header_texts,
+            )
 
+        # Фаза 4: Fallback для имени
         if 'name_cn' not in col_types and 'name_en' not in col_types:
-            # Пытаемся найти колонку имени по содержимому
             name_col = HeuristicAnalyzer._find_name_by_content(ws, data_start, sample_end, max_col)
             if name_col:
                 col_types['name_cn'] = name_col
+
+        # Фаза 5: Если name_en найден, но контент — русский/китайский → переназначаем в name_cn
+        # (но только если заголовок НЕ содержит явных английских маркеров)
+        name_en_col = col_types.get('name_en', 0)
+        name_cn_col = col_types.get('name_cn', 0)
+        if name_en_col and not name_cn_col:
+            # Проверяем заголовок на явные английские маркеры
+            header_text = header_texts.get(name_en_col, "")
+            has_en_marker = any(
+                m in header_text
+                for m in ["英文", "english", "en)", "en）", "(en", "（en", "inglés"]
+            )
+            if not has_en_marker:
+                # Проверяем контент name_en: если там кириллица или CJK → это name_cn
+                has_cjk_cyrillic = False
+                for r in range(data_start, sample_end):
+                    v = HeuristicAnalyzer.get_cell_value(ws, r, name_en_col)
+                    if v and isinstance(v, str):
+                        if CJK_RE.search(v) or CYRILLIC_RE.search(v):
+                            has_cjk_cyrillic = True
+                            break
+                if has_cjk_cyrillic:
+                    col_types['name_cn'] = name_en_col
+                    del col_types['name_en']
 
         logger.debug(
             "Определены колонки: part_no=%s, name_cn=%s, name_en=%s, qty=%s",
@@ -677,6 +705,14 @@ class HeuristicAnalyzer:
             col_types.get('name_en'), col_types.get('qty'),
         )
         return col_types
+
+    @staticmethod
+    def _get_part_no_keywords() -> List[str]:
+        """Вернуть список PART_NO_KEYWORDS для внешнего использования.
+
+        Нужно для card_parser._collect_raw_rows, где нет прямого импорта PART_NO_KEYWORDS.
+        """
+        return PART_NO_KEYWORDS
 
     @staticmethod
     def get_cell_value(ws: Any, row: int, col: int) -> Any:
@@ -692,10 +728,40 @@ class HeuristicAnalyzer:
             return None
 
     @staticmethod
-    def _find_part_no_by_content(ws: Any, start_row: int, end_row: int, max_col: int) -> int:
-        """Fallback: найти колонку парт-номера по содержимому ячеек."""
+    def _find_part_no_by_content(
+        ws: Any, start_row: int, end_row: int, max_col: int,
+        header_texts: Optional[Dict[int, str]] = None,
+    ) -> int:
+        """Fallback: найти колонку парт-номера по содержимому ячеек.
+
+        Args:
+            ws: Лист
+            start_row, end_row: Диапазон строк для анализа
+            max_col: Максимальная колонка
+            header_texts: Заголовки колонок (для исключения мета-колонок)
+
+        Returns:
+            Номер колонки или 0.
+        """
         col_scores: Dict[int, float] = {}
         for c in range(1, max_col + 1):
+            # Исключаем колонки, заголовок которых — заведомо служебный
+            if header_texts:
+                text = header_texts.get(c, "")
+                if text:
+                    is_meta = False
+                    for kw in STRICT_META_KEYWORDS:
+                        if kw.lower() in text:
+                            is_meta = True
+                            break
+                    if not is_meta:
+                        for kw in META_KEYWORDS:
+                            if kw.lower() in text:
+                                is_meta = True
+                                break
+                    if is_meta:
+                        continue
+
             hits = 0
             total = 0
             for r in range(start_row, end_row):
@@ -891,11 +957,22 @@ class HeuristicAnalyzer:
         return card_no
 
     @staticmethod
-    def find_part_table(ws: Any) -> Optional[Tuple[int, int, int, int]]:
+    def find_part_table(
+        ws: Any,
+        start_row: int = 1,
+    ) -> Optional[Tuple[int, int, int, int]]:
         """Найти таблицу деталей в листе.
 
         Анализирует строки в поиске заголовков таблицы деталей
         (part_no, qty, name).
+
+        Поддерживает 2-строчные заголовки: если name/qty не найдены в той же
+        строке, что и part_no — продолжает поиск на следующих 3-5 строках
+        (характерно для SWM карт).
+
+        Args:
+            ws: Лист Excel.
+            start_row: Номер строки, с которой начинать поиск (для многооперационных листов).
 
         Returns:
             (header_row, part_no_col, qty_col, name_col) или None.
@@ -903,13 +980,20 @@ class HeuristicAnalyzer:
         max_row = ws.max_row or 200
         max_col = ws.max_column or 50
 
-        for row_idx in range(1, max_row + 1):
+        scan_width = HeuristicAnalyzer.MAX_COL_SCAN_WIDTH
+
+        for row_idx in range(start_row, max_row + 1):
             row_values: List[str] = []
-            for col_idx in range(1, min(max_col + 1, 25)):
+            for col_idx in range(1, min(max_col + 1, scan_width)):
                 v = HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx)
                 row_values.append(str(v).strip().lower() if v is not None else "")
 
             if not any(row_values):
+                continue
+
+            # Строка-заголовок должна содержать минимум 2 непустых ячейки
+            non_empty_count = sum(1 for v in row_values if v)
+            if non_empty_count < 2:
                 continue
 
             # Оценка строки как заголовка таблицы деталей
@@ -921,31 +1005,117 @@ class HeuristicAnalyzer:
             if not has_part_no:
                 continue
 
-            # Определяем колонки
+            # Определяем колонки (из сканированного диапазона колонок)
             part_no_col: Optional[int] = None
             qty_col: Optional[int] = None
             name_col: Optional[int] = None
 
             for col_idx, val in enumerate(row_values, 1):
                 if any(kw in val for kw in PART_NO_KEYWORDS):
-                    part_no_col = col_idx
+                    if len(val) < 50:
+                        part_no_col = col_idx
+                        break
+
+            if part_no_col is None:
+                continue
+
+            for col_idx, val in enumerate(row_values, 1):
                 if any(kw in val for kw in QTY_KEYWORDS):
                     qty_col = col_idx
                 if any(kw in val for kw in NAME_KEYWORDS):
                     name_col = col_idx
 
-            if part_no_col is not None:
-                result = (
-                    row_idx,
-                    part_no_col,
-                    qty_col or 0,
-                    name_col or 0,
-                )
-                logger.debug(
-                    "Таблица деталей: строка %d, part_no=%s, qty=%s, name=%s",
-                    row_idx, part_no_col, qty_col, name_col,
-                )
-                return result
+            # ── Multi-row header scan (BELOW) ──
+            # Если qty или name не найдены в той же строке — ищем на следующих 10 строках
+            # (характерно для SWM карт, где part_no на R21, а name/qty на R28 — отступ 7 строк)
+            if qty_col is None or name_col is None:
+                for scan_offset in range(1, min(11, max_row - row_idx + 1)):
+                    scan_row = row_idx + scan_offset
+                    scan_values: List[str] = []
+                    for col_idx in range(1, min(max_col + 1, scan_width)):
+                        v = HeuristicAnalyzer.get_cell_value(ws, scan_row, col_idx)
+                        scan_values.append(str(v).strip().lower() if v is not None else "")
+
+                    if not any(scan_values):
+                        continue
+
+                    # Проверяем на part_no в сканируемой строке — НЕ забираем её как qty/name
+                    has_pn_scan = any(
+                        kw in sv for sv in scan_values for kw in PART_NO_KEYWORDS
+                    )
+                    if has_pn_scan:
+                        # Это новый заголовок — останавливаем поиск
+                        break
+
+                    if qty_col is None:
+                        for col_idx, val in enumerate(scan_values, 1):
+                            if any(kw in val for kw in QTY_KEYWORDS):
+                                qty_col = col_idx
+                                break
+                    if name_col is None:
+                        for col_idx, val in enumerate(scan_values, 1):
+                            if any(kw in val for kw in NAME_KEYWORDS):
+                                name_col = col_idx
+                                break
+
+                    if qty_col is not None and name_col is not None:
+                        logger.debug(
+                            "Найдены name/qty на строке %d (multi-row header below)",
+                            scan_row,
+                        )
+                        break
+
+            # ── Row-above header scan ──
+            # Если qty/name всё ещё не найдены — ищем ВЫШЕ part_no-заголовка
+            # (для SWM-формата, где qty может быть в той же строке, но правее лимита,
+            #  а заголовок qty мог быть расположен в строке над part_no)
+            if qty_col is None or name_col is None:
+                for scan_offset in range(1, min(6, row_idx)):
+                    scan_row = row_idx - scan_offset
+                    scan_values: List[str] = []
+                    for col_idx in range(1, min(max_col + 1, scan_width)):
+                        v = HeuristicAnalyzer.get_cell_value(ws, scan_row, col_idx)
+                        scan_values.append(str(v).strip().lower() if v is not None else "")
+
+                    if not any(scan_values):
+                        continue
+
+                    # Не забираем строку с part_no как qty/name
+                    has_pn_above = any(
+                        kw in sv for sv in scan_values for kw in PART_NO_KEYWORDS
+                    )
+                    if has_pn_above:
+                        continue
+
+                    if qty_col is None:
+                        for col_idx, val in enumerate(scan_values, 1):
+                            if any(kw in val for kw in QTY_KEYWORDS):
+                                qty_col = col_idx
+                                break
+                    if name_col is None:
+                        for col_idx, val in enumerate(scan_values, 1):
+                            if any(kw in val for kw in NAME_KEYWORDS):
+                                name_col = col_idx
+                                break
+
+                    if qty_col is not None and name_col is not None:
+                        logger.debug(
+                            "Найдены name/qty на строке %d (row-above header)",
+                            scan_row,
+                        )
+                        break
+
+            result = (
+                row_idx,
+                part_no_col,
+                qty_col or 0,
+                name_col or 0,
+            )
+            logger.debug(
+                "Таблица деталей: строка %d, part_no=%s, qty=%s, name=%s",
+                row_idx, part_no_col, qty_col, name_col,
+            )
+            return result
 
         return None
 
@@ -1003,9 +1173,11 @@ class HeuristicAnalyzer:
             return True
 
         # Спец-листы (附件) с одной qty-колонкой
+        # (в т.ч. когда ВСЕ колонки классифицированы как part_no/name/qty,
+        #  и config_cols пуст — qty-колонка сама служит конфигурацией)
         qty_col = col_types.get('qty', 0)
         has_name = 'name_cn' in col_types or 'name_en' in col_types
-        if config_cols and qty_col > 0 and has_name:
+        if qty_col > 0 and has_name:
             return True
 
         return False
