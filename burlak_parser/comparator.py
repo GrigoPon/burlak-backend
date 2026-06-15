@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 
 
 class DiscrepancyType:
-    """Типы расхождений (человеко-читаемые названия)."""
-    ONLY_IN_BOM = "Есть в спецификации, нет в картах"
-    ONLY_IN_CARDS = "Есть в картах, нет в спецификации"
+    """Типы расхождений."""
+    ONLY_IN_BOM = "Есть в BOM, нет в операционных картах"
+    ONLY_IN_CARDS = "Есть в операционных картах, нет в BOM"
     QUANTITY_MISMATCH = "Разное количество"
     FUZZY_MATCH = "Разный формат номера"
 
@@ -628,8 +628,8 @@ def _format_multi_config_report(result: MultiConfigComparisonResult) -> str:
         sep,
         "",
         f"  Всего проверено комплектаций: {result.total_configs}",
-        f"  Деталей в спецификации:     {result.total_bom_unique_parts}",
-        f"  Деталей в инструкциях:      {result.total_cards_unique_parts}",
+        f"  Деталей в BOM:              {result.total_bom_unique_parts}",
+        f"  Деталей в операционных картах: {result.total_cards_unique_parts}",
         "",
     ]
 
@@ -646,8 +646,8 @@ def _format_multi_config_report(result: MultiConfigComparisonResult) -> str:
 
     lines.append(f"  Найдено несоответствий: {total}")
     lines.append(f"    • Разное количество:         {qty_mismatch}")
-    lines.append(f"    • Есть в спецификации, нет в инструкциях: {only_bom}")
-    lines.append(f"    • Есть в инструкциях, нет в спецификации: {only_cards}")
+    lines.append(f"    • Есть в BOM, нет в операционных картах: {only_bom}")
+    lines.append(f"    • Есть в операционных картах, нет в BOM: {only_cards}")
     lines.append("")
 
     # Сводка по комплектациям — компактная
@@ -668,8 +668,8 @@ def _format_multi_config_report(result: MultiConfigComparisonResult) -> str:
     # Группировка по типам — уникальные детали с номерами комплектаций
     type_order = [
         (DiscrepancyType.QUANTITY_MISMATCH, "РАЗНОЕ КОЛИЧЕСТВО"),
-        (DiscrepancyType.ONLY_IN_BOM, "ЕСТЬ В СПЕЦИФИКАЦИИ, НЕТ В ИНСТРУКЦИЯХ"),
-        (DiscrepancyType.ONLY_IN_CARDS, "ЕСТЬ В ИНСТРУКЦИЯХ, НЕТ В СПЕЦИФИКАЦИИ"),
+        (DiscrepancyType.ONLY_IN_BOM, "ЕСТЬ В BOM, НЕТ В ОПЕРАЦИОННЫХ КАРТАХ"),
+        (DiscrepancyType.ONLY_IN_CARDS, "ЕСТЬ В ОПЕРАЦИОННЫХ КАРТАХ, НЕТ В BOM"),
     ]
 
     for dtype, label in type_order:
@@ -691,11 +691,11 @@ def _format_multi_config_report(result: MultiConfigComparisonResult) -> str:
         lines.append(f"  ── {label}: {len(type_disc)} записей ──")
         
         if dtype == DiscrepancyType.QUANTITY_MISMATCH:
-            lines.append(f"  {'Деталь':<20} {'В специф.':<10} {'В инструкц.':<11} Комплектации")
+            lines.append(f"  {'Деталь':<20} {'В BOM':<10} {'В картах':<11} Комплектации")
         elif dtype == DiscrepancyType.ONLY_IN_BOM:
-            lines.append(f"  {'Деталь':<20} {'В специф.':<10} Комплектации")
+            lines.append(f"  {'Деталь':<20} {'В BOM':<10} Комплектации")
         else:
-            lines.append(f"  {'Деталь':<20} {'В инструкц.':<11} Комплектации")
+            lines.append(f"  {'Деталь':<20} {'В картах':<11} Комплектации")
 
         for pn in sorted_parts[:30]:
             g = part_groups[pn]
