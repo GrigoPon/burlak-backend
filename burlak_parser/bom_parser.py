@@ -1,13 +1,17 @@
-"""Модуль чтения BOM-файла.
+"""Модуль чтения BOM-файла (Bill of Materials / Ведомость материалов).
 
 Формат: .xlsx (таблица на китайском/английском языках).
-Структура (по спецификации ТЗ):
-  - Колонка 1: Порядковый номер
-  - Колонки 2-5: Игнорируются
-  - Колонка 6: Каталожный номер / Парт-номер
-  - Колонка 7: Наименование детали (кит.)
-  - Колонка 8: Наименование детали (англ.)
-  - Последующие колонки: Коды комплектаций (матрица применимости)
+
+Алгоритм работы:
+  1. Автоматически находит строку заголовков по ключевым словам (零件号, PartNo).
+  2. Динамически определяет колонки: парт-номер, название (CN), название (EN).
+  3. Автоматически находит ВСЕ колонки комплектаций (config columns).
+  4. Фильтрует VIN-разбивку (колонки без числовых значений).
+  5. Обрабатывает ВСЕ найденные комплектации одновременно.
+
+Универсален — не привязан к конкретным моделям автомобилей или кодам.
+
+Класс BOMService — обёртка для использования в FastAPI/серверной архитектуре.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
@@ -361,3 +365,79 @@ def get_config_quantities(bom: BOMData, config_name: str) -> Dict[str, PartInfo]
             result[part_no] = part
 
     return result
+
+
+def get_all_config_quantities(bom: BOMData) -> Dict[str, Dict[str, PartInfo]]:
+    """Получить данные деталей для ВСЕХ комплектаций одновременно.
+
+    Args:
+        bom: Распарсенные BOM-данные.
+
+    Returns:
+        Словарь {config_name: {part_number: PartInfo}}.
+    """
+    result: Dict[str, Dict[str, PartInfo]] = {}
+    for config_name in bom.config_names:
+        result[config_name] = get_config_quantities(bom, config_name)
+    return result
+
+
+class BOMService:
+    """Сервис парсинга BOM-файлов.
+
+    Подготовлен для миграции на серверную архитектуру (FastAPI + SQLite + Redis).
+    Инкапсулирует всю логику парсинга BOM в одном классе.
+    """
+
+    def __init__(self):
+        self._bom: Optional[BOMData] = None
+
+    @property
+    def bom(self) -> Optional[BOMData]:
+        return self._bom
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._bom is not None
+
+    def load(self, file_path: str) -> BOMData:
+        """Загрузить и распарсить BOM-файл.
+
+        Args:
+            file_path: Путь к .xlsx файлу BOM.
+
+        Returns:
+            Распарсенные данные BOMData.
+        """
+        self._bom = parse_bom(file_path)
+        return self._bom
+
+    def get_config_names(self) -> List[str]:
+        """Получить список названий всех найденных комплектаций."""
+        if not self._bom:
+            raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
+        return list(self._bom.config_names)
+
+    def get_config_count(self) -> int:
+        """Получить количество найденных комплектаций."""
+        if not self._bom:
+            return 0
+        return len(self._bom.config_names)
+
+    def get_parts_for_config(self, config_name: str) -> Dict[str, PartInfo]:
+        """Получить детали для конкретной комплектации."""
+        if not self._bom:
+            raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
+        return get_config_quantities(self._bom, config_name)
+
+    def get_all_configs(self) -> Dict[str, Dict[str, PartInfo]]:
+        """Получить детали для ВСЕХ комплектаций."""
+        if not self._bom:
+            raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
+        return get_all_config_quantities(self._bom)
+
+    def get_all_part_numbers(self) -> Set[str]:
+        """Получить множество ВСЕХ уникальных парт-номеров из BOM."""
+        if not self._bom:
+            return set()
+        return set(self._bom.parts.keys())

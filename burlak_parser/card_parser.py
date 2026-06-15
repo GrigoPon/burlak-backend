@@ -1,7 +1,8 @@
 """Модуль чтения операционных карт (ОК).
 
-Формат: Множество файлов .xlsx (распределённых по папкам или загружаемых архивом).
-Специфика обработки:
+Формат: Множество файлов .xlsx/.xls (распределённых по папкам или архивом).
+Алгоритм обработки:
+  - Автоматическая фильтрация: операционные карты vs служебные файлы.
   - Каждый файл может содержать несколько листов. Один лист = одна операция.
   - Пустые листы или листы без номера карты — игнорируются.
   - Извлекаются: [Парт-номер запчасти] и [Необходимое количество].
@@ -9,24 +10,22 @@
     система склеивает строки.
   - Повторяющиеся детали в одной карте или в разных картах — суммируются.
   - Поддерживаются .xlsx (openpyxl) и .xls (xlrd).
+  - Многопоточный парсинг (ProcessPoolExecutor) для больших объёмов (>1500 карт).
+
+Класс CardService — обёртка для использования в FastAPI/серверной архитектуре.
 """
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import re
-import shutil
 import tempfile
-import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import openpyxl
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -40,28 +39,29 @@ class ExcelReader:
     Использует openpyxl для .xlsx, xlrd для .xls.
     """
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, read_only: bool = False):
         self.file_path = file_path
         self._wb: Any = None
-        self._engine: str = ""  # 'openpyxl' или 'xlrd'
+        self._engine: str = ""
         self._sheet_names: List[str] = []
         self._sheets: Dict[str, Any] = {}
+        self._read_only = read_only
         self._load()
 
     def _load(self) -> None:
-        """Загрузить файл. Выбор движка по расширению."""
         ext = os.path.splitext(self.file_path)[1].lower()
 
         if ext == ".xls":
-            # .xls → сразу xlrd (openpyxl может зависнуть на .xls!)
             self._load_via_xlrd()
         else:
-            # .xlsx (и всё остальное) → openpyxl, при ошибке — xlrd
             try:
-                wb = openpyxl.load_workbook(self.file_path, data_only=True)
+                import openpyxl
+                wb = openpyxl.load_workbook(
+                    self.file_path, data_only=True,
+                )
                 self._engine = "openpyxl"
                 self._wb = wb
-                self._sheet_names = wb.sheetnames
+                self._sheet_names = list(wb.sheetnames)
                 for sn in self._sheet_names:
                     self._sheets[sn] = wb[sn]
                 logger.debug(
@@ -71,11 +71,9 @@ class ExcelReader:
                 return
             except Exception:
                 pass
-            # Если openpyxl не справился, пробуем xlrd
             self._load_via_xlrd()
 
     def _load_via_xlrd(self) -> None:
-        """Загрузить файл через xlrd."""
         try:
             import xlrd
         except ImportError:
@@ -87,7 +85,7 @@ class ExcelReader:
             wb = xlrd.open_workbook(self.file_path)
             self._engine = "xlrd"
             self._wb = wb
-            self._sheet_names = wb.sheet_names()
+            self._sheet_names = list(wb.sheet_names())
             for sn in self._sheet_names:
                 self._sheets[sn] = wb.sheet_by_name(sn)
             logger.debug(
@@ -124,97 +122,41 @@ class ExcelSheet:
     def max_row(self) -> int:
         if self._engine == "openpyxl":
             return self._ws.max_row or 0
-        else:  # xlrd
+        else:
             return self._ws.nrows
 
     @property
     def max_column(self) -> int:
         if self._engine == "openpyxl":
             return self._ws.max_column or 0
-        else:  # xlrd
+        else:
             return self._ws.ncols
 
     def cell_value(self, row: int, column: int) -> Any:
-        """Получить значение ячейки (row и column — 1-индексированные)."""
         try:
             if self._engine == "openpyxl":
                 return self._ws.cell(row=row, column=column).value
-            else:  # xlrd
+            else:
                 val = self._ws.cell_value(row - 1, column - 1)
-                # xlrd возвращает пустую строку для пустых ячеек, приводим к None
                 if val == "" or val is None:
                     return None
-                # xlrd возвращает float для чисел, преобразуем в int если целое
                 if isinstance(val, float) and val == int(val):
                     return int(val)
                 return val
         except Exception:
             return None
 
-    def iter_rows_values(self, min_row: int, max_row: int, max_col: int) -> List[List[Any]]:
-        """Получить диапазон значений как список строк."""
-        result: List[List[Any]] = []
-        for r in range(min_row, max_row + 1):
-            row_vals: List[Any] = []
-            for c in range(1, max_col + 1):
-                row_vals.append(self.cell_value(r, c))
-            result.append(row_vals)
-        return result
 
-
-# Шаблоны для поиска заголовков таблицы с деталями в операционных картах
-PART_TABLE_HEADER_KEYWORDS = [
-    "物料清单", "bom", "零件清单", "物料列表",
-    "序", "号", "料号", "零件号", "part no", "partno",
-    "物料名称", "零件名称", "描述",
-    "规格", "单车用量", "用量", "qty", "数量",
-    "适用版型",
-]
-
-# Шаблоны для поиска заголовка таблицы (столбцов) — должны быть в одной строке
-TABLE_COLUMN_PATTERNS = [
-    # 序号 | 料号 | 物料名称/描述 | 规格 | 单车用量 | 适用版型
-    [r"序.*号", r"料号|零件号|part\s*no", r"物料名称|零件名称|描述", r"规格", r"单车用量|用量|qty|数量"],
-    # Более короткие таблицы
-    [r"序.*号", r"料号|零件号|part\s*no", r"物料名称|零件名称|描述", r"单车用量|用量|qty"],
-    [r"料号|零件号|part\s*no", r"物料名称|零件名称", r"数量|用量|qty"],
-    [r"序.*号", r"零件号|part\s*no", r"零件名称", r"数量|用量"],
-]
-
-
-# ─── Шаблоны названий листов, которые пропускаются при разделении ──────
-# Это служебные/пустые листы, не содержащие операционных данных.
-SKIP_TEMPLATE_PATTERNS: List[str] = [
-    "空表",          # Пустой бланк / шаблон
-    "填写范本",      # Образец заполнения
-    "封面",          # Обложка
-    "目录",          # Оглавление
-    "文件发放回收记录表",  # Журнал документооборота
-    "变更记录",      # История изменений (служебный лист)
-]
-
-
-def _is_template_sheet(sheet_name: str) -> bool:
-    """Проверить, является ли лист шаблоном/служебным.
-
-    Сравнивает имя листа со списком известных шаблонных паттернов.
-    Использует поиск подстроки (не точное совпадение), чтобы ловить
-    варианты типа «空表 (2)».
-    """
-    for pattern in SKIP_TEMPLATE_PATTERNS:
-        if pattern in sheet_name:
-            return True
-    return False
-
+# ─── Структуры данных ────────────────────────────────────────────────────────
 
 @dataclass
 class CardSheetInfo:
     """Информация об одном листе операционной карты."""
-    card_number: str  # Номер карты (из документа / имени файла)
-    sheet_name: str   # Имя листа
-    operation_name: str = ""  # Название операции
-    is_valid: bool = False    # Найдена таблица с деталями
-    has_data: bool = False    # Есть ли какие-либо данные на листе (даже без таблицы деталей)
+    card_number: str
+    sheet_name: str
+    operation_name: str = ""
+    is_valid: bool = False
+    has_data: bool = False
 
 
 @dataclass
@@ -222,8 +164,8 @@ class CardPart:
     """Деталь, найденная в операционной карте."""
     part_number: str
     quantity: float
-    source_card: str  # Номер карты
-    source_sheet: str  # Имя листа
+    source_card: str
+    source_sheet: str
 
 
 @dataclass
@@ -233,27 +175,28 @@ class CardParseResult:
     file_path: str
     sheets: List[CardSheetInfo]
     parts: List[CardPart]
-    # Агрегированные детали по всем листам карты
     aggregated_parts: Dict[str, float]  # part_number -> total_qty
+    is_service_file: bool = False  # True если файл был определён как служебный
+    is_final_check: bool = False   # True если из папки CP7/CP8
 
 
 @dataclass
 class CardsData:
     """Результат парсинга всех операционных карт."""
-    all_parts: Dict[str, float]  # part_number -> суммарное количество по ВСЕМ картам
-    part_sources: Dict[str, List[Tuple[str, str, float]]]  # part_number -> [(card_number, sheet_name, qty)]
+    all_parts: Dict[str, float]          # part_number -> суммарное количество
+    part_sources: Dict[str, List[Tuple[str, str, float]]]  # part_number -> [(card, sheet, qty)]
     card_results: List[CardParseResult]
     total_cards_processed: int = 0
     total_sheets_processed: int = 0
     total_sheets_skipped: int = 0
+    service_files_skipped: int = 0        # Количество пропущенных служебных файлов
+    corrupted_files: List[str] = None     # Список повреждённых файлов (пути)
 
+
+# ─── Вспомогательные функции ─────────────────────────────────────────────────
 
 def _extract_card_number(file_path: str, ws: "ExcelSheet") -> str:
-    """Извлечь номер карты из файла.
-
-    Сначала проверяет содержимое листа на наличие номера документа,
-    затем использует имя файла.
-    """
+    """Извлечь номер карты: сначала из содержимого, затем из имени файла."""
     max_row = min(10, ws.max_row or 10)
     max_col = min(10, ws.max_column or 10)
     for row_idx in range(1, max_row + 1):
@@ -266,20 +209,14 @@ def _extract_card_number(file_path: str, ws: "ExcelSheet") -> str:
                     return match.group(1)
 
     basename = os.path.basename(file_path)
-    name = os.path.splitext(basename)[0]
-    return name
+    return os.path.splitext(basename)[0]
 
 
 def _find_part_table(ws: "ExcelSheet") -> Optional[Tuple[int, int, int, int]]:
     """Найти таблицу с деталями в листе.
 
-    Ищет строку заголовка, содержащую "料号" или "零件号" (парт-номер).
-    Если также найдена колонка количества (单车用量/用量/数量/qty) — использует её.
-    Если колонка количества не найдена — quantity по умолчанию = 1.
-
     Returns:
-        (header_row, part_no_col, qty_col, name_col) или None, если таблица не найдена.
-        qty_col может быть 0, если колонка количества не найдена.
+        (header_row, part_no_col, qty_col, name_col) или None.
     """
     max_row = ws.max_row or 200
     max_col = ws.max_column or 100
@@ -314,37 +251,22 @@ def _find_part_table(ws: "ExcelSheet") -> Optional[Tuple[int, int, int, int]]:
                 name_col = col_idx
 
         if part_no_col is not None:
-            logger.debug(
-                "Таблица деталей найдена: строка %d, part_no=%s, qty=%s, name=%s",
-                row_idx, part_no_col, qty_col, name_col,
-            )
             return (row_idx, part_no_col, qty_col or 0, name_col or 0)
 
     return None
 
 
 def _extract_part_number(text: str) -> str:
-    """Очистить и нормализовать парт-номер.
-
-    Удаляет пробелы, переносы строк, лишние символы.
-    """
+    """Очистить и нормализовать парт-номер."""
     cleaned = re.sub(r"[\s\n\r\t]+", "", text.strip())
-    # Удаляем символы-разделители на конце (признак переноса)
     cleaned = cleaned.rstrip("-—–")
     return cleaned
 
 
-def _merge_multiline_part_numbers(rows: List[Tuple[int, str, float, str, int]]) -> List[Tuple[str, float, str, int]]:
-    """Склеить парт-номера, перенесённые на следующую строку.
-
-    Если строка заканчивается на '-', значит парт-номер продолжается на следующей строке.
-
-    Args:
-        rows: Список (row_idx, raw_part_no, qty, name, source_col) из сырых данных.
-
-    Returns:
-        Список (part_no, qty, name, first_row_idx) после склейки.
-    """
+def _merge_multiline_part_numbers(
+    rows: List[Tuple[int, str, float, str, int]],
+) -> List[Tuple[str, float, str, int]]:
+    """Склеить парт-номера, перенесённые на следующую строку."""
     merged: List[Tuple[str, float, str, int]] = []
     buffer = ""
     buffer_qty: Optional[float] = None
@@ -354,11 +276,9 @@ def _merge_multiline_part_numbers(rows: List[Tuple[int, str, float, str, int]]) 
 
     for row_idx, raw_part_no, qty, name, _ in rows:
         if last_was_continued:
-            # Продолжение предыдущего номера
             buffer += _extract_part_number(raw_part_no)
             last_was_continued = False
         elif raw_part_no.rstrip().endswith("-") or raw_part_no.rstrip().endswith("—") or raw_part_no.rstrip().endswith("–"):
-            # Начало переноса
             buffer = _extract_part_number(raw_part_no.rstrip("-—–"))
             buffer_qty = qty
             buffer_name = name
@@ -371,25 +291,31 @@ def _merge_multiline_part_numbers(rows: List[Tuple[int, str, float, str, int]]) 
             buffer_name = name
             buffer_row = row_idx
 
-        # Если у нас есть данные, добавляем их
         if buffer and buffer_qty is not None:
             merged.append((buffer, buffer_qty, buffer_name, buffer_row))
             buffer = ""
             buffer_qty = None
             buffer_name = ""
 
-    # Добавляем оставшийся буфер, если есть
     if buffer and buffer_qty is not None:
         merged.append((buffer, buffer_qty, buffer_name, buffer_row))
 
     return merged
 
 
-def parse_card_file(file_path: str) -> CardParseResult:
+# ─── Парсинг одного файла ────────────────────────────────────────────────────
+
+def parse_card_file(
+    file_path: str,
+    is_service_file: bool = False,
+    is_final_check: bool = False,
+) -> CardParseResult:
     """Разобрать один файл операционной карты.
 
     Args:
         file_path: Путь к .xlsx или .xls файлу.
+        is_service_file: True если файл классифицирован как служебный.
+        is_final_check: True если файл из папки CP7/CP8.
 
     Returns:
         CardParseResult с данными всех непустых листов.
@@ -402,6 +328,28 @@ def parse_card_file(file_path: str) -> CardParseResult:
     sheets_info: List[CardSheetInfo] = []
     aggregated: Dict[str, float] = {}
     card_number = ""
+
+    # Если файл служебный — только собираем информацию о листах, без парсинга деталей
+    if is_service_file:
+        for sheet_name in reader.sheet_names:
+            ws = reader.get_sheet(sheet_name)
+            sheet_has_data = _check_sheet_has_data(ws)
+            sheets_info.append(CardSheetInfo(
+                card_number=card_number or basename,
+                sheet_name=sheet_name,
+                is_valid=False,
+                has_data=sheet_has_data,
+            ))
+        reader.close()
+        return CardParseResult(
+            card_number=basename,
+            file_path=file_path,
+            sheets=sheets_info,
+            parts=card_parts,
+            aggregated_parts=aggregated,
+            is_service_file=True,
+            is_final_check=is_final_check,
+        )
 
     for sheet_name in reader.sheet_names:
         ws = reader.get_sheet(sheet_name)
@@ -418,29 +366,7 @@ def parse_card_file(file_path: str) -> CardParseResult:
             ))
             continue
 
-        # Проверяем, есть ли вообще какие-то данные на листе
-        # Стратегия: проверяем первые 10 строк, затем сэмплируем
-        # каждую 20-ю строку до конца — чтобы не пропустить данные
-        # в середине или конце листа.
-        sheet_has_data = False
-        # Проверка начала листа (строки 1-10)
-        for r in range(1, min(max_row, 10) + 1):
-            for c in range(1, min(max_col, 10) + 1):
-                if ws.cell_value(r, c) is not None:
-                    sheet_has_data = True
-                    break
-            if sheet_has_data:
-                break
-        # Если в начале пусто — сэмплируем с динамическим шагом (~10 проверок)
-        if not sheet_has_data and max_row > 10:
-            step = max(1, (max_row - 15) // 10)
-            for r in range(15, max_row + 1, step):
-                for c in range(1, min(max_col, 10) + 1):
-                    if ws.cell_value(r, c) is not None:
-                        sheet_has_data = True
-                        break
-                if sheet_has_data:
-                    break
+        sheet_has_data = _check_sheet_has_data(ws)
 
         if not sheet_has_data:
             sheets_info.append(CardSheetInfo(
@@ -451,7 +377,7 @@ def parse_card_file(file_path: str) -> CardParseResult:
             ))
             continue
 
-        # Извлекаем номер карты из первого листа
+        # Извлекаем номер карты из первого непустого листа
         if not card_number:
             card_number = _extract_card_number(file_path, ws)
 
@@ -470,80 +396,10 @@ def parse_card_file(file_path: str) -> CardParseResult:
         header_row, part_no_col, qty_col, name_col = table_info
 
         # Извлекаем название операции
-        operation_name = ""
-        for r in range(1, min(header_row, 15)):
-            for c in range(1, min(max_col + 1, 10)):
-                val = ws.cell_value(r, c)
-                if val is None:
-                    continue
-                text = str(val).strip()
-                if "作业要素" in text:
-                    for check_c in range(c + 1, min(c + 3, max_col + 1)):
-                        next_val = ws.cell_value(r, check_c)
-                        if next_val and len(str(next_val).strip()) > 1 and "作业要素" not in str(next_val):
-                            operation_name = str(next_val).strip()
-                            break
-                    if not operation_name:
-                        next_val = ws.cell_value(r + 1, c)
-                        if next_val and len(str(next_val).strip()) > 1:
-                            operation_name = str(next_val).strip()
-                elif operation_name == "" and len(text) > 3 and \
-                     not any(kw in text for kw in ["作业指导书", "文件编号", "工具/夹具",
-                                                    "版本", "发行时间", "关键点", "车间",
-                                                    "序号", "变更记录", "物料清单",
-                                                    "说明性符号", "编制", "校对"]):
-                    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
-                        operation_name = text
+        operation_name = _extract_operation_name(ws, header_row, max_col)
 
-        # Собираем строки таблицы с деталями (каждую строку try/except)
-        raw_rows: List[Tuple[int, str, float, str, int]] = []
-        max_data_row = min(max_row, header_row + 500)
-
-        for row_idx in range(header_row + 1, max_data_row + 1):
-            try:
-                raw_part_no = ws.cell_value(row_idx, part_no_col)
-                if raw_part_no is None:
-                    all_empty = True
-                    for c in range(1, min(max_col + 1, 20)):
-                        if ws.cell_value(row_idx, c) is not None:
-                            all_empty = False
-                            break
-                    if all_empty:
-                        continue
-                    continue
-
-                raw_part_no_str = str(raw_part_no).strip()
-                if not raw_part_no_str:
-                    continue
-
-                # Пропускаем служебные строки
-                skip_keywords = ["物料清单", "变更记录", "编制", "校对", "审核", "批准", "说明性符号",
-                                 "工具", "夹具", "文件编号", "文件版次", "无"]
-                if any(kw in raw_part_no_str.lower() for kw in skip_keywords):
-                    continue
-
-                # Извлекаем количество
-                if qty_col > 0:
-                    raw_qty = ws.cell_value(row_idx, qty_col)
-                    try:
-                        qty = float(raw_qty) if raw_qty is not None else 1.0
-                    except (ValueError, TypeError):
-                        qty = 1.0
-                else:
-                    qty = 1.0
-
-                # Извлекаем название
-                name = ""
-                if name_col > 0:
-                    name_val = ws.cell_value(row_idx, name_col)
-                    name = str(name_val).strip() if name_val is not None else ""
-
-                raw_rows.append((row_idx, raw_part_no_str, qty, name, part_no_col))
-
-            except Exception:
-                # Если строка битая — просто пропускаем её
-                logger.debug("Ошибка при обработке строки %d в %s, пропускаем", row_idx, basename)
-                continue
+        # Собираем строки таблицы
+        raw_rows = _collect_raw_rows(ws, header_row, max_row, max_col, part_no_col, qty_col, name_col, basename)
 
         # Склеиваем перенесённые парт-номера
         merged_parts = _merge_multiline_part_numbers(raw_rows)
@@ -556,10 +412,7 @@ def parse_card_file(file_path: str) -> CardParseResult:
                 source_card=card_number or basename,
                 source_sheet=sheet_name,
             ))
-            if part_no in aggregated:
-                aggregated[part_no] += qty
-            else:
-                aggregated[part_no] = qty
+            aggregated[part_no] = aggregated.get(part_no, 0.0) + qty
 
         sheets_info.append(CardSheetInfo(
             card_number=card_number or basename,
@@ -577,15 +430,122 @@ def parse_card_file(file_path: str) -> CardParseResult:
         sheets=sheets_info,
         parts=card_parts,
         aggregated_parts=aggregated,
+        is_final_check=is_final_check,
     )
 
 
-def _find_excel_files(path: str, extract_dir: Optional[str] = None) -> List[str]:
-    """Найти все .xlsx и .xls файлы по указанному пути (рекурсивно).
+def _check_sheet_has_data(ws: ExcelSheet) -> bool:
+    """Проверить, есть ли данные на листе (проверка начала и сэмплирование)."""
+    max_row = ws.max_row
+    max_col = ws.max_column
 
-    Поддерживает как папки, так и ZIP-архивы.
-    Для ZIP-архива файлы извлекаются в extract_dir (или persistent temp dir).
-    """
+    for r in range(1, min(max_row, 10) + 1):
+        for c in range(1, min(max_col, 10) + 1):
+            if ws.cell_value(r, c) is not None:
+                return True
+
+    if max_row > 10:
+        step = max(1, (max_row - 15) // 10)
+        for r in range(15, max_row + 1, step):
+            for c in range(1, min(max_col, 10) + 1):
+                if ws.cell_value(r, c) is not None:
+                    return True
+
+    return False
+
+
+def _extract_operation_name(ws: ExcelSheet, header_row: int, max_col: int) -> str:
+    """Извлечь название операции из листа."""
+    for r in range(1, min(header_row, 15)):
+        for c in range(1, min(max_col + 1, 10)):
+            val = ws.cell_value(r, c)
+            if val is None:
+                continue
+            text = str(val).strip()
+            if "作业要素" in text:
+                for check_c in range(c + 1, min(c + 3, max_col + 1)):
+                    next_val = ws.cell_value(r, check_c)
+                    if next_val and len(str(next_val).strip()) > 1 and "作业要素" not in str(next_val):
+                        return str(next_val).strip()
+                next_val = ws.cell_value(r + 1, c)
+                if next_val and len(str(next_val).strip()) > 1:
+                    return str(next_val).strip()
+            elif len(text) > 3 and not any(
+                kw in text for kw in ["作业指导书", "文件编号", "工具/夹具",
+                                       "版本", "发行时间", "关键点", "车间",
+                                       "序号", "变更记录", "物料清单",
+                                       "说明性符号", "编制", "校对"]
+            ):
+                if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+                    return text
+    return ""
+
+
+def _collect_raw_rows(
+    ws: ExcelSheet,
+    header_row: int,
+    max_row: int,
+    max_col: int,
+    part_no_col: int,
+    qty_col: int,
+    name_col: int,
+    basename: str,
+) -> List[Tuple[int, str, float, str, int]]:
+    """Собрать сырые строки таблицы деталей."""
+    raw_rows: List[Tuple[int, str, float, str, int]] = []
+    max_data_row = min(max_row, header_row + 500)
+
+    for row_idx in range(header_row + 1, max_data_row + 1):
+        try:
+            raw_part_no = ws.cell_value(row_idx, part_no_col)
+            if raw_part_no is None:
+                all_empty = True
+                for c in range(1, min(max_col + 1, 20)):
+                    if ws.cell_value(row_idx, c) is not None:
+                        all_empty = False
+                        break
+                if all_empty:
+                    continue
+                continue
+
+            raw_part_no_str = str(raw_part_no).strip()
+            if not raw_part_no_str:
+                continue
+
+            skip_keywords = [
+                "物料清单", "变更记录", "编制", "校对", "审核", "批准",
+                "说明性符号", "工具", "夹具", "文件编号", "文件版次", "无",
+            ]
+            if any(kw in raw_part_no_str.lower() for kw in skip_keywords):
+                continue
+
+            if qty_col > 0:
+                raw_qty = ws.cell_value(row_idx, qty_col)
+                try:
+                    qty = float(raw_qty) if raw_qty is not None else 1.0
+                except (ValueError, TypeError):
+                    qty = 1.0
+            else:
+                qty = 1.0
+
+            name = ""
+            if name_col > 0:
+                name_val = ws.cell_value(row_idx, name_col)
+                name = str(name_val).strip() if name_val is not None else ""
+
+            raw_rows.append((row_idx, raw_part_no_str, qty, name, part_no_col))
+
+        except Exception:
+            logger.debug("Ошибка при обработке строки %d в %s, пропускаем", row_idx, basename)
+            continue
+
+    return raw_rows
+
+
+# ─── Поиск файлов ────────────────────────────────────────────────────────────
+
+def _find_excel_files(path: str, extract_dir: Optional[str] = None) -> List[str]:
+    """Найти все .xlsx и .xls файлы рекурсивно (папка или ZIP)."""
     files: List[str] = []
 
     if os.path.isfile(path) and path.lower().endswith(".zip"):
@@ -595,7 +555,7 @@ def _find_excel_files(path: str, extract_dir: Optional[str] = None) -> List[str]
             os.makedirs(extract_dir, exist_ok=True)
 
         logger.info("Распаковка архива %s в %s...", path, extract_dir)
-        with zipfile.ZipFile(path, "r") as z:
+        with zipfile.ZipFile(path, "r", metadata_encoding="gbk") as z:
             z.extractall(extract_dir)
 
         for root, _, filenames in os.walk(extract_dir):
@@ -613,60 +573,137 @@ def _find_excel_files(path: str, extract_dir: Optional[str] = None) -> List[str]
     return files
 
 
-def parse_cards(input_path: str,
-                extract_dir: Optional[str] = None,
-                show_progress: bool = True) -> CardsData:
+# ─── Парсинг всех карт ───────────────────────────────────────────────────────
+
+def parse_cards(
+    input_path: str,
+    extract_dir: Optional[str] = None,
+    show_progress: bool = True,
+    max_workers: Optional[int] = None,
+) -> CardsData:
     """Разобрать все операционные карты из указанного источника.
 
+    Выполняет классификацию файлов (операционные vs служебные) и
+    параллельный парсинг с использованием ProcessPoolExecutor.
+
     Args:
-        input_path: Путь к папке с картами, ZIP-архиву или одному .xlsx/.xls файлу.
-        extract_dir: Директория для извлечения ZIP (если None, создаётся временная).
+        input_path: Путь к папке, ZIP-архиву или одному .xlsx/.xls файлу.
+        extract_dir: Директория для извлечения ZIP.
         show_progress: Показывать прогресс-бар.
+        max_workers: Количество процессов для параллельного парсинга.
 
     Returns:
         CardsData с агрегированными данными всех карт.
     """
-    files = _find_excel_files(input_path, extract_dir)
-    logger.info("Найдено .xlsx/.xls файлов: %d", len(files))
+    from burlak_parser.file_classifier import filter_operational_cards
 
-    if not files:
+    all_files = _find_excel_files(input_path, extract_dir)
+    logger.info("Найдено .xlsx/.xls файлов: %d", len(all_files))
+
+    if not all_files:
         raise FileNotFoundError(f"Не найдено .xlsx/.xls файлов в '{input_path}'")
 
+    # Классифицируем все файлы
+    classifications = filter_operational_cards(all_files)
+
+    operational_files = [
+        c for c in classifications if c.should_parse_parts
+    ]
+    service_files = [
+        c for c in classifications if not c.should_parse_parts
+    ]
+    logger.info(
+        "Операционных карт: %d, служебных файлов: %d",
+        len(operational_files), len(service_files),
+    )
+
+    # Парсим операционные карты
     card_results: List[CardParseResult] = []
     all_aggregated: Dict[str, float] = {}
     part_sources: Dict[str, List[Tuple[str, str, float]]] = {}
     total_sheets = 0
     total_skipped = 0
+    corrupted: List[str] = []
 
-    iterator = tqdm(files, desc="Парсинг карт", unit="файл") if show_progress else files
+    parse_files = [(c.file_path, False, c.is_final_check) for c in operational_files]
 
-    for file_path in iterator:
+    workers = max_workers or min(os.cpu_count() or 4, max(1, len(parse_files)))
+
+    if workers > 1 and len(parse_files) > 1:
+        # Параллельный парсинг
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    parse_card_file, fp, is_svc, is_fc,
+                ): fp for fp, is_svc, is_fc in parse_files
+            }
+            iterator = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Парсинг карт",
+                unit="файл",
+            ) if show_progress else as_completed(futures)
+
+            for future in iterator:
+                file_path = futures[future]
+                try:
+                    result = future.result()
+                    card_results.append(result)
+                    total_sheets += len(result.sheets)
+                    total_skipped += sum(1 for s in result.sheets if not s.is_valid)
+
+                    # Агрегируем
+                    for part_no, qty in result.aggregated_parts.items():
+                        all_aggregated[part_no] = all_aggregated.get(part_no, 0.0) + qty
+                        if part_no not in part_sources:
+                            part_sources[part_no] = []
+                        part_sources[part_no].append(
+                            (result.card_number, result.file_path, qty),
+                        )
+                except Exception as e:
+                    logger.warning("Ошибка при обработке %s: %s", file_path, e)
+                    corrupted.append(file_path)
+                    if show_progress:
+                        tqdm.write(f"⚠️  Ошибка: {e}")
+    else:
+        # Последовательный парсинг
+        iterator = tqdm(parse_files, desc="Парсинг карт", unit="файл") if show_progress else parse_files
+        for file_path, is_svc, is_fc in iterator:
+            try:
+                result = parse_card_file(file_path, is_service_file=is_svc, is_final_check=is_fc)
+                card_results.append(result)
+                total_sheets += len(result.sheets)
+                total_skipped += sum(1 for s in result.sheets if not s.is_valid)
+
+                for part_no, qty in result.aggregated_parts.items():
+                    all_aggregated[part_no] = all_aggregated.get(part_no, 0.0) + qty
+                    if part_no not in part_sources:
+                        part_sources[part_no] = []
+                    part_sources[part_no].append(
+                        (result.card_number, result.file_path, qty),
+                    )
+            except Exception as e:
+                logger.warning("Ошибка при обработке %s: %s", file_path, e)
+                corrupted.append(file_path)
+                if show_progress:
+                    tqdm.write(f"⚠️  Ошибка: {e}")
+
+    # Добавляем служебные файлы в card_results (для split_cards)
+    for svc in service_files:
         try:
-            result = parse_card_file(file_path)
+            result = parse_card_file(
+                svc.file_path,
+                is_service_file=True,
+                is_final_check=svc.is_final_check,
+            )
             card_results.append(result)
             total_sheets += len(result.sheets)
             total_skipped += sum(1 for s in result.sheets if not s.is_valid)
-
-            # Агрегируем по всем картам
-            for part_no, qty in result.aggregated_parts.items():
-                if part_no in all_aggregated:
-                    all_aggregated[part_no] += qty
-                else:
-                    all_aggregated[part_no] = qty
-
-                # Запоминаем источники
-                if part_no not in part_sources:
-                    part_sources[part_no] = []
-                part_sources[part_no].append(
-                    (result.card_number, result.file_path, qty)
-                )
-
         except Exception as e:
-            logger.warning("Ошибка при обработке %s: %s", file_path, e)
-            if show_progress:
-                tqdm.write(f"⚠️  Ошибка: {e}")
+            logger.warning("Ошибка при обработке служебного файла %s: %s", svc.file_path, e)
 
-    logger.info("Обработано карт: %d", len(card_results))
+    processed = len(card_results)
+    logger.info("Обработано карт: %d", processed)
     logger.info("Всего листов: %d, пропущено (пустых): %d", total_sheets, total_skipped)
     logger.info("Уникальных деталей найдено: %d", len(all_aggregated))
 
@@ -674,397 +711,162 @@ def parse_cards(input_path: str,
         all_parts=all_aggregated,
         part_sources=part_sources,
         card_results=card_results,
-        total_cards_processed=len(card_results),
+        total_cards_processed=processed,
         total_sheets_processed=total_sheets - total_skipped,
         total_sheets_skipped=total_skipped,
+        service_files_skipped=len(service_files),
+        corrupted_files=corrupted,
     )
 
 
-def _copy_ws_with_formatting(src_ws: Any, dst_ws: Any) -> None:
-    """Скопировать содержимое листа с сохранением форматирования.
+# ─── Сервис ──────────────────────────────────────────────────────────────────
 
-    Копирует:
-      - Значения ячеек
-      - Стили (шрифт, границы, заливка, выравнивание, формат числа)
-      - Объединённые ячейки
-      - Ширину колонок
-      - Высоту строк
-      - Заморозку панелей
-      - Изображения (насколько возможно)
+class CardService:
+    """Сервис парсинга операционных карт.
 
-    Args:
-        src_ws: Исходный лист (openpyxl Worksheet).
-        dst_ws: Целевой лист (openpyxl Worksheet).
+    Подготовлен для миграции на серверную архитектуру (FastAPI + SQLite + Redis).
+    Инкапсулирует всю логику парсинга и разделения карт в одном классе.
     """
-    # Копируем значения ячеек со стилями
-    for row in src_ws.iter_rows(min_row=1,
-                                 max_row=src_ws.max_row or 0,
-                                 max_col=src_ws.max_column or 0):
-        for cell in row:
-            new_cell = dst_ws.cell(row=cell.row, column=cell.column)
-            new_cell.value = cell.value
-            if cell.has_style:
-                new_cell.font = copy(cell.font)
-                new_cell.border = copy(cell.border)
-                new_cell.fill = copy(cell.fill)
-                new_cell.number_format = cell.number_format
-                new_cell.protection = copy(cell.protection)
-                new_cell.alignment = copy(cell.alignment)
 
-    # Копируем ширину колонок
-    for col_letter, col_dim in src_ws.column_dimensions.items():
-        dst_ws.column_dimensions[col_letter] = copy(col_dim)
+    def __init__(self, max_workers: Optional[int] = None):
+        self._cards: Optional[CardsData] = None
+        self.max_workers = max_workers or os.cpu_count() or 4
 
-    # Копируем высоту строк
-    for row_num, row_dim in src_ws.row_dimensions.items():
-        dst_ws.row_dimensions[row_num] = copy(row_dim)
+    @property
+    def cards(self) -> Optional[CardsData]:
+        return self._cards
 
-    # Копируем объединённые ячейки
-    for merge_range in src_ws.merged_cells.ranges:
-        dst_ws.merge_cells(str(merge_range))
+    @property
+    def is_loaded(self) -> bool:
+        return self._cards is not None
 
-    # Копируем заморозку панелей
-    if src_ws.freeze_panes:
-        dst_ws.freeze_panes = src_ws.freeze_panes
+    def load(self, input_path: str, extract_dir: Optional[str] = None) -> CardsData:
+        """Загрузить и распарсить операционные карты.
 
-    # Копируем настройки страницы
-    if src_ws.page_setup:
-        dst_ws.page_setup = copy(src_ws.page_setup)
-    if src_ws.page_margins:
-        dst_ws.page_margins = copy(src_ws.page_margins)
+        Args:
+            input_path: Путь к папке/ZIP-архиву с картами.
+            extract_dir: Директория для извлечения ZIP.
 
-    # Копируем область печати
-    if src_ws.print_area:
-        dst_ws.print_area = src_ws.print_area
-
-    # Пытаемся скопировать изображения
-    # ВАЖНО: изображения сохраняются ТОЛЬКО в основном методе (shutil.copy2).
-    # В этом fallback-методе изображения копируются только
-    # если они не привязаны к родительскому Workbook.
-    if hasattr(src_ws, '_images'):
-        for img in src_ws._images:
-            try:
-                dst_ws.add_image(copy(img))
-            except Exception:
-                logger.debug("Не удалось скопировать изображение (fallback)")
-
-
-def _extract_single_sheet_via_zip(source_path: str, output_path: str, keep_sheet_name: str) -> None:
-    """Выделить один лист из .xlsx через прямую манипуляцию ZIP.
-
-    .xlsx — это ZIP-архив XML-файлов. Этот метод НЕ использует openpyxl
-    для сохранения, поэтому изображения, стили и всё форматирование
-    сохраняются на 100%.
-
-    Алгоритм:
-      1. Скопировать исходный файл.
-      2. Прочитать .xlsx как ZIP.
-      3. Найти в xl/workbook.xml <sheet> для keep_sheet_name.
-      4. Удалить все остальные <sheet>.
-      5. Удалить .xml файлы ненужных листов.
-      6. Обновить xl/_rels/workbook.xml.rels.
-      7. Обновить [Content_Types].xml.
-      8. Записать изменённый ZIP.
-
-    Args:
-        source_path: Путь к исходному .xlsx файлу.
-        output_path: Путь для сохранения результата.
-        keep_sheet_name: Имя листа, который нужно оставить.
-
-    Raises:
-        ValueError: Если лист не найден.
-    """
-    # Пространства имён XML
-    NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
-    NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-    NS_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
-
-    ET.register_namespace('', NS_MAIN)
-    ET.register_namespace('r', NS_R)
-    ET.register_namespace('ct', NS_CT)
-
-    # Копируем исходный файл (shutil копирует байты, не трогая ZIP)
-    shutil.copy2(source_path, output_path)
-
-    # Читаем ZIP в память
-    with open(output_path, 'rb') as f:
-        zip_data = f.read()
-
-    with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-        zip_entries = {name: zf.read(name) for name in zf.namelist()}
-
-    # ── 1. Найти целевой лист ──
-    wb_xml = zip_entries['xl/workbook.xml']
-    wb_root = ET.fromstring(wb_xml)
-
-    sheets_elem = wb_root.find(f'{{{NS_MAIN}}}sheets')
-    if sheets_elem is None:
-        raise ValueError("Не найдена секция <sheets> в workbook.xml")
-
-    target_r_id: Optional[str] = None
-    target_sheet_file: Optional[str] = None
-    all_sheet_elements: List[ET.Element] = []
-    sheets_to_delete: List[Tuple[str, str, ET.Element]] = []  # (name, rId, elem)
-
-    for sheet_el in sheets_elem.findall(f'{{{NS_MAIN}}}sheet'):
-        name = sheet_el.get('name', '')
-        r_id = sheet_el.get(f'{{{NS_R}}}id')
-        if r_id is None:
-            r_id = sheet_el.get('r:id')  # Fallback
-        all_sheet_elements.append(sheet_el)
-        if name == keep_sheet_name:
-            target_r_id = r_id
-        else:
-            sheets_to_delete.append((name, r_id, sheet_el))
-
-    if target_r_id is None:
-        raise ValueError(f"Лист '{keep_sheet_name}' не найден в файле")
-
-    # Если лист единственный — файл уже готов (shutil.copy2 сделал копию)
-    if not sheets_to_delete:
-        return
-
-    # ── 2. Найти целевой worksheet файл через relationships ──
-    rels_xml = zip_entries.get('xl/_rels/workbook.xml.rels')
-    if rels_xml is None:
-        raise ValueError("Не найден xl/_rels/workbook.xml.rels")
-
-    rels_root = ET.fromstring(rels_xml)
-
-    r_id_to_target: Dict[str, str] = {}  # rId -> Target
-    r_id_to_elem: Dict[str, ET.Element] = {}
-    sheet_r_ids: Set[str] = set()
-    WORKSHEET_TYPE = f"{NS_R}/worksheet"
-
-    for rel_el in rels_root:
-        rid = rel_el.get('Id', '')
-        target = rel_el.get('Target', '')
-        r_type = rel_el.get('Type', '')
-        r_id_to_target[rid] = target
-        r_id_to_elem[rid] = rel_el
-        if r_type == WORKSHEET_TYPE:
-            sheet_r_ids.add(rid)
-
-    if target_r_id not in r_id_to_target:
-        raise ValueError(f"rId '{target_r_id}' не найден в .rels")
-
-    target_sheet_file = 'xl/' + r_id_to_target[target_r_id]
-
-    # ── 3. Удалить другие листы из workbook.xml ──
-    for name, r_id, sheet_el in sheets_to_delete:
-        sheets_elem.remove(sheet_el)
-
-    # ── 4. Удалить relationship'ы для ненужных листов ──
-    keep_r_ids: Set[str] = {target_r_id}
-    for rel_el in list(rels_root):
-        rid = rel_el.get('Id', '')
-        r_type = rel_el.get('Type', '')
-        if r_type == WORKSHEET_TYPE and rid not in keep_r_ids:
-            rels_root.remove(rel_el)
-
-    # ── 5. Собрать список файлов для удаления ──
-    files_to_remove: Set[str] = set()
-    for name, r_id, sheet_el in sheets_to_delete:
-        if r_id in r_id_to_target:
-            # Удаляем файл листа (например, xl/worksheets/sheet2.xml)
-            removed_sheet = 'xl/' + r_id_to_target[r_id]
-            files_to_remove.add(removed_sheet)
-
-            # Удаляем .rels файл листа
-            base = os.path.basename(removed_sheet)
-            removed_rels = f"xl/worksheets/_rels/{base}.rels"
-            if removed_rels in zip_entries:
-                files_to_remove.add(removed_rels)
-
-                # Находим связанные drawings
-                sheet_rels_xml = zip_entries[removed_rels]
-                try:
-                    sr_root = ET.fromstring(sheet_rels_xml)
-                    for sr_el in sr_root:
-                        sr_target = sr_el.get('Target', '')
-                        # Резолвим относительный путь (../drawings/drawing1.xml)
-                        sr_dir = os.path.dirname(removed_rels)
-                        resolved = os.path.normpath(os.path.join(sr_dir, sr_target))
-                        resolved = '/'.join(resolved.split(os.sep))
-                        files_to_remove.add(resolved)
-                        # Также удаляем .rels для drawing
-                        drawing_base = os.path.basename(resolved)
-                        drawing_rels = f"xl/drawings/_rels/{drawing_base}.rels"
-                        if drawing_rels in zip_entries:
-                            files_to_remove.add(drawing_rels)
-                except Exception:
-                    pass
-
-    # ── 6. Удалить calcChain.xml (Excel перегенерирует)
-    zip_entries.pop('xl/calcChain.xml', None)
-    files_to_remove.add('xl/calcChain.xml')
-
-    # ── 7. Обновить [Content_Types].xml ──
-    ct_xml = zip_entries.get('[Content_Types].xml')
-    if ct_xml is not None:
-        ct_root = ET.fromstring(ct_xml)
-        for override_el in ct_root.findall(f'{{{NS_CT}}}Override'):
-            part_name = override_el.get('PartName', '')
-            # Убираем ведущий слеш
-            if part_name.startswith('/'):
-                part_name = part_name[1:]
-            if part_name in files_to_remove:
-                ct_root.remove(override_el)
-        zip_entries['[Content_Types].xml'] = ET.tostring(
-            ct_root, encoding='UTF-8', xml_declaration=True,
+        Returns:
+            Данные CardsData.
+        """
+        self._cards = parse_cards(
+            input_path,
+            extract_dir=extract_dir,
+            max_workers=self.max_workers,
         )
+        return self._cards
 
-    # ── 8. Удалить файлы из архива ──
-    for fname in list(files_to_remove):
-        zip_entries.pop(fname, None)
+    def get_all_parts(self) -> Dict[str, float]:
+        """Получить все агрегированные детали из карт."""
+        if not self._cards:
+            raise RuntimeError("Карты не загружены. Вызовите load() сначала.")
+        return dict(self._cards.all_parts)
 
-    # ── 9. Записать обновлённые XML ──
-    zip_entries['xl/workbook.xml'] = ET.tostring(
-        wb_root, encoding='UTF-8', xml_declaration=True,
-    )
-    zip_entries['xl/_rels/workbook.xml.rels'] = ET.tostring(
-        rels_root, encoding='UTF-8', xml_declaration=True,
-    )
+    def get_part_sources(self) -> Dict[str, List[Tuple[str, str, float]]]:
+        """Получить источники для каждой детали."""
+        if not self._cards:
+            raise RuntimeError("Карты не загружены.")
+        return dict(self._cards.part_sources)
 
-    # ── 10. Записать новый ZIP ──
-    os.remove(output_path)
-    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-        for name, data in zip_entries.items():
-            zout.writestr(name, data)
-
-
-def _split_single_sheet(args: Tuple[str, str, str]) -> Optional[str]:
-    """Обработать один лист: ZIP-экстракция, при ошибке — fallback.
-
-    Вынесена как отдельная функция для ProcessPoolExecutor (picklable).
-
-    Args:
-        args: Кортеж (source_path, output_path, sheet_name).
-
-    Returns:
-        output_path при успехе, None при ошибке.
-    """
-    source_path, output_path, sheet_name = args
-
-    try:
-        _extract_single_sheet_via_zip(source_path, output_path, sheet_name)
-        return output_path
-    except Exception as e:
-        # Fallback: openpyxl + копирование форматирования
-        try:
-            src_wb = openpyxl.load_workbook(source_path)
-            new_wb = openpyxl.Workbook()
-            new_ws = new_wb.active
-            if new_ws is not None:
-                new_ws.title = sheet_name
-            src_ws = src_wb[sheet_name]
-            _copy_ws_with_formatting(src_ws, new_ws)
-            new_wb.save(output_path)
-            new_wb.close()
-            src_wb.close()
-            return output_path
-        except Exception as e2:
-            logger.error(
-                "Не удалось извлечь лист '%s' из %s: %s",
-                sheet_name, source_path, e2,
-            )
-            return None
+    def get_card_results(self) -> List[CardParseResult]:
+        """Получить результаты парсинга каждой карты."""
+        if not self._cards:
+            raise RuntimeError("Карты не загружены.")
+        return list(self._cards.card_results)
 
 
-def split_cards_to_files(cards_data: CardsData,
-                          output_dir: str,
-                          split_all_non_empty: bool = True,
-                          skip_templates: bool = True,
-                          parallel: bool = True,
-                          max_workers: int = 0) -> List[str]:
+# ─── Разделение листов (делегировано в splitter.py) ─────────────────────────
+
+# Ключевые слова имён листов-шаблонов (не содержат полезных данных о деталях)
+TEMPLATE_SHEET_KEYWORDS = ["空表", "填写范本", "范本"]
+
+
+def split_cards_to_files(
+    cards_data: CardsData,
+    output_dir: str,
+    split_all_non_empty: bool = True,
+    max_workers: Optional[int] = None,
+) -> List[str]:
     """Разделить многолистовые файлы на отдельные .xlsx файлы.
 
-    Каждый лист операционной карты = отдельный .xlsx файл.
-    Пропускаются: полностью пустые листы, шаблоны (при skip_templates).
-    .xls файлы не разделяются (только .xlsx поддерживает запись).
-
-    При split_all_non_empty=True разделяются ВСЕ непустые листы,
-    включая служебные листы без каталожных номеров (CP7/CP8).
-
-    Файлы создаются через прямую манипуляцию ZIP — 100% сохранность.
+    Использует CardSplitter из burlak_parser.splitter для ZIP-разделения
+    с очисткой named ranges.
 
     Args:
         cards_data: Данные распарсенных карт.
         output_dir: Директория для сохранения разделённых файлов.
-        split_all_non_empty: True — все непустые; False — только с деталями.
-        skip_templates: True — пропускать шаблонные листы (空表, 封面...).
-        parallel: True — использовать многопроцессорную обработку.
-        max_workers: Кол-во процессов (0 = авто = cpu_count).
+        split_all_non_empty: Если True, разделяет все непустые листы;
+                             если False — только листы с таблицей деталей.
+        max_workers: Количество процессов для параллельного разделения.
 
     Returns:
         Список путей к созданным файлам.
     """
-    os.makedirs(output_dir, exist_ok=True)
+    from burlak_parser.splitter import CardSplitter
 
-    # Собираем все задачи (листы для разделения)
-    tasks: List[Tuple[str, str, str]] = []  # (source, output, sheet_name)
+    os.makedirs(output_dir, exist_ok=True)
+    splitter = CardSplitter(max_workers=max_workers)
+
+    # Подготавливаем задачи — служебные файлы разделяем ТОЛЬКО из CP7/CP8
+    tasks: List[Tuple[str, str, List[str], str]] = []
 
     for result in cards_data.card_results:
         if not result.file_path.lower().endswith(".xlsx"):
             continue
 
+        # Служебные файлы НЕ из CP7/CP8 — пропускаем
+        if result.is_service_file and not result.is_final_check:
+            continue
+
+        sheets_to_split = []
         for sheet_info in result.sheets:
-            # Фильтрация
-            if split_all_non_empty:
-                if not sheet_info.has_data:
-                    continue
-            else:
-                if not sheet_info.is_valid:
-                    continue
-
-            # Пропуск шаблонов
-            if skip_templates and _is_template_sheet(sheet_info.sheet_name):
+            # Пропускаем листы-шаблоны (пустые формы, образцы заполнения)
+            if any(kw in sheet_info.sheet_name for kw in TEMPLATE_SHEET_KEYWORDS):
                 continue
+            if split_all_non_empty:
+                if sheet_info.has_data:
+                    sheets_to_split.append(sheet_info.sheet_name)
+            else:
+                if sheet_info.is_valid:
+                    sheets_to_split.append(sheet_info.sheet_name)
 
-            sheet_name = sheet_info.sheet_name
-            safe_card = re.sub(r"[^\w\-]", "_", result.card_number)[:50]
-            safe_sheet = re.sub(r"[^\w\-]", "_", sheet_name)[:50]
-            output_filename = f"{safe_card}_{safe_sheet}.xlsx"
-            output_path = os.path.join(output_dir, output_filename)
-
-            counter = 1
-            while os.path.exists(output_path):
-                base, ext = os.path.splitext(output_filename)
-                output_path = os.path.join(output_dir, f"{base}_{counter}{ext}")
-                counter += 1
-
-            tasks.append((result.file_path, output_path, sheet_name))
+        if sheets_to_split:
+            tasks.append((
+                result.file_path,
+                output_dir,
+                sheets_to_split,
+                result.card_number,
+            ))
 
     if not tasks:
-        logger.info("Нет листов для разделения")
         return []
 
-    created_files: List[str] = []
+    # Параллельное или последовательное разделение
+    workers = max_workers or os.cpu_count() or 4
+    all_created: List[str] = []
+    corrupted: List[str] = []
 
-    if parallel and len(tasks) > 1:
-        # Многопроцессорная обработка
-        import multiprocessing
-        if max_workers <= 0:
-            max_workers = min(multiprocessing.cpu_count(), len(tasks), 8)
-        logger.info("Параллельное разделение: %d задач, %d процессов",
-                     len(tasks), max_workers)
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_split_single_sheet, t): t for t in tasks}
-            with tqdm(total=len(tasks), desc="Разделение", unit="лист") as pbar:
-                for future in as_completed(futures):
-                    result_path = future.result()
-                    if result_path:
-                        created_files.append(result_path)
-                    pbar.update(1)
+    if workers > 1 and len(tasks) > 1:
+        result_files = splitter.split_many_parallel(tasks)
+        all_created.extend(result_files)
     else:
-        # Последовательная обработка
-        iterator = tqdm(tasks, desc="Разделение", unit="лист")
-        for task in iterator:
-            result_path = _split_single_sheet(task)
-            if result_path:
-                created_files.append(result_path)
+        for source_path, out_dir, sheet_names, file_label in tasks:
+            try:
+                created = splitter.split_file(source_path, out_dir, sheet_names, file_label)
+                all_created.extend(created)
+            except Exception as e:
+                logger.warning("Повреждённый файл при разделении %s: %s", os.path.basename(source_path), e)
+                corrupted.append(source_path)
 
-    logger.info("Создано отдельных файлов: %d", len(created_files))
-    return created_files
+    if corrupted:
+        logger.warning("Повреждённых файлов при разделении: %d", len(corrupted))
+
+    # Дополняем corrupted_files (parse failures уже там, добавляем split failures)
+    if hasattr(cards_data, 'corrupted_files') and cards_data.corrupted_files is not None:
+        cards_data.corrupted_files.extend(corrupted)
+    else:
+        cards_data.corrupted_files = list(corrupted)
+
+    logger.info("Создано отдельных файлов: %d", len(all_created))
+    return all_created

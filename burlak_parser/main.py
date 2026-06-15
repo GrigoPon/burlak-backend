@@ -3,6 +3,9 @@
 
 Использование:
   python -m burlak_parser.main --bom <file.xlsx> --cards <path> [--config <name>]
+
+Новый режим (по умолчанию): обработка ВСЕХ комплектаций одновременно.
+Старый режим (--single-config): обработка одной выбранной комплектации.
 """
 
 from __future__ import annotations
@@ -10,27 +13,46 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from tqdm import tqdm
 
-from burlak_parser.bom_parser import BOMData, PartInfo, get_config_quantities, parse_bom
-from burlak_parser.card_parser import CardsData, parse_cards, split_cards_to_files
-from burlak_parser.comparator import (
-    ComparisonResult,
-    DiscrepancyType,
-    compare,
-    format_discrepancy_report,
+from burlak_parser.bom_parser import (
+    BOMData,
+    BOMService,
+    PartInfo,
+    get_all_config_quantities,
+    get_config_quantities,
+    parse_bom,
 )
+from burlak_parser.card_parser import (
+    CardService,
+    CardsData,
+    parse_cards,
+    split_cards_to_files,
+)
+from burlak_parser.comparator import (
+    Discrepancy,
+    DiscrepancyType,
+    MatchingEngine,
+    MultiConfigComparisonResult,
+    compare_all_configs,
+    compare_single_config,
+)
+from burlak_parser.fuzzy_matcher import FuzzyMatcher
 from burlak_parser.report_generator import (
+    Reporter,
     create_split_cards_archive,
-    generate_discrepancy_report,
 )
 
 logger = logging.getLogger(__name__)
+
+# Директории, которые автоматически очищаются при запуске
+AUTO_CLEAN_DIRS = ["output", "split_cards", "_extracted_cards"]
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -43,28 +65,55 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def select_config_interactive(bom: BOMData) -> str:
-    """Интерактивный выбор комплектации из списка.
+def clean_output_dirs(output_dir: str) -> None:
+    """Автоматически очистить временные директории от предыдущих запусков.
 
-    Если доступна только одна комплектация, выбирает её автоматически.
+    Очищает:
+      - Основную директорию результатов (output_dir).
+      - Поддиректории split_cards, _extracted_cards внутри output_dir.
+      - Дополнительные директории из AUTO_CLEAN_DIRS в текущей папке.
+
+    Args:
+        output_dir: Путь к основной директории результатов.
     """
+    dirs_to_clean: List[str] = []
+
+    # Основная директория результатов
+    if os.path.isdir(output_dir):
+        dirs_to_clean.append(output_dir)
+
+    # Дополнительные auto-clean директории в CWD
+    cwd = os.getcwd()
+    for dirname in AUTO_CLEAN_DIRS:
+        path = os.path.join(cwd, dirname)
+        if os.path.isdir(path) and path != output_dir:
+            dirs_to_clean.append(path)
+
+    for d in dirs_to_clean:
+        try:
+            logger.info("Очистка директории: %s", d)
+            shutil.rmtree(d)
+        except Exception as e:
+            logger.warning("Не удалось очистить %s: %s", d, e)
+
+
+def select_config_interactive(bom: BOMData) -> str:
+    """Интерактивный выбор комплектации из списка."""
     configs = bom.config_names
     if not configs:
-        print("❌ Нет доступных комплектаций в BOM-файле.")
+        print("\u274c Нет доступных комплектаций в BOM-файле.")
         sys.exit(1)
 
     if len(configs) == 1:
-        print(f"✅ Автоматически выбрана единственная комплектация: {configs[0][:60]}")
+        print(f"\u2705 Автоматически выбрана единственная комплектация: {configs[0][:60]}")
         return configs[0]
 
     print(f"\n{'=' * 60}")
     print(f"Доступные комплектации ({len(configs)} шт.):")
     print(f"{'=' * 60}")
 
-    # Показываем только первые 30 для выбора, остальные скрываем
     display_configs = configs[:30]
     for i, name in enumerate(display_configs, 1):
-        # Укорачиваем для отображения
         display_name = name if len(name) <= 70 else name[:67] + "..."
         print(f"  {i:3d}. {display_name}")
 
@@ -75,149 +124,207 @@ def select_config_interactive(bom: BOMData) -> str:
             if 0 <= idx < len(display_configs):
                 return configs[idx]
             else:
-                print(f"❌ Введите число от 1 до {len(display_configs)}")
+                print(f"\u274c Введите число от 1 до {len(display_configs)}")
         except ValueError:
-            print("❌ Введите корректное число")
+            print("\u274c Введите корректное число")
 
 
-def run_pipeline(bom_path: str,
-                 cards_path: str,
-                 config_name: Optional[str] = None,
-                 output_dir: Optional[str] = None,
-                 auto_split: bool = True,
-                 skip_templates: bool = True,
-                 use_fuzzy: bool = True) -> None:
+def run_pipeline(
+    bom_path: str,
+    cards_path: str,
+    config_name: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    auto_split: bool = True,
+    use_fuzzy: bool = True,
+    single_config: bool = False,
+    max_workers: Optional[int] = None,
+) -> None:
     """Запустить полный конвейер обработки.
 
     Args:
-        bom_path: Путь к BOM-файлу.
+        bom_path: Путь к BOM-файлу (.xlsx).
         cards_path: Путь к папке/ZIP-архиву с операционными картами.
-        config_name: Название комплектации (если не указана, будет интерактивный выбор).
+        config_name: Название комплектации (для single_config режима).
         output_dir: Директория для результатов.
         auto_split: Автоматически разделять многолистовые карты.
+        use_fuzzy: Использовать нечеткое сравнение.
+        single_config: Только одна комплектация (старый режим).
+        max_workers: Количество процессов для параллелизации.
     """
     start_time = time.time()
 
     if output_dir is None:
         output_dir = os.path.join(os.getcwd(), "output")
+
+    # Автоочистка
+    clean_output_dirs(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\n{'=' * 60}")
-    print(f"🚀 Burlak Parser — Система сверки BOM и операционных карт")
+    print(f"\U0001f680 Burlak Parser — Система сверки BOM и операционных карт")
     print(f"{'=' * 60}")
     print(f"BOM файл: {bom_path}")
     print(f"Карты:    {cards_path}")
     print(f"Результат: {output_dir}")
+    print(f"Режим:    {'Одна комплектация' if single_config else 'ВСЕ комплектации'}")
+    print(f"Fuzzy:    {'Вкл' if use_fuzzy else 'Выкл'}")
     print()
 
-    # Шаг 1: Загрузка BOM и выбор комплектации
-    print("📋 Шаг 1: Загрузка BOM-файла...")
+    # Шаг 1: Загрузка BOM
+    print("\U0001f4cb Шаг 1: Загрузка BOM-файла...")
     with tqdm(total=1, desc="Парсинг BOM", unit="файл") as pbar:
         bom = parse_bom(bom_path)
         pbar.update(1)
 
-    if config_name:
-        if config_name not in bom.config_quantities:
-            print(f"\n❌ Комплектация '{config_name}' не найдена!")
-            print(f"Доступные варианты (первые 5):")
-            for c in bom.config_names[:5]:
-                print(f"  - {c}")
-            sys.exit(1)
-        selected_config = config_name
+    print(f"\n\u2705 BOM загружен: {len(bom.parts)} деталей, {len(bom.config_names)} комплектаций")
+    if not single_config:
+        print(f"   Будут обработаны ВСЕ {len(bom.config_names)} комплектаций одновременно.")
     else:
-        selected_config = select_config_interactive(bom)
-
-    bom_config_parts = get_config_quantities(bom, selected_config)
-    print(f"\n✅ Выбрана комплектация: {selected_config[:60]}")
-    print(f"   Деталей в комплектации: {len(bom_config_parts)}")
+        if config_name:
+            if config_name not in bom.config_quantities:
+                print(f"\n\u274c Комплектация '{config_name}' не найдена!")
+                print(f"Доступные варианты (первые 5):")
+                for c in bom.config_names[:5]:
+                    print(f"  - {c}")
+                sys.exit(1)
+            selected_config = config_name
+        else:
+            selected_config = select_config_interactive(bom)
+        bom_config_parts = get_config_quantities(bom, selected_config)
+        print(f"\n\u2705 Выбрана комплектация: {selected_config[:60]}")
+        print(f"   Деталей в комплектации: {len(bom_config_parts)}")
     print()
 
     # Шаг 2: Обработка операционных карт
-    print("📂 Шаг 2: Обработка операционных карт...")
+    print("\U0001f4c2 Шаг 2: Обработка операционных карт...")
     cards_extract_dir = os.path.join(output_dir, "_extracted_cards")
-    cards = parse_cards(cards_path, extract_dir=cards_extract_dir, show_progress=True)
+    cards = parse_cards(
+        cards_path,
+        extract_dir=cards_extract_dir,
+        show_progress=True,
+        max_workers=max_workers,
+    )
 
-    print(f"\n✅ Обработано карт: {cards.total_cards_processed}")
+    print(f"\n\u2705 Обработано карт: {cards.total_cards_processed}")
+    print(f"   Служебных файлов пропущено: {cards.service_files_skipped}")
+    if cards.corrupted_files:
+        print(f"   \u26a0\ufe0f  Повреждённых файлов: {len(cards.corrupted_files)}")
     print(f"   Всего листов: {cards.total_sheets_processed + cards.total_sheets_skipped}")
     print(f"   Из них непустых: {cards.total_sheets_processed}")
     print(f"   Пропущено (пустых): {cards.total_sheets_skipped}")
     print(f"   Уникальных деталей найдено: {len(cards.all_parts)}")
     print()
 
-    # Шаг 2b: Разделение многолистовых файлов (опционально)
+    # Шаг 2b: Разделение многолистовых файлов
     split_dir = ""
     if auto_split:
-        print("✂️  Разделение многолистовых карт на отдельные файлы...")
+        print("\u2702\ufe0f  Разделение многолистовых карт на отдельные файлы...")
         split_dir = os.path.join(output_dir, "split_cards")
-        created_files = split_cards_to_files(cards, split_dir, skip_templates=skip_templates)
+        created_files = split_cards_to_files(
+            cards, split_dir, max_workers=max_workers,
+        )
         print(f"   Создано отдельных файлов: {len(created_files)}")
 
-        # Создаём ZIP-архив
-        print("📦 Создание ZIP-архива...")
+        print("\U0001f4e6 Создание ZIP-архива...")
         zip_path = os.path.join(output_dir, "split_cards.zip")
         create_split_cards_archive(split_dir, zip_path)
         print()
 
     # Шаг 3: Сверка
-    print("🔍 Шаг 3: Сверка BOM и операционных карт...")
-    comparison = compare(bom_config_parts, cards, config_name=selected_config, use_fuzzy=use_fuzzy)
+    print("\U0001f50d Шаг 3: Сверка BOM и операционных карт...")
 
-    # Вывод сводки
-    print(f"\n📊 Результаты сверки:")
-    print(f"{'─' * 50}")
-    print(f"  Деталей в BOM:          {comparison.total_bom_parts:>6}")
-    print(f"  Деталей в картах:       {comparison.total_cards_parts:>6}")
-    print(f"  Совпало:                {comparison.matched_parts:>6}")
-    print(f"  Расхождений:            {len(comparison.discrepancies):>6}")
-    print(f"    ├ Конфликт количества:{sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}")
-    if comparison.fuzzy_matches_found:
-        print(f"    ├ Fuzzy-совпадений:   {comparison.fuzzy_matches_found:>6}")
-    print(f"    ├ Только в BOM:       {sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM):>6}")
-    print(f"    └ Только в картах:    {sum(1 for d in comparison.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}")
+    if single_config:
+        # Старый режим: одна комплектация
+        all_bom_parts = set(bom.parts.keys())
+        fuzzy_matcher = FuzzyMatcher(all_bom_parts) if use_fuzzy else None
+        single_result = compare_single_config(
+            bom_config_parts, cards, config_name=selected_config,
+            fuzzy_matcher=fuzzy_matcher,
+        )
+        result = MultiConfigComparisonResult(
+            config_results=[single_result],
+            all_discrepancies=list(single_result.discrepancies),
+            total_configs=1,
+            total_bom_unique_parts=len(all_bom_parts),
+            total_cards_unique_parts=len(cards.all_parts),
+        )
 
-    # Шаг 4: Формирование отчёта
-    print("\n📄 Шаг 4: Формирование отчётов...")
+        print(f"\n\U0001f4ca Результаты сверки:")
+        print(f"{'\u2500' * 50}")
+        print(f"  Деталей в BOM:          {single_result.total_bom_parts:>6}")
+        print(f"  Деталей в картах:       {single_result.total_cards_parts:>6}")
+        print(f"  Совпало:                {single_result.matched_parts:>6}")
+        print(f"  Fuzzy match:            {single_result.fuzzy_matched:>6}")
+        print(f"  Расхождений:            {len(single_result.discrepancies):>6}")
+        print(f"    \u251c Только в BOM:       {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM):>6}")
+        print(f"    \u251c Только в картах:    {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}")
+        print(f"    \u2514 Конфликт количества: {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}")
+    else:
+        # Новый режим: все комплектации
+        result = compare_all_configs(bom, cards, use_fuzzy=use_fuzzy)
 
-    # Текстовый отчёт
-    report_text = format_discrepancy_report(comparison)
-    text_report_path = os.path.join(output_dir, "report.txt")
-    with open(text_report_path, "w", encoding="utf-8") as f:
-        f.write(report_text)
-    print(f"   Текстовый отчёт: {text_report_path}")
+        print(f"\n\U0001f4ca Результаты сверки (ВСЕ {result.total_configs} комплектаций):")
+        print(f"{'\u2500' * 50}")
+        print(f"  Уникальных деталей BOM:  {result.total_bom_unique_parts:>6}")
+        print(f"  Уникальных деталей карт: {result.total_cards_unique_parts:>6}")
+        print(f"  Всего расхождений:       {len(result.all_discrepancies):>6}")
 
-    # Excel-отчёт
-    excel_report_path = os.path.join(output_dir, "discrepancy_report.xlsx")
-    generate_discrepancy_report(comparison, excel_report_path, bom_parts=bom_config_parts)
-    print(f"   Excel-отчёт: {excel_report_path}")
+        for cr in result.config_results[:5]:
+            short = cr.config_name[:45]
+            print(f"  {short:45s}  BOM={cr.total_bom_parts:>4}  Карты={cr.total_cards_parts:>4}  Disc={len(cr.discrepancies):>4}")
+        if result.total_configs > 5:
+            print(f"  ... и ещё {result.total_configs - 5} комплектаций")
+
+    # Шаг 4: Формирование отчётов
+    print("\n\U0001f4c4 Шаг 4: Формирование отчётов...")
+
+    reporter = Reporter()
+    outputs = reporter.generate(result, output_dir, bom=bom, cards_data=cards)
+    print(f"   Текстовый отчёт: {outputs.get('text_report', 'N/A')}")
+    print(f"   Excel-отчёт: {outputs.get('excel_report', 'N/A')}")
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 60}")
-    print(f"✅ Обработка завершена за {elapsed:.1f} сек.")
+    print(f"\u2705 Обработка завершена за {elapsed:.1f} сек.")
     print(f"   Результаты сохранены в: {output_dir}")
     print(f"{'=' * 60}")
 
     # Выводим первые несколько расхождений в консоль
-    if comparison.discrepancies:
-        print(f"\n📋 Первые расхождения ({min(10, len(comparison.discrepancies))} из {len(comparison.discrepancies)}):")
-        print(f"{'─' * 80}")
-        for disc in comparison.discrepancies[:10]:
+    if result.all_discrepancies:
+        n_show = min(10, len(result.all_discrepancies))
+        print(f"\n\U0001f4cb Первые расхождения ({n_show} из {len(result.all_discrepancies)}):")
+        print(f"{'\u2500' * 80}")
+        for disc in result.all_discrepancies[:10]:
             print(f"  {disc}")
-        if len(comparison.discrepancies) > 10:
-            print(f"  ... и ещё {len(comparison.discrepancies) - 10}")
+        if len(result.all_discrepancies) > 10:
+            print(f"  ... и ещё {len(result.all_discrepancies) - 10}")
     else:
-        print("\n🎉 Расхождений не найдено!")
+        print("\n\U0001f389 Расхождений не найдено!")
 
 
 def main() -> None:
     """Точка входа CLI."""
+    import multiprocessing
+
     parser = argparse.ArgumentParser(
         description="Burlak Parser — Система сверки BOM и операционных карт",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры:
+  # Обработка ВСЕХ комплектаций (новый режим по умолчанию)
   python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/
-  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards.zip --config "T1L自由者..."
-  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --output ./results/
+
+  # Обработка одной комплектации (старый режим)
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --single-config
+
+  # С указанием конкретной комплектации
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards.zip --single-config --config "T1L..."
+
+  # Без нечеткого сравнения
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --no-fuzzy
+
+  # С указанием количества процессов
+  python -m burlak_parser.main --bom BOM.xlsx --cards ./cards/ --workers 8
         """,
     )
 
@@ -234,7 +341,7 @@ def main() -> None:
     parser.add_argument(
         "--config", "-k",
         default=None,
-        help="Название комплектации (если не указана, будет интерактивный выбор)",
+        help="Название комплектации (только для --single-config режима)",
     )
     parser.add_argument(
         "--output", "-o",
@@ -242,24 +349,25 @@ def main() -> None:
         help="Директория для результатов (по умолчанию: ./output)",
     )
     parser.add_argument(
+        "--single-config", "-s",
+        action="store_true",
+        help="Обработать только одну комплектацию (старый режим)",
+    )
+    parser.add_argument(
         "--no-split",
         action="store_true",
         help="Не разделять многолистовые карты на отдельные файлы",
     )
     parser.add_argument(
-        "--skip-templates",
-        action="store_true", default=True,
-        help="Пропускать шаблонные листы при разделении (空表, 封面...) — по умолчанию",
-    )
-    parser.add_argument(
-        "--no-skip-templates",
-        action="store_false", dest="skip_templates",
-        help="НЕ пропускать шаблонные листы (разделять всё)",
-    )
-    parser.add_argument(
         "--no-fuzzy",
-        action="store_false", dest="use_fuzzy", default=True,
-        help="Отключить нечёткий поиск парт-номеров",
+        action="store_true",
+        help="Отключить нечеткое сравнение парт-номеров",
+    )
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=None,
+        help=f"Количество процессов (по умолчанию: количество CPU = {os.cpu_count() or 4})",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -272,10 +380,10 @@ def main() -> None:
     setup_logging(args.verbose)
 
     if not os.path.exists(args.bom):
-        print(f"❌ BOM-файл не найден: {args.bom}")
+        print(f"\u274c BOM-файл не найден: {args.bom}")
         sys.exit(1)
     if not os.path.exists(args.cards):
-        print(f"❌ Путь к картам не найден: {args.cards}")
+        print(f"\u274c Путь к картам не найден: {args.cards}")
         sys.exit(1)
 
     try:
@@ -285,16 +393,17 @@ def main() -> None:
             config_name=args.config,
             output_dir=args.output,
             auto_split=not args.no_split,
-            skip_templates=args.skip_templates,
-            use_fuzzy=args.use_fuzzy,
+            use_fuzzy=not args.no_fuzzy,
+            single_config=args.single_config,
+            max_workers=args.workers,
         )
     except KeyboardInterrupt:
-        print("\n\n⚠️  Прервано пользователем.")
+        print("\n\n\u26a0\ufe0f  Прервано пользователем.")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Критическая ошибка: {e}")
+        print(f"\n\u274c Критическая ошибка: {e}")
         logger.exception("Pipeline завершился с ошибкой")
-        print("\n💡 Подсказка: проверьте пути к файлам и их формат.")
+        print("\n\U0001f4a1 Подсказка: проверьте пути к файлам и их формат.")
         print("   Операционные карты: .xlsx или .xls")
         print("   BOM-файл: .xlsx")
         sys.exit(1)
