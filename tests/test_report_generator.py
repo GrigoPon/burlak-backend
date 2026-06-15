@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
@@ -159,7 +160,7 @@ class TestGenerateDiscrepancyReportBasic:
 
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -209,7 +210,7 @@ class TestGenerateDiscrepancyReportBasic:
 class TestGenerateDiscrepancyReportSummary:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -289,7 +290,7 @@ class TestGenerateDiscrepancyReportSummary:
 class TestGenerateDiscrepancyReportDiscrepancies:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -376,7 +377,7 @@ class TestGenerateDiscrepancyReportDiscrepancies:
 class TestGenerateDiscrepancyReportFuzzy:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -437,7 +438,7 @@ class TestGenerateDiscrepancyReportFuzzy:
 class TestGenerateDiscrepancyReportBomSheet:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -522,7 +523,7 @@ class TestGenerateDiscrepancyReportBomSheet:
 class TestGenerateDiscrepancyReportErrors:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -586,7 +587,7 @@ class TestGenerateDiscrepancyReportErrors:
 class TestGenerateLegacyReport:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -641,6 +642,30 @@ class TestGenerateLegacyReport:
         assert "Все детали BOM" not in names, \
             "BOM sheet should not appear without bom_parts"
 
+    def test_legacy_only_in_cards_format(self, output_dir: str):
+        """ONLY_IN_CARDS discrepancy uses cards_only_fmt.
+
+        Покрывает строку 402: fmt = cards_only_fmt в generate_legacy_report.
+        """
+        discs = [
+            _make_discrepancy("P003", DiscrepancyType.ONLY_IN_CARDS,
+                              qty_bom=0.0, qty_cards=3.0, config="C1",
+                              card_numbers=["Card1"]),
+        ]
+        cr = ConfigComparisonResult(config_name="C1", discrepancies=discs)
+        path = os.path.join(output_dir, "legacy.xlsx")
+        generate_legacy_report(cr, path)
+
+        wb = openpyxl.load_workbook(path)
+        ws = wb["Расхождения"]
+        row = list(ws.iter_rows(min_row=2, max_row=2, values_only=True))[0]
+        wb.close()
+
+        assert row[0] == "P003"
+        assert row[3] == 0.0  # qty_bom
+        assert row[4] == 3.0  # qty_cards
+        assert DiscrepancyType.ONLY_IN_CARDS in str(row[6])
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  8. create_split_cards_archive
@@ -649,7 +674,7 @@ class TestGenerateLegacyReport:
 class TestCreateSplitCardsArchive:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -719,6 +744,70 @@ class TestCreateSplitCardsArchive:
         with zipfile.ZipFile(zip_path, "r") as zf:
             assert len(zf.namelist()) == 0, "Empty ZIP should have no files"
 
+    def test_skips_nonexistent_file(self, output_dir: str):
+        """File that disappears between os.walk and os.path.exists is skipped.
+
+        Покрывает строку 440: continue when not os.path.exists(file_path).
+        Мокируем os.path.exists, чтобы файл 'phantom.xlsx' был найден os.walk,
+        но os.path.exists вернул False.
+        """
+        from unittest.mock import patch
+
+        src_dir = os.path.join(output_dir, "split_files")
+        os.makedirs(src_dir)
+        # Создаём реальный файл
+        fp = os.path.join(src_dir, "card1.xlsx")
+        with open(fp, "w") as f:
+            f.write("test")
+
+        zip_path = os.path.join(output_dir, "archive.zip")
+
+        # Мокируем os.path.exists: для card1.xlsx возвращаем False (файл "исчез")
+        original_exists = os.path.exists
+
+        def selective_exists(path):
+            if "card1.xlsx" in path:
+                return False  # файл "не существует"
+            return original_exists(path)
+
+        with patch("os.path.exists", side_effect=selective_exists):
+            create_split_cards_archive(src_dir, zip_path)
+
+        # ZIP должен быть создан, но без card1.xlsx
+        assert os.path.exists(zip_path)
+        import zipfile
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+        assert "card1.xlsx" not in names, "Skipped file should not be in archive"
+
+    def test_handles_zip_write_error(self, output_dir: str):
+        """PermissionError при записи в ZIP ловится и логируется.
+
+        Покрывает строки 444-445: except (FileNotFoundError, PermissionError).
+        Мокируем zipfile.ZipFile.write, чтобы он выбросил PermissionError.
+        """
+        from unittest.mock import patch
+
+        src_dir = os.path.join(output_dir, "split_files")
+        os.makedirs(src_dir)
+        fp = os.path.join(src_dir, "card1.xlsx")
+        with open(fp, "w") as f:
+            f.write("test")
+
+        zip_path = os.path.join(output_dir, "archive.zip")
+
+        # Мокируем zf.write: выбрасываем PermissionError при первой записи
+        # Без autospec аргументы передаются напрямую: (file_path, arcname)
+        with patch.object(
+            zipfile.ZipFile,
+            "write",
+            side_effect=PermissionError("Permission denied"),
+        ):
+            result = create_split_cards_archive(src_dir, zip_path)
+
+        assert result == zip_path
+        assert os.path.exists(zip_path)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  9. Reporter (service wrapper)
@@ -727,7 +816,7 @@ class TestCreateSplitCardsArchive:
 class TestReporter:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 
@@ -797,7 +886,7 @@ class TestReporter:
 class TestReportEdgeCases:
     @pytest.fixture
     def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_", dir="/home/rpaup/projects/burlak")
+        path = tempfile.mkdtemp(prefix="report_test_")
         yield path
         shutil.rmtree(path, ignore_errors=True)
 

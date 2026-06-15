@@ -27,7 +27,7 @@ import re
 import tempfile
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from tqdm import tqdm
@@ -196,8 +196,9 @@ class CardParseResult:
 class CardsData:
     """Результат парсинга всех операционных карт."""
     all_parts: Dict[str, float]  # part_number -> суммарное количество
-    part_sources: Dict[str, List[Tuple[str, str, float]]]  # part_number -> [(card, file, qty)]
-    card_results: List[CardParseResult]
+    original_part_numbers: Dict[str, str] = field(default_factory=dict)  # cleaned_part_no -> оригинальный (с тире и т.д.)
+    part_sources: Dict[str, List[Tuple[str, str, float]]] = field(default_factory=dict)
+    card_results: List[CardParseResult] = field(default_factory=list)
     total_cards_processed: int = 0
     total_sheets_processed: int = 0
     total_sheets_skipped: int = 0
@@ -769,6 +770,9 @@ def parse_cards(
                         part_sources[part_no].append(
                             (result.card_number, result.file_path, qty),
                         )
+                        # Сохраняем оригинальный формат номера (с тире и т.д.)
+                        # Используем первый попавшийся оригинальный номер из деталей карты
+
                 except Exception as e:
                     logger.warning("Ошибка при обработке %s: %s", file_path, e)
                     corrupted.append(file_path)
@@ -816,8 +820,17 @@ def parse_cards(
     logger.info("Всего листов: %d, пропущено (пустых): %d", total_sheets, total_skipped)
     logger.info("Уникальных деталей найдено: %d", len(all_aggregated))
 
+    # Строим словарь оригинальных номеров деталей из карт
+    original_part_numbers: Dict[str, str] = {}
+    for result in card_results:
+        for cp in result.parts:
+            clean_pn = clean_part_number(cp.part_number)
+            if clean_pn not in original_part_numbers:
+                original_part_numbers[clean_pn] = cp.part_number
+
     return CardsData(
         all_parts=all_aggregated,
+        original_part_numbers=original_part_numbers,
         part_sources=part_sources,
         card_results=card_results,
         total_cards_processed=processed,

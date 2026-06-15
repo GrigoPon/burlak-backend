@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -26,11 +27,15 @@ import openpyxl
 import pytest
 
 from burlak_parser.main import (
+    AUTO_CLEAN_DIRS,
     clean_output_dirs,
     run_pipeline,
+    select_config_interactive,
     setup_logging,
     main,
 )
+
+from burlak_parser.bom_parser import BOMData
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -134,6 +139,59 @@ def _create_multi_sheet_card(path: str) -> str:
     ws2.cell(row=2, column=1, value=1)
     ws2.cell(row=2, column=2, value="P999")
     ws2.cell(row=2, column=3, value=2.0)
+
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def _create_multi_config_bom(path: str, n_configs: int = 6) -> str:
+    """Создать BOM с N комплектациями для теста вывода '... и ещё N'.
+
+    Структура:
+      R1: 序号 | 零部件代号 | 零部件名称 | Config0 | Config1 | ... | Config{N-1}
+      R2:  1   | P001      | Part1      |  1.0   |  1.0   | ... |  1.0
+      R3:  2   | P002      | Part2      |  1.0   |  1.0   | ... |  1.0
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    config_names = [f"Config{i}" for i in range(n_configs)]
+    headers = ["序号", "零部件代号", "零部件名称"] + config_names
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=1, column=c, value=h)
+
+    data = [
+        [1, "P001", "Part1"] + [1.0] * n_configs,
+        [2, "P002", "Part2"] + [1.0] * n_configs,
+        [3, "P003", "Part3"] + [1.0] * n_configs,
+    ]
+    for r, row in enumerate(data, 2):
+        for c, val in enumerate(row, 1):
+            ws.cell(row=r, column=c, value=val)
+
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def _create_card_with_many_parts(path: str, n_parts: int = 12) -> str:
+    """Создать карту с N деталями (все не в BOM → ONLY_IN_CARDS).
+
+    Для теста вывода '... и ещё N' при >10 расхождениях.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.cell(row=1, column=1, value="序号")
+    ws.cell(row=1, column=2, value="零部件代号")
+    ws.cell(row=1, column=3, value="数量")
+
+    for i in range(n_parts):
+        ws.cell(row=i + 2, column=1, value=i + 1)
+        ws.cell(row=i + 2, column=2, value=f"P{i + 100:03d}")
+        ws.cell(row=i + 2, column=3, value=1.0)
 
     wb.save(path)
     wb.close()
@@ -702,3 +760,484 @@ class TestSplitCardsIntegration:
         split_dir = os.path.join(output_dir, "split_cards")
         assert os.path.isdir(split_dir), "split_cards dir not created"
         assert len(os.listdir(split_dir)) > 0, "split_cards dir is empty"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  11. select_config_interactive
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSelectConfigInteractive:
+    """select_config_interactive — интерактивный выбор комплектации.
+
+    Покрывает строки 100-128 main.py:
+      - Пустой список комплектаций → sys.exit(1)
+      - Одна комплектация → авто-выбор
+      - Валидный выбор из нескольких
+      - Неверный ввод, затем валидный
+      - Число вне диапазона, затем валидное
+    """
+
+    def test_no_configs_exits(self):
+        """Empty config list → sys.exit(1)."""
+        bom = BOMData(parts={}, config_names=[], config_quantities={})
+        with pytest.raises(SystemExit) as exc:
+            select_config_interactive(bom)
+        assert exc.value.code == 1
+
+    def test_single_config_auto_selected(self):
+        """Single config → auto-selected without prompting."""
+        bom = BOMData(
+            parts={},
+            config_names=["Единственная"],
+            config_quantities={"Единственная": {}},
+        )
+        result = select_config_interactive(bom)
+        assert result == "Единственная"
+
+    def test_valid_choice(self, monkeypatch):
+        """Valid config index returns correct name."""
+        configs = ["Config A", "Config B", "Config C"]
+        bom = BOMData(parts={}, config_names=configs,
+                      config_quantities={c: {} for c in configs})
+        monkeypatch.setattr("builtins.input", lambda _: "2")
+        result = select_config_interactive(bom)
+        assert result == "Config B"
+
+    def test_invalid_then_valid(self, monkeypatch):
+        """Non-numeric input, then valid choice."""
+        inputs = iter(["abc", "3"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        configs = ["Config A", "Config B", "Config C"]
+        bom = BOMData(parts={}, config_names=configs,
+                      config_quantities={c: {} for c in configs})
+        result = select_config_interactive(bom)
+        assert result == "Config C"
+
+    def test_out_of_range_then_valid(self, monkeypatch):
+        """Out of range input (0), then valid."""
+        inputs = iter(["0", "1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        configs = ["Config A", "Config B"]
+        bom = BOMData(parts={}, config_names=configs,
+                      config_quantities={c: {} for c in configs})
+        result = select_config_interactive(bom)
+        assert result == "Config A"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  12. clean_output_dirs — расширенные кейсы
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCleanOutputDirsExtended:
+    """Расширенные тесты clean_output_dirs.
+
+    Покрывает строки 86-97 main.py:
+      - Авто-очистка split_cards / _extracted_cards в CWD
+      - output_dir не удаляется повторно через auto-clean
+    """
+
+    def test_auto_clean_dirs_in_cwd(self, tmp_path, monkeypatch):
+        """Auto-clean dirs (split_cards, _extracted_cards) in CWD are removed
+        when output_dir is different."""
+        monkeypatch.chdir(tmp_path)
+        # Create auto-clean dirs in CWD
+        for d in ["split_cards", "_extracted_cards"]:
+            path = os.path.join(tmp_path, d)
+            os.makedirs(path)
+            open(os.path.join(path, "test.txt"), "w").close()
+
+        # Different output_dir (not in CWD)
+        output_dir = os.path.join(str(tmp_path), "custom_output")
+        os.makedirs(output_dir)
+        open(os.path.join(output_dir, "report.txt"), "w").close()
+
+        clean_output_dirs(output_dir)
+
+        # Auto-clean dirs in CWD should be removed
+        assert not os.path.isdir(os.path.join(tmp_path, "split_cards")), \
+            "split_cards should be cleaned"
+        assert not os.path.isdir(os.path.join(tmp_path, "_extracted_cards")), \
+            "_extracted_cards should be cleaned"
+        # output_dir should also be cleaned (it was added first)
+        assert not os.path.isdir(output_dir), "output_dir should be cleaned"
+
+    def test_output_dir_not_cleaned_twice(self, tmp_path, monkeypatch):
+        """When output_dir matches an auto-clean dir, it's skipped in the
+        auto-clean loop (already added to dirs_to_clean)."""
+        monkeypatch.chdir(tmp_path)
+        output_dir = os.path.join(tmp_path, "output")
+        os.makedirs(output_dir)
+
+        # output_dir is also in CWD and matches an auto-clean dir name
+        # The code checks `path != output_dir` and skips it
+        clean_output_dirs(output_dir)
+        assert not os.path.isdir(output_dir), "output_dir should be cleaned"
+
+    def test_rmtree_error_logged(self, tmp_path, monkeypatch, caplog):
+        """Error during rmtree is caught and logged as warning.
+
+        Покрывает строки 96-97: except Exception в clean_output_dirs.
+        """
+        output_dir = os.path.join(tmp_path, "output")
+        os.makedirs(output_dir)
+
+        def failing_rmtree(path):
+            raise PermissionError("Access denied")
+
+        monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+
+        with caplog.at_level(logging.WARNING):
+            clean_output_dirs(output_dir)
+
+        assert "Не удалось очистить" in caplog.text
+        assert "Access denied" in caplog.text
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  13. run_pipeline — интерактивный выбор (single_config + no config_name)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestRunPipelineInteractiveConfig:
+    """run_pipeline с single_config=True и config_name=None →
+    должен вызвать select_config_interactive.
+
+    Покрывает строку 192 (вызов select_config_interactive).
+    """
+
+    def test_interactive_selection(self, bom_path, card_path, output_dir, monkeypatch):
+        """single_config with no config_name → interactive selection is called."""
+        # Mock interactive selection to return a valid config
+        monkeypatch.setattr(
+            "burlak_parser.main.select_config_interactive",
+            lambda bom: "舒享版",
+        )
+        run_pipeline(
+            bom_path=bom_path,
+            cards_path=card_path,
+            config_name=None,
+            output_dir=output_dir,
+            auto_split=False,
+            use_fuzzy=True,
+            single_config=True,
+            max_workers=1,
+        )
+        txt = os.path.join(output_dir, "report.txt")
+        assert os.path.isfile(txt)
+        content = open(txt).read()
+        # Should have processed 舒享版
+        assert "舒享版" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  14. main() — обработка ошибок
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestMainErrorHandling:
+    """Обработка ошибок в main(): KeyboardInterrupt и Exception.
+
+    Покрывает строки 453-462 main.py.
+    """
+
+    def test_keyboard_interrupt(self, bom_path, card_path):
+        """KeyboardInterrupt в run_pipeline → sys.exit(1)."""
+        with patch.object(sys, "argv", [
+            "main.py", "--bom", bom_path, "--cards", card_path,
+        ]):
+            with patch(
+                "burlak_parser.main.run_pipeline",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    main()
+                assert exc.value.code == 1
+
+    def test_generic_exception(self, bom_path, card_path):
+        """Generic exception в run_pipeline → sys.exit(1)."""
+        with patch.object(sys, "argv", [
+            "main.py", "--bom", bom_path, "--cards", card_path,
+        ]):
+            with patch(
+                "burlak_parser.main.run_pipeline",
+                side_effect=ValueError("test error"),
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    main()
+                assert exc.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  15. report — крайние случаи вывода
+# ═══════════════════════════════════════════════════════════════════════
+
+def _create_perfect_card(path: str) -> str:
+    """Создать карту, идеально совпадающую с 舒享版.
+
+    BOM 舒享版: P001=2.0, P002=1.0, P003=0.0
+    Card:       P001=2.0, P002=1.0  (P003 qty=0 → не включается)
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.cell(row=1, column=1, value="序号")
+    ws.cell(row=1, column=2, value="零部件代号")
+    ws.cell(row=1, column=3, value="数量")
+    ws.cell(row=2, column=1, value=1)
+    ws.cell(row=2, column=2, value="P001")
+    ws.cell(row=2, column=3, value=2.0)
+    ws.cell(row=3, column=1, value=2)
+    ws.cell(row=3, column=2, value="P002")
+    ws.cell(row=3, column=3, value=1.0)
+    wb.save(path)
+    wb.close()
+    return path
+
+
+class TestReportEdgeCases:
+    """Крайние случаи отчёта: 0 расхождений.
+
+    Покрывает строку 355 (вывод "Расхождений не найдено!").
+    """
+
+    def test_no_discrepancies_message(self, bom_path, output_dir, tmp_path, capsys):
+        """Perfect match → 'Расхождений не найдено!' displayed in stdout.
+
+        File must have a digit-prefixed name (e.g. '001-...') for the
+        file_classifier to recognize it.
+        """
+        card_path = os.path.join(tmp_path, "001-perfect.xlsx")
+        _create_perfect_card(card_path)
+
+        run_pipeline(
+            bom_path=bom_path,
+            cards_path=card_path,
+            config_name="舒享版",
+            output_dir=output_dir,
+            auto_split=False,
+            use_fuzzy=True,
+            single_config=True,
+            max_workers=1,
+        )
+
+        captured = capsys.readouterr()
+        assert "Расхождений не найдено" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  16. Many configs — строка 290: '... и ещё N комплектаций'
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestManyConfigs:
+    """Тест для >5 комплектаций → вывод '... и ещё N комплектаций'
+
+    Покрывает строку 290 main.py.
+    """
+
+    def test_many_configs_message(self, tmp_path, capsys):
+        """BOM с 6+ комплектациями показывает '... и ещё N комплектаций'."""
+        bom_path = os.path.join(tmp_path, "multi_config_bom.xlsx")
+        _create_multi_config_bom(bom_path, n_configs=6)
+
+        card_path = os.path.join(tmp_path, "001-card.xlsx")
+        _create_test_card(card_path)
+
+        output_dir = os.path.join(tmp_path, "output")
+        os.makedirs(output_dir)
+
+        run_pipeline(
+            bom_path=bom_path,
+            cards_path=card_path,
+            output_dir=output_dir,
+            auto_split=False,
+            use_fuzzy=True,
+            single_config=False,
+            max_workers=1,
+        )
+
+        captured = capsys.readouterr()
+        assert "... и ещё 1 комплектаций" in captured.out or "... и ещё 1" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  17. Many discrepancies — строка 353: '... и ещё N'
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestManyDiscrepancies:
+    """Тест для >10 расхождений → вывод '... и ещё N'
+
+    Покрывает строку 353 main.py.
+    """
+
+    def test_many_discrepancies_message(self, bom_path, output_dir, tmp_path, capsys):
+        """Карта с 12 частями не из BOM → 12+ расхождений → '... и ещё N'."""
+        card_path = os.path.join(tmp_path, "001-many_parts.xlsx")
+        _create_card_with_many_parts(card_path, n_parts=12)
+
+        run_pipeline(
+            bom_path=bom_path,
+            cards_path=card_path,
+            config_name="舒享版",
+            output_dir=output_dir,
+            auto_split=False,
+            use_fuzzy=True,
+            single_config=True,
+            max_workers=1,
+        )
+
+        captured = capsys.readouterr()
+        assert "... и ещё" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  18. Corrupted files — строка 211
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCorruptedFiles:
+    """Тест для повреждённых файлов.
+
+    Покрывает строку 211 main.py: if cards.corrupted_files: print(...)
+    """
+
+    def test_corrupted_file_warning(self, bom_path, output_dir, tmp_path, capsys):
+        """Повреждённый .xlsx файл → предупреждение в stdout.
+
+        Создаём файл с .xlsx расширением, но невалидным содержимым.
+        Файловый классификатор определяет его как карту (цифровой префикс),
+        парсер не может открыть → попадает в corrupted_files.
+        """
+        # Создаём битый .xlsx
+        bad_card = os.path.join(tmp_path, "003-corrupted.xlsx")
+        with open(bad_card, "w") as f:
+            f.write("this is not a valid xlsx file")
+
+        # Создаём нормальную карту (без неё CardService.load() может не найти карт)
+        good_card = os.path.join(tmp_path, "001-card.xlsx")
+        _create_test_card(good_card)
+
+        run_pipeline(
+            bom_path=bom_path,
+            cards_path=str(tmp_path),
+            output_dir=output_dir,
+            auto_split=False,
+            use_fuzzy=True,
+            single_config=False,
+            max_workers=1,
+        )
+
+        captured = capsys.readouterr()
+        assert "Повреждённых" in captured.out or "corrupted" in captured.out.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  19. if __name__ == "__main__" — строка 466
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestMainEntryPoint:
+    """Тест для точки входа if __name__ == '__main__'.
+
+    Покрывает строку 466 main.py.
+    """
+
+    def test_main_entry_point(self, bom_path, card_path, output_dir):
+        """Запуск main.py как `__main__` через subprocess."""
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "burlak_parser.main",
+                "--bom", bom_path,
+                "--cards", card_path,
+                "-o", output_dir,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"main.py exit code {result.returncode}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
+        assert os.path.isfile(os.path.join(output_dir, "report.txt"))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  20. Integrity checks — строки 314-318, 329-330, 336
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestIntegrityChecks:
+    """Тесты для проверок целостности в main.py.
+
+    Эти проверки срабатывают, только когда учёт BOM-частей не совпадает
+    с ожидаемым количеством. В корректных данных такое невозможно —
+    используем mock компаратора.
+
+    Покрывает:
+      - Строки 314-318: accounted_bom != expected
+      - Строки 329-330: sum_check != total_discrepancies
+      - Строка 336: integrity_ok = False → warning на stdout
+    """
+
+    def test_integrity_mismatch_logged(self, bom_path, card_path, output_dir, caplog, capsys):
+        """Mock компаратора с несовпадающими счётчиками → integrity warning.
+
+        Создаём fake MultiConfigComparisonResult, где:
+          - matched_parts + only_bom_count + qty_mismatch_count + fuzzy_count != total_bom_parts
+          - В all_discrepancies есть расхождение с неизвестным типом (не входит ни в один из 4)
+        """
+        from burlak_parser.comparator import (
+            MultiConfigComparisonResult, ConfigComparisonResult,
+            Discrepancy,
+        )
+
+        # Создаём fake discrepancy с неизвестным типом — он будет учтён в
+        # total_discrepancies, но не попадёт ни в один из 4 type-sum counters
+        fake_disc = Discrepancy(
+            part_number="P999",
+            name_cn="", name_en="",
+            qty_bom=0.0, qty_cards=1.0,
+            card_numbers=["card1"],
+            discrepancy_type="__UNKNOWN_TYPE__",  # не входит в 4 известных типа
+            config_name="舒享版",
+        )
+
+        mock_result = MultiConfigComparisonResult(
+            config_results=[
+                ConfigComparisonResult(
+                    config_name="舒享版",
+                    discrepancies=[fake_disc],
+                    total_bom_parts=5,   # matched=2 + only_bom=0 + qty=0 + fuzzy=0 = 2 != 5
+                    total_cards_parts=3,
+                    matched_parts=2,     # не совпадает с total_bom_parts
+                    fuzzy_matched=0,
+                ),
+            ],
+            all_discrepancies=[fake_disc],  # 1 discrepancy unknown type → sum_check=0 != total=1
+            total_configs=1,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            with patch(
+                "burlak_parser.main.compare_all_configs",
+                return_value=mock_result,
+            ):
+                run_pipeline(
+                    bom_path=bom_path,
+                    cards_path=card_path,
+                    output_dir=output_dir,
+                    auto_split=False,
+                    use_fuzzy=True,
+                    single_config=False,
+                    max_workers=1,
+                )
+
+        # Строка 314-318: accounted_bom != expected → logger.warning
+        assert "Нарушение целостности" in caplog.text, \
+            "Expected integrity violation warning in logs"
+        assert "учтено 2, ожидалось 5" in caplog.text, \
+            "Expected diff message in log: учтено 2, ожидалось 5"
+
+        # Строка 329-330: sum_check != total_discrepancies → logger.warning
+        assert "сумма типов" in caplog.text, \
+            "Expected type sum mismatch warning in logs"
+
+        # Строка 336: integrity_ok = False → print warning
+        captured = capsys.readouterr()
+        assert "нарушения целостности" in captured.out, \
+            "Expected integrity warning in stdout"

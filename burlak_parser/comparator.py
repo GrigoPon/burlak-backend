@@ -124,7 +124,7 @@ def compare_single_config(
         if bom_pn in bom_part_numbers:
             extended_bom.add(cards_pn)  # Добавляем вариант из карт как «известный»
 
-    # 1. Только в BOM
+    # 1. Только в BOM — используем оригинальный формат номера из BOM (с тире и т.д.)
     only_in_bom = bom_part_numbers - cards_part_numbers
     # Исключаем те, что нашли через fuzzy match
     if fuzzy_matcher:
@@ -138,8 +138,10 @@ def compare_single_config(
         part = bom_parts[part_no]
         if not is_valid_part_number(part_no):
             continue
+        # Используем оригинальный формат номера из BOM
+        original_part_no = part.part_number if part.part_number else part_no
         discrepancies.append(Discrepancy(
-            part_number=part_no,
+            part_number=original_part_no,
             name_cn=part.name_cn,
             name_en=part.name_en,
             qty_bom=part.quantity,
@@ -149,7 +151,7 @@ def compare_single_config(
             config_name=config_name,
         ))
 
-    # 2. Только в Картах
+    # 2. Только в Картах — показываем оригинальный номер из карт, если доступен
     only_in_cards = cards_part_numbers - bom_part_numbers
     # Исключаем fuzzy-совпадения
     only_in_cards = only_in_cards - set(fuzzy_matched_pairs.keys())
@@ -159,8 +161,10 @@ def compare_single_config(
             continue
         qty = cards_data.all_parts[part_no]
         card_numbers = _get_card_numbers(part_no, cards_data)
+        # Используем оригинальный формат номера из карт (если сохранён)
+        original_no = cards_data.original_part_numbers.get(part_no, part_no) if hasattr(cards_data, 'original_part_numbers') else part_no
         discrepancies.append(Discrepancy(
-            part_number=part_no,
+            part_number=original_no,
             name_cn="",
             name_en="",
             qty_bom=0.0,
@@ -170,7 +174,7 @@ def compare_single_config(
             config_name=config_name,
         ))
 
-    # 3. Fuzzy match — добавляем как отдельный тип расхождения
+    # 3. Fuzzy match — показываем оригинальный BOM-номер как основной
     for cards_pn, bom_pn in sorted(fuzzy_matched_pairs.items()):
         if not is_valid_part_number(cards_pn) or not is_valid_part_number(bom_pn):
             continue
@@ -179,8 +183,9 @@ def compare_single_config(
             continue
         cards_qty = cards_data.all_parts.get(cards_pn, 0.0)
         card_numbers = _get_card_numbers(cards_pn, cards_data)
+        original_bom_no = part.part_number if part.part_number else bom_pn
         discrepancies.append(Discrepancy(
-            part_number=cards_pn,
+            part_number=original_bom_no,  # ← BOM-оригинал (с тире)
             name_cn=part.name_cn,
             name_en=part.name_en,
             qty_bom=part.quantity,
@@ -188,10 +193,10 @@ def compare_single_config(
             card_numbers=card_numbers,
             discrepancy_type=DiscrepancyType.FUZZY_MATCH,
             config_name=config_name,
-            fuzzy_matched_to=bom_pn,
+            fuzzy_matched_to=cards_pn,  # ← номер из карт (для справки)
         ))
 
-    # 4. Конфликт количества
+    # 4. Конфликт количества — используем оригинальный формат номера из BOM
     common_parts = bom_part_numbers & cards_part_numbers
     matched = 0
     for part_no in sorted(common_parts):
@@ -203,8 +208,9 @@ def compare_single_config(
         if abs(bom_qty - cards_qty) > 0.001:
             part = bom_parts[part_no]
             card_numbers = _get_card_numbers(part_no, cards_data)
+            original_part_no = part.part_number if part.part_number else part_no
             discrepancies.append(Discrepancy(
-                part_number=part_no,
+                part_number=original_part_no,
                 name_cn=part.name_cn,
                 name_en=part.name_en,
                 qty_bom=bom_qty,
@@ -243,16 +249,7 @@ def compare_single_config_cached(
     fuzzy_matched_pairs: Dict[str, str] = None,
     global_names: Dict[str, Tuple[str, str]] = None,
 ) -> ConfigComparisonResult:
-    """Сверка BOM и карт для ОДНОЙ комплектации с кэшированными данными.
-
-    Использует предварительно вычисленные нормализованные наборы и fuzzy-пары,
-    что ускоряет обработку 24+ комплектаций в 3-4 раза.
-
-    Args:
-        global_names: Глобальный словарь {part_number: (name_cn, name_en)}
-                      из BOM. Используется для подстановки названий деталям,
-                      которые есть только в картах, но отсутствуют в комплектации.
-    """
+    """Сверка BOM и карт для ОДНОЙ комплектации с кэшированными данными."""
     discrepancies: List[Discrepancy] = []
     bom_part_numbers = set(bom_parts.keys())
     cards_part_numbers = set(cards_data.all_parts.keys())
@@ -265,7 +262,10 @@ def compare_single_config_cached(
     if global_names is None:
         global_names = {}
 
-    # 1. Только в BOM
+    # Словарь оригинальных номеров из карт
+    cards_original = getattr(cards_data, 'original_part_numbers', {})
+
+    # 1. Только в BOM — используем оригинальный формат из BOM
     only_in_bom = bom_part_numbers - cards_part_numbers
     if cards_norm_set:
         only_in_bom = {
@@ -277,13 +277,14 @@ def compare_single_config_cached(
         part = bom_parts[part_no]
         if not is_valid_part_number(part_no):
             continue
+        original_part_no = part.part_number if part.part_number else part_no
         discrepancies.append(Discrepancy(
-            part_number=part_no, name_cn=part.name_cn, name_en=part.name_en,
+            part_number=original_part_no, name_cn=part.name_cn, name_en=part.name_en,
             qty_bom=part.quantity, qty_cards=0.0, card_numbers=[],
             discrepancy_type=DiscrepancyType.ONLY_IN_BOM, config_name=config_name,
         ))
 
-    # 2. Только в Картах
+    # 2. Только в Картах — показываем оригинальный номер из карт
     only_in_cards = cards_part_numbers - bom_part_numbers - set(fuzzy_matched_pairs.keys())
 
     for part_no in sorted(only_in_cards):
@@ -291,15 +292,15 @@ def compare_single_config_cached(
             continue
         qty = cards_data.all_parts[part_no]
         card_numbers = _get_card_numbers(part_no, cards_data)
-        # Ищем название в глобальном словаре BOM
         name_cn, name_en = global_names.get(part_no, ("", ""))
+        original_no = cards_original.get(part_no, part_no)
         discrepancies.append(Discrepancy(
-            part_number=part_no, name_cn=name_cn, name_en=name_en,
+            part_number=original_no, name_cn=name_cn, name_en=name_en,
             qty_bom=0.0, qty_cards=qty, card_numbers=card_numbers,
             discrepancy_type=DiscrepancyType.ONLY_IN_CARDS, config_name=config_name,
         ))
 
-    # 3. Fuzzy match (из предварительно вычисленных)
+    # 3. Fuzzy match — показываем BOM-оригинал
     for cards_pn, bom_pn in sorted(fuzzy_matched_pairs.items()):
         if not is_valid_part_number(cards_pn) or not is_valid_part_number(bom_pn):
             continue
@@ -309,14 +310,15 @@ def compare_single_config_cached(
         cards_qty = cards_data.all_parts.get(cards_pn, 0.0)
         card_numbers = _get_card_numbers(cards_pn, cards_data)
         fuzzy_matched_count += 1
+        original_bom_no = part.part_number if part.part_number else bom_pn
         discrepancies.append(Discrepancy(
-            part_number=cards_pn, name_cn=part.name_cn, name_en=part.name_en,
+            part_number=original_bom_no, name_cn=part.name_cn, name_en=part.name_en,
             qty_bom=part.quantity, qty_cards=cards_qty, card_numbers=card_numbers,
             discrepancy_type=DiscrepancyType.FUZZY_MATCH, config_name=config_name,
             fuzzy_matched_to=bom_pn,
         ))
 
-    # 4. Конфликт количества
+    # 4. Конфликт количества — используем оригинальный формат из BOM
     common_parts = bom_part_numbers & cards_part_numbers
     matched = 0
     for part_no in sorted(common_parts):
@@ -328,8 +330,9 @@ def compare_single_config_cached(
         if abs(bom_qty - cards_qty) > 0.001:
             part = bom_parts[part_no]
             card_numbers = _get_card_numbers(part_no, cards_data)
+            original_part_no = part.part_number if part.part_number else part_no
             discrepancies.append(Discrepancy(
-                part_number=part_no, name_cn=part.name_cn, name_en=part.name_en,
+                part_number=original_part_no, name_cn=part.name_cn, name_en=part.name_en,
                 qty_bom=bom_qty, qty_cards=cards_qty, card_numbers=card_numbers,
                 discrepancy_type=DiscrepancyType.QUANTITY_MISMATCH,
                 config_name=config_name,
@@ -355,29 +358,27 @@ def compare_single_config_cached(
 
 def _compare_config_worker(
     config_name: str,
-    bom_parts_dict: Dict[str, Tuple[str, str, float]],
+    bom_parts_dict: Dict[str, Tuple[str, str, float, str]],
     cards_all_parts: Dict[str, float],
     cards_part_sources: Dict[str, List[Tuple[str, str, float]]],
+    cards_original_part_numbers: Dict[str, str],
     fuzzy_matched_pairs: Dict[str, str],
     cards_norm_set: Set[str],
     global_names_dict: Dict[str, Tuple[str, str]] = None,
 ) -> ConfigComparisonResult:
-    """Параллельная сверка одной комплектации (выполняется в отдельном процессе).
-
-    Не использует FuzzyMatcher — только normalize_part_number напрямую,
-    что исключает накладные расходы на перестройку индекса в каждом процессе.
-    """
-    # Восстанавливаем PartInfo
+    """Параллельная сверка одной комплектации (выполняется в отдельном процессе)."""
+    # Восстанавливаем PartInfo с оригинальными номерами
     bom_parts: Dict[str, PartInfo] = {}
-    for pn, (name_cn, name_en, qty) in bom_parts_dict.items():
+    for pn, (name_cn, name_en, qty, orig_pn) in bom_parts_dict.items():
         bom_parts[pn] = PartInfo(
-            part_number=pn, name_cn=name_cn, name_en=name_en, quantity=qty,
+            part_number=orig_pn, name_cn=name_cn, name_en=name_en, quantity=qty,
         )
 
-    # Минимальный CardsData (только all_parts + part_sources)
+    # Минимальный CardsData (только all_parts + part_sources + original_part_numbers)
     from burlak_parser.card_parser import CardsData
     minimal_cards = CardsData(
         all_parts=cards_all_parts,
+        original_part_numbers=cards_original_part_numbers,
         part_sources=cards_part_sources,
         card_results=[],
         total_cards_processed=0,
@@ -438,6 +439,7 @@ def compare_all_configs(
                 logger.debug("Fuzzy match: '%s' -> '%s'", cards_pn, match)
 
     # Предварительно строим PartInfo для всех конфигураций (в один проход)
+    # ВАЖНО: PartInfo.part_number = оригинальный формат из BOM (с тире и т.д.)
     config_bom_parts: Dict[str, Dict[str, PartInfo]] = {}
     # Глобальный словарь названий (все part-no из BOM, не только из комплектации)
     global_names = getattr(bom, 'global_names', {}) or {}
@@ -446,7 +448,7 @@ def compare_all_configs(
         for part_no, qty in bom.config_quantities[config_name].items():
             if part_no in bom.parts:
                 parts_for_config[part_no] = PartInfo(
-                    part_number=part_no,
+                    part_number=bom.parts[part_no].part_number,  # ← ОРИГИНАЛЬНЫЙ формат!
                     name_cn=bom.parts[part_no].name_cn,
                     name_en=bom.parts[part_no].name_en,
                     quantity=qty,
@@ -463,15 +465,17 @@ def compare_all_configs(
         logger.info("  Параллельная сверка: %d процессов для %d комплектаций", workers, total_configs)
 
         # Сериализуем PartInfo в plain dict для передачи в процессы
-        serialized_configs: Dict[str, Dict[str, Tuple[str, str, float]]] = {}
+        # Включаем оригинальный парт-номер как 4-й элемент кортежа
+        serialized_configs: Dict[str, Dict[str, Tuple[str, str, float, str]]] = {}
         for cn, parts in config_bom_parts.items():
             serialized_configs[cn] = {
-                pn: (p.name_cn, p.name_en, p.quantity) for pn, p in parts.items()
+                pn: (p.name_cn, p.name_en, p.quantity, p.part_number) for pn, p in parts.items()
             }
 
         # Извлекаем только нужные данные карт (без card_results — экономия ~80% pickle)
         cards_all_parts = cards_data.all_parts
         cards_part_sources = cards_data.part_sources
+        cards_original_part_numbers = getattr(cards_data, 'original_part_numbers', {})
 
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {}
@@ -482,6 +486,7 @@ def compare_all_configs(
                     bom_parts_dict=serialized_configs[config_name],
                     cards_all_parts=cards_all_parts,
                     cards_part_sources=cards_part_sources,
+                    cards_original_part_numbers=cards_original_part_numbers,
                     fuzzy_matched_pairs=fuzzy_matched_pairs,
                     cards_norm_set=cards_norm_set,
                     global_names_dict=global_names,
@@ -749,24 +754,15 @@ class MatchingEngine:
         cards_data: CardsData,
         single_config: Optional[str] = None,
     ) -> MultiConfigComparisonResult:
-        """Выполнить сверку.
-
-        Args:
-            bom: Данные BOM.
-            cards_data: Данные операционных карт.
-            single_config: Если указано — сверка только для одной комплектации.
-
-        Returns:
-            MultiConfigComparisonResult (может содержать 1 конфигурацию).
-        """
+        """Выполнить сверку."""
         if single_config:
-            # Сверка одной комплектации
+            # Сверка одной комплектации — используем оригинальный формат номера из BOM
             bom_parts: Dict[str, PartInfo] = {}
             if single_config in bom.config_quantities:
                 for part_no, qty in bom.config_quantities[single_config].items():
                     if part_no in bom.parts:
                         bom_parts[part_no] = PartInfo(
-                            part_number=part_no,
+                            part_number=bom.parts[part_no].part_number,  # ← оригинал!
                             name_cn=bom.parts[part_no].name_cn,
                             name_en=bom.parts[part_no].name_en,
                             quantity=qty,

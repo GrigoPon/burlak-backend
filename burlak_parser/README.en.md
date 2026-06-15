@@ -2,7 +2,7 @@
 
 BOM parsing and reconciliation with assembly operation cards for automotive manufacturing.
 
-Multi-table parsing: section boundary detection within a single sheet — each table parsed separately. Garbled filename handling for encoding-damaged files. Full module test suite (7 files, all modules covered).
+Original part-number format (with dashes) preserved in comparison results. Detailed split statistics. Integrity verification. Expanded test suite with conftest.py and automatic temp file cleanup.
 
 ---
 
@@ -35,22 +35,24 @@ python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [OPTIONS]
 
 ---
 
-## Multi-Table Parsing
+## Original Part-Number Format
 
-`_collect_all_tables()` detects section boundaries within a sheet. If a sheet contains multiple tables (e.g., multiple operations), each is parsed separately. Boundary detected by:
-- New column header appearance (keywords 件号, part no, etc.)
-- Three or more consecutive empty rows
+`CardsData.original_part_numbers` tracks the original (dashed) format alongside the normalized version. All discrepancy types use the original BOM part number — `1234-56-78` stays as-is in reports.
 
-## Garbled Filenames
+## Split Statistics
 
-Some files have encoding-damaged names (e.g., `5. G01Pш╜ж▓W5.xlsx`). `CARD_NUMBER_ANYWHERE_RE` finds the card number in any part of the filename, ignoring unreadable characters.
+After splitting, console output shows:
+- Operational card count, format breakdown (xlsx/xls)
+- Average sheets per file
+- Service files skipped
 
-## Heuristic Analyzer Improvements
+## Integrity Verification
 
-- Added "серийный", "serial" to anti-keywords
-- Confidence threshold lowered to 0.25
-- Scan width limited to 40 columns
-- `find_part_table()` supports start_row, scans above and below header
+Post-comparison check: every BOM part has a result entry, quantities are consistent, no duplicate records.
+
+## Path Normalization
+
+`_collect_related_files()` normalizes absolute and relative paths in ZIP archives for correct collection of related files (sharedStrings, styles, drawings).
 
 ---
 
@@ -59,6 +61,7 @@ Some files have encoding-damaged names (e.g., `5. G01Pш╜ж▓W5.xlsx`). `CARD
 ```
 tests/
 ├── __init__.py
+├── conftest.py           # Auto cleanup fixture
 ├── test_bom_parser.py
 ├── test_card_parser.py
 ├── test_comparator.py
@@ -67,7 +70,7 @@ tests/
 ├── test_file_classifier.py
 ├── test_main.py
 ├── test_report_generator.py
-└── test_splitter.py
+└── test_splitter.py      # 12 test classes
 ```
 
 ---
@@ -79,11 +82,11 @@ burlak_parser/
 ├── __init__.py
 ├── main.py
 ├── bom_parser.py
-├── card_parser.py         # Multi-table parsing
-├── file_classifier.py     # Garbled filenames
+├── card_parser.py         # Original part numbers
+├── file_classifier.py
 ├── fuzzy_matcher.py
-├── splitter.py
-├── comparator.py
+├── splitter.py            # Split statistics
+├── comparator.py          # Original numbers in discrepancies
 ├── report_generator.py
-└── heuristic_analyzer.py  # Improved heuristics
+└── heuristic_analyzer.py
 ```

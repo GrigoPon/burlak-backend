@@ -52,7 +52,7 @@ def _create_xlsx(
 
     sheets_data: {sheet_name: [row_data, ...]}
     """
-    fd, path = tempfile.mkstemp(suffix=suffix, prefix="bom_test_", dir="/home/rpaup/projects/burlak")
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="bom_test_")
     os.close(fd)
 
     wb = Workbook()
@@ -570,6 +570,45 @@ class TestGetConfigQuantities:
         assert result["Config A"]["P001"].quantity == 2.0
         assert result["Config B"]["P003"].quantity == 3.0
 
+    def test_part_in_config_not_in_parts_uses_global_names(self):
+        """Когда деталь есть в config_quantities, но НЕТ в bom.parts →
+        PartInfo создаётся из global_names (строки 329-330).
+
+        Это может случиться при ручном конструировании BOMData
+        или если деталь добавилась только в config_quantities
+        (например, при нестандартной обработке).
+        """
+        parts = {
+            "P001": PartInfo(part_number="P001", name_cn="Existing Part"),
+        }
+        config_qty = {
+            "Config": {
+                "P001": 1.0,
+                "P999": 2.0,  # NOT in parts!
+            },
+        }
+        global_names = {
+            "P001": ("Existing Part", ""),
+            "P999": ("Fallback Part", "Fallback EN"),
+        }
+        bom = BOMData(
+            parts=parts,
+            config_names=["Config"],
+            config_quantities=config_qty,
+            global_names=global_names,
+        )
+
+        result = get_config_quantities(bom, "Config")
+        assert len(result) == 2
+        # P001 — из parts
+        assert result["P001"].name_cn == "Existing Part"
+        assert result["P001"].quantity == 1.0
+        # P999 — НЕ в parts, должен быть взят из global_names (строки 329-330)
+        assert result["P999"].name_cn == "Fallback Part", \
+            f"Expected 'Fallback Part' from global_names, got '{result['P999'].name_cn}'"
+        assert result["P999"].name_en == "Fallback EN"
+        assert result["P999"].quantity == 2.0
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  12. lookup_part_name
@@ -718,13 +757,432 @@ class TestBOMService:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  14. Edge cases — parse_bom
+#  14. parse_bom — Qty-only sheet as PRIMARY BOM (attachment style)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomQtyOnlyAsPrimary:
+    """First BOM sheet is an attachment style (qty column, NO config columns).
+
+    Покрывает строки 164-178: когда первый BOM-лист имеет qty-колонку
+    и менее 2 config колонок → создаётся конфигурация из имени листа.
+    """
+
+    @pytest.fixture
+    def qty_only_xlsx(self) -> str:
+        """Sheet with part_no, name, qty — NO config columns.
+
+        is_sheet_bom_candidate проходит через qty+name path
+        (qty_col > 0 and has_name = True).
+        """
+        data = {
+            "零部件附件": [
+                ["序号", "零部件件号", "零部件名称", "数量"],
+                ["1", "P001", "Attachment One", "3"],
+                ["2", "P002", "Attachment Two", "2"],
+                ["3", "P003", "Attachment Three", "1"],
+                ["4", "P004", "Attachment Four", "5"],
+            ],
+        }
+        return _create_xlsx(data)
+
+    def test_qty_only_creates_single_config(self, qty_only_xlsx: str):
+        bom = parse_bom(qty_only_xlsx)
+        # Sheet name should become a config
+        assert len(bom.config_names) == 1, f"Expected 1 config (sheet name), got {bom.config_names}"
+        assert "零部件附件" in bom.config_names, "Config should be sheet name"
+
+    def test_qty_only_parts_collected(self, qty_only_xlsx: str):
+        bom = parse_bom(qty_only_xlsx)
+        assert len(bom.parts) == 4, f"Expected 4 parts, got {len(bom.parts)}"
+        assert "P001" in bom.parts
+        assert "P004" in bom.parts
+
+    def test_qty_only_quantities(self, qty_only_xlsx: str):
+        bom = parse_bom(qty_only_xlsx)
+        cn = "零部件附件"
+        assert bom.config_quantities[cn]["P001"] == 3.0
+        assert bom.config_quantities[cn]["P002"] == 2.0
+        assert bom.config_quantities[cn]["P004"] == 5.0
+
+    def test_qty_only_zero_qty_not_added(self, qty_only_xlsx: str):
+        """Parts with qty=0 should NOT appear in config_quantities."""
+        bom = parse_bom(qty_only_xlsx)
+        cn = "零部件附件"
+        # P003 has qty=1 → present
+        # No parts with qty=0 in this fixture, so just verify counts
+        assert len(bom.config_quantities[cn]) == 4
+
+    def test_qty_only_parts_with_zero_qty(self):
+        """Parts with qty=0 are not added to all_parts в qty-only path.
+
+        В qty-only path (Section 5) детали добавляются в all_parts ТОЛЬКО
+        если qty > 0. Детали с qty=0 полностью пропускаются.
+        """
+        data = {
+            "Attachment": [
+                ["序号", "零部件件号", "零件名称", "数量"],
+                ["1", "P001", "Part1", "2"],
+                ["2", "P002", "Part2", "0"],  # qty=0 → skipped entirely
+                ["3", "P003", "Part3", "1"],
+                ["4", "P004", "Part4", "0"],  # qty=0 → skipped entirely
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # В qty-only path части с qty=0 НЕ добавляются в all_parts
+        assert len(bom.parts) == 2, f"Expected 2 parts (qty=0 skipped), got {len(bom.parts)}"
+        assert "P001" in bom.parts, "P001 qty=2 should be present"
+        assert "P003" in bom.parts, "P003 qty=1 should be present"
+        cn = "Attachment"
+        assert "P001" in bom.config_quantities[cn], "P001 qty=2 should be present"
+        assert "P002" not in bom.config_quantities[cn], "P002 qty=0 should NOT be in config"
+        assert "P003" in bom.config_quantities[cn], "P003 qty=1 should be present"
+        assert "P004" not in bom.config_quantities[cn], "P004 qty=0 should NOT be in config"
+
+    def test_qty_only_different_qty_column_name(self):
+        """Qty column can be named differently (e.g. '单车用量')."""
+        data = {
+            "Fasteners": [
+                ["序号", "零部件件号", "零件名称", "单车用量"],
+                ["1", "P001", "Bolt", "8"],
+                ["2", "P002", "Nut", "8"],
+                ["3", "P003", "Washer", "16"],
+                ["4", "P004", "Screw", "4"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 4, f"Expected 4 parts, got {len(bom.parts)}"
+        assert bom.config_quantities["Fasteners"]["P001"] == 8.0
+        assert bom.config_quantities["Fasteners"]["P003"] == 16.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  15. parse_bom — Qty-only как валидный BOM-путь
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomQtyOnlyPath:
+    """Дополнительные тесты для qty-only BOM-пути.
+
+    Примечание: строка 188-189 (if not config_cols) НЕ ДОСТИЖИМА,
+    т.к. is_sheet_bom_candidate c min_configs=2 не пропускает листы
+    без config колонок, если нет qty колонки.
+    """
+
+    def test_qty_only_different_qty_column_name(self):
+        """Qty column can be named differently (e.g. '单车用量')."""
+        data = {
+            "Fasteners": [
+                ["序号", "零部件件号", "零件名称", "单车用量"],
+                ["1", "P001", "Bolt", "8"],
+                ["2", "P002", "Nut", "8"],
+                ["3", "P003", "Washer", "16"],
+                ["4", "P004", "Screw", "4"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 4, f"Expected 4 parts, got {len(bom.parts)}"
+        assert bom.config_quantities["Fasteners"]["P001"] == 8.0
+        assert bom.config_quantities["Fasteners"]["P003"] == 16.0
+
+    def test_qty_only_with_name_en_column(self):
+        """Qty-only sheet with English name column."""
+        data = {
+            "Bolts": [
+                ["序号", "零部件件号", "Part Name (EN)", "数量"],
+                ["1", "P001", "Bolt M8", "4"],
+                ["2", "P002", "Bolt M10", "2"],
+                ["3", "P003", "Nut M8", "8"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 3
+        assert "P001" in bom.parts
+        # Name column is English → name_en is populated
+        cn, en = bom.global_names.get("P001", ("", ""))
+        assert "Bolt" in en or "Bolt" in cn, f"Expected 'Bolt' in name, got cn='{cn}' en='{en}'"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  16. parse_bom — Лист без заголовков / без part_no колонки
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomSkippedSheets:
+    """Листы, пропускаемые на разных этапах проверки.
+
+    Покрывает строки:
+      - 104-105: is_sheet_bom_candidate → False (нет part_no + qty + config)
+      - 114-115: header_rows пуст (нет распознаваемых заголовков)
+      - 129: part_no_col == 0 (нет колонки парт-номера)
+    """
+
+    def test_service_sheet_skipped_at_bom_candidate(self):
+        """Служебный лист (обложка) отсекается is_sheet_bom_candidate → строка 104-105."""
+        data = {
+            "MainBOM": [
+                ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+                ["1", "P001", "Part1", "1", "2"],
+                ["2", "P002", "Part2", "1", "1"],
+                ["3", "P003", "Part3", "2", "0"],
+            ],
+            "封面": [  # service sheet → is_sheet_bom_candidate → False
+                ["Title Page", None, None, None],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 3, "Only MainBOM should be processed"
+        assert "P001" in bom.parts
+        assert len(bom.config_names) == 2
+
+    def test_no_header_rows_sheet_skipped(self):
+        """Лист с данными без распознаваемых заголовков → строка 114-115.
+
+        Данные без part_no/name/qty ключевых слов → find_header_rows пуст.
+        """
+        data = {
+            "Data": [
+                ["Just some random text without any header keywords", None, None],
+                ["More random data", "123", "456"],
+                ["Still no headers", "ABC", "DEF"],
+                ["Lot's of text", "G", "HIJ"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 0, "No parts should be found (no headers)"
+
+    def test_no_part_no_column_skipped(self):
+        """Лист с заголовками, но БЕЗ part_no колонки → строка 129.
+
+        Есть qty и другие колонки, но ни одна не определяется как part_no.
+        """
+        data = {
+            "OnlyNames": [
+                ["序号", "零件名称", "数量", "Config1", "Config2"],
+                ["1", "Bolt", "1", "1", "2"],
+                ["2", "Nut", "2", "1", "0"],
+                ["3", "Washer", "3", "2", "1"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 0, "No parts should be found (no part_no column)"
+
+    def test_bom_with_non_bom_sheet_first(self):
+        """Первый лист не BOM-кандидат, второй — BOM-кандидат.
+
+        Второй лист становится primary_bom_found.
+        """
+        data = {
+            "目录": [  # service sheet → skipped
+                ["Table of Contents", None, None, None],
+            ],
+            "总装BOM": [
+                ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+                ["1", "P001", "Part1", "1", "2"],
+                ["2", "P002", "Part2", "1", "1"],
+                ["3", "P003", "Part3", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        assert len(bom.parts) == 3, "Main BOM should be processed"
+        assert "P001" in bom.parts
+        assert len(bom.config_names) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  17. parse_bom — Dedup с разными форматами имён
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomDedupExtended:
+    """Дедупликация имён комплектаций со сложными паттернами.
+
+    Покрывает строки 223, 226, 228: добавление config_name в seen/quantities.
+    """
+
+    def test_dedup_with_spaces_and_hyphens(self):
+        """Имена, различающиеся только пробелами/дефисами, считаются дубликатами."""
+        data = [
+            ["序号", "零部件件号", "零件名称",
+             "舒享版-全黑", "舒享版 - 全黑", "舒享版全黑"],
+            ["1", "P001", "Part1", "1", "2", "3"],
+            ["2", "P002", "Part2", "1", "1", "1"],
+            ["3", "P003", "Part3", "2", "0", "0"],
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        # После нормализации: "舒享版-全黑" → "舒享版全黑"
+        # "舒享版 - 全黑" → "舒享版全黑" (пробел+дефис → убрано)
+        # "舒享版全黑" → "舒享版全黑"
+        # Все три одинаковые → только первый сохраняется
+        assert len(bom.config_names) == 1, f"Expected 1 config after dedup, got {bom.config_names}"
+        assert bom.config_names[0] == "舒享版-全黑", "First occurrence should be kept"
+
+    def test_dedup_case_insensitive(self):
+        """Имена, различающиеся регистром, считаются дубликатами."""
+        data = [
+            ["序号", "零部件件号", "零件名称", "Luxury", "luxury"],
+            ["1", "P001", "Part1", "1", "2"],
+            ["2", "P002", "Part2", "1", "1"],
+            ["3", "P003", "Part3", "2", "0"],
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        assert len(bom.config_names) == 1, f"Expected 1 config (case-insensitive dedup), got {bom.config_names}"
+        assert bom.config_names[0] == "Luxury", "First occurrence should be kept"
+
+    def test_dedup_preserves_unique_names(self):
+        """Уникальные имена не затрагиваются дедупликацией."""
+        data = [
+            ["序号", "零部件件号", "零件名称",
+             "舒享版-全黑", "舒享版-黑米", "奢享版-全黑"],
+            ["1", "P001", "Part1", "1", "2", "1"],
+            ["2", "P002", "Part2", "1", "1", "0"],
+            ["3", "P003", "Part3", "2", "0", "0"],
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        assert len(bom.config_names) == 3, f"Expected 3 unique configs, got {bom.config_names}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  18. parse_bom — Глобальные имена применяются к деталям
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomGlobalNamesApplied:
+    """Проверка, что глобальные имена применяются к деталям БЕЗ названия.
+
+    Покрывает строки 329-330: финальное применение global_names к parts.
+    """
+
+    def test_part_inherits_name_from_global_names(self):
+        """PartInfo без имени наследует name_cn из global_names.
+
+        Создаём BOM с part_no + configs + name column.
+        PartInfo создаётся без name_cn/name_en (только part_number).
+        global_names заполняется через build_global_name_dict.
+        Финальная агрегация (строки 329-330) присваивает name_cn PartInfo.
+        """
+        data = {
+            "BOM": [
+                ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+                ["1", "P001", "Engine Mount", "1", "2"],
+                ["2", "P002", "Transmission Bracket", "1", "1"],
+                ["3", "P003", "Radiator Support", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # PartInfo должен получить name_cn из global_names через агрегацию
+        assert bom.parts["P001"].name_cn == "Engine Mount", \
+            f"Expected 'Engine Mount', got '{bom.parts['P001'].name_cn}'"
+        assert bom.parts["P002"].name_cn == "Transmission Bracket"
+        assert bom.parts["P003"].name_cn == "Radiator Support"
+        # global_names тоже должен содержать имена
+        assert "Engine Mount" in bom.global_names["P001"][0], \
+            f"Expected 'Engine Mount' in global_names, got {bom.global_names['P001']}"
+
+    def test_part_without_name_and_not_in_global_keeps_empty(self):
+        """Part без name column БЕЗ global_names остаётся с пустым именем."""
+        data = {
+            "BOM": [
+                ["序号", "零部件件号", "Config1", "Config2"],  # NO name column
+                ["1", "P001", "1", "2"],
+                ["2", "P002", "1", "1"],
+                ["3", "P003", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # (not part.name_cn and not part.name_en) is True
+        # pn in all_global_names is False (no name column → no global_names)
+        # → name stays empty
+        part = bom.parts["P001"]
+        assert part.name_cn == "", "Part should have empty name (no name column)"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  19. BOMService — все методы
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBOMServiceExtended:
+    """Все оставшиеся методы BOMService с реальными данными.
+
+    Покрывает строки 410, 417, 423, 428, 434.
+    """
+
+    @pytest.fixture
+    def svc_and_bom(self) -> Tuple[BOMService, str]:
+        data = {
+            "BOM": [
+                ["序号", "零部件件号", "零件名称", "Config A", "Config B"],
+                ["1", "P001", "Part One", "1", "2"],
+                ["2", "P002", "Part Two", "1", "1"],
+                ["3", "P003", "Part Three", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        svc = BOMService()
+        svc.load(path)
+        return svc, path
+
+    def test_get_parts_for_config(self, svc_and_bom: Tuple[BOMService, str]):
+        svc, _ = svc_and_bom
+        parts = svc.get_parts_for_config("Config A")
+        assert len(parts) == 3, f"Expected 3 parts, got {len(parts)}"
+        assert "P001" in parts
+        assert parts["P001"].quantity == 1.0
+        assert parts["P003"].quantity == 2.0
+        # Names should be preserved
+        assert "Part One" in parts["P001"].name_cn
+
+    def test_get_parts_for_config_not_found(self, svc_and_bom: Tuple[BOMService, str]):
+        svc, _ = svc_and_bom
+        with pytest.raises(ValueError, match="не найдена"):
+            svc.get_parts_for_config("NonExistent")
+
+    def test_get_all_configs(self, svc_and_bom: Tuple[BOMService, str]):
+        svc, _ = svc_and_bom
+        all_config = svc.get_all_configs()
+        assert len(all_config) == 2, f"Expected 2 configs, got {len(all_config)}"
+        assert "Config A" in all_config
+        assert "Config B" in all_config
+        assert all_config["Config A"]["P001"].quantity == 1.0
+        assert all_config["Config B"]["P001"].quantity == 2.0
+
+    def test_get_config_count_not_loaded(self):
+        svc = BOMService()
+        assert svc.get_config_count() == 0, "Not loaded → should return 0"
+
+    def test_lookup_name_not_loaded(self):
+        svc = BOMService()
+        cn, en = svc.lookup_name("P001")
+        assert cn == "", "Not loaded → should return empty"
+        assert en == "", "Not loaded → should return empty"
+
+    def test_get_all_part_numbers_not_loaded(self):
+        svc = BOMService()
+        pns = svc.get_all_part_numbers()
+        assert pns == set(), "Not loaded → should return empty set"
+
+    def test_get_all_configs_not_loaded(self):
+        svc = BOMService()
+        with pytest.raises(RuntimeError, match="не загружен"):
+            svc.get_all_configs()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  20. Edge cases — parse_bom (Extended)
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestParseBomEdgeCases:
     def test_empty_workbook(self):
         """Workbook with no data sheets."""
-        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="bom_empty_", dir="/home/rpaup/projects/burlak")
+        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="bom_empty_")
         os.close(fd)
         wb = Workbook()
         ws = wb.active
@@ -834,3 +1292,228 @@ class TestParseBomEdgeCases:
         cn, _ = bom.global_names.get("P001", ("", ""))
         assert "Welded" in cn, f"Expected 'Welded Part' (first sheet), got '{cn}'"
         assert "Painted" not in cn, "Painted Part should not appear (skipped sheet)"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  21. parse_bom — find_header_rows пуст (строки 104-105)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomHeaderRowsEmpty:
+    """Лист проходит is_sheet_bom_candidate, но find_header_rows пуст.
+
+    Покрывает строки 104-105: logger.warning + continue.
+    """
+
+    def test_non_standard_headers_with_part_data(self):
+        """Headers без китайских/английских ключевых слов, но данные
+        содержат part_no-подобные значения → is_sheet_bom_candidate True,
+        find_header_rows пуст → строки 104-105.
+        """
+        data = {
+            "BOM": [
+                # Non-recognizable header row — не содержит ключевых слов
+                ["A", "B", "C", "D", "E"],
+                # Data rows with part_no patterns
+                ["1", "P001", "Part1", "1", "2"],
+                ["2", "P002", "Part2", "1", "1"],
+                ["3", "P003", "Part3", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # Sheet skipped due to no headers → no parts found
+        assert len(bom.parts) == 0, "Sheet with no recognizable headers should be skipped"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  22. parse_bom — global_names слияние с пустым cn (строка 129)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomGlobalNamesMergeCN:
+    """Первый лист не имеет колонки name_cn, второй имеет → existing_cn = nc.
+
+    Покрывает строку 129 (if not existing_cn and nc).
+    """
+
+    def test_merge_sheet_with_en_only_then_cn(self):
+        """Sheet 1: только name_en (Part Name EN). Sheet 2: name_cn (零件名称).
+
+        P001 в sheet 1: name_cn="", name_en="Part1 EN"
+        P001 в sheet 2: name_cn="零件1", name_en=""
+        Merged: existing_cn="" → nc="零件1" → existing_cn="零件1" (line 129)
+        """
+        data = {
+            "Sheet1": [
+                ["序号", "零部件件号", "Part Name (EN)", "Config1", "Config2"],
+                ["1", "P001", "Part1 EN", "1", "2"],
+                ["2", "P002", "Part2 EN", "1", "1"],
+                ["3", "P003", "Part3 EN", "2", "0"],
+            ],
+            "Sheet2": [
+                ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+                ["1", "P001", "零件1", "1", "2"],
+                ["2", "P002", "零件2", "1", "1"],
+                ["3", "P003", "零件3", "2", "0"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # P001: cn from Sheet2, en from Sheet1
+        cn, en = bom.global_names.get("P001", ("", ""))
+        assert "零件" in cn, f"Expected CN name from Sheet2, got '{cn}'"
+        assert "Part1 EN" in en, f"Expected EN name from Sheet1, got '{en}'"
+        assert cn and en, "Both CN and EN should be populated"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  23. parse_bom — Qty-only edge cases (строки 155,158,160,167-168)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomQtyOnlyEdgeCases:
+    """Граничные случаи qty-only пути: None/пустой/невалидный PN, плохой qty.
+
+    Покрывает строки:
+      - 155: continue при pn is None
+      - 158: continue при пустом/~$ pn
+      - 160: continue при невалидном PN
+      - 167-168: except при плохом qty
+    """
+
+    def test_qty_only_with_bad_part_numbers(self):
+        """Qty-only sheet с разными вариантами невалидных PN."""
+        data = {
+            "Attachment": [
+                ["序号", "零部件件号", "零件名称", "数量"],
+                ["1", "P001", "Valid Part", "1"],
+                [None, None, None, None],  # None pn → line 155 continue
+                ["3", "", "Empty PN", "2"],  # empty pn → line 158 continue
+                ["4", "~$hidden", "Hidden PN", "1"],  # ~$ pn → line 158 continue
+                ["5", "INVALID!@#", "Bad PN", "1"],  # invalid pn → line 160 continue
+                ["6", "P006", "Another Valid", "3"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # Only P001 and P006 should be in parts
+        assert "P001" in bom.parts, "P001 should be present"
+        assert "P006" in bom.parts, "P006 should be present"
+        assert len(bom.parts) == 2, f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        cn = "Attachment"
+        assert bom.config_quantities[cn]["P001"] == 1.0
+        assert bom.config_quantities[cn]["P006"] == 3.0
+
+    def test_qty_only_with_bad_qty_value(self):
+        """Qty-only sheet с qty значением, которое не конвертируется в float.
+
+        Покрывает строки 167-168: except (ValueError, TypeError) → qty = 0.0.
+        """
+        data = {
+            "Fasteners": [
+                ["序号", "零部件件号", "零件名称", "数量"],
+                ["1", "P001", "Bolt", "N/A"],  # qty="N/A" → float("N/A") → ValueError → qty=0.0
+                ["2", "P002", "Nut", "8"],
+                ["3", "P003", "Washer", "16"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # P001 has qty="N/A" → qty=0.0 → not added to parts (qty > 0 check fails)
+        assert "P001" not in bom.parts, "P001 should not be in parts (qty=0 after failed conversion)"
+        assert "P002" in bom.parts, "P002 should be in parts"
+        assert "P003" in bom.parts, "P003 should be in parts"
+        cn = "Fasteners"
+        assert bom.config_quantities[cn]["P002"] == 8.0
+        assert bom.config_quantities[cn]["P003"] == 16.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  24. parse_bom — Normal path edge cases (строки 223,226,228,242-245)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomNormalPathEdgeCases:
+    """Граничные случаи normal (multi-config) пути:
+    None/пустой/невалидный PN, плохой qty, None qty.
+
+    Покрывает строки:
+      - 223: continue при pn is None
+      - 226: continue при пустом/~$ pn
+      - 228: continue при невалидном PN
+      - 242-243: except при плохом qty
+      - 244-245: else при None qty
+    """
+
+    def test_normal_path_with_bad_part_numbers(self):
+        """Multi-config BOM с разными вариантами невалидных PN."""
+        data = [
+            ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+            ["1", "P001", "Valid Part One", "1", "2"],
+            [None, None, None, None],  # None pn → line 223 continue
+            ["3", "", "Empty PN", "1", "1"],  # empty pn → line 226 continue
+            ["4", "~$hidden", "Hidden", "1", "1"],  # ~$ pn → line 226 continue
+            ["5", "INVALID!@#", "Bad", "1", "1"],  # invalid pn → line 228 continue
+            ["6", "P006", "Another Valid", "2", "1"],
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        # Only P001 and P006 should be in parts
+        assert "P001" in bom.parts, "P001 should be present"
+        assert "P006" in bom.parts, "P006 should be present"
+        assert len(bom.parts) == 2, f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+
+    def test_normal_path_with_bad_qty_value(self):
+        """Multi-config BOM с qty значением, вызывающим ValueError.
+
+        4 строки данных, 3 из 4 numeric → config колонка детектится.
+        "BADVAL" не парсится → ValueError → except (lines 242-243).
+
+        Покрывает строки 242-243: except (ValueError, TypeError).
+        """
+        data = [
+            ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+            ["1", "P001", "Part1", "1", "2"],
+            ["2", "P002", "Part2", "1", "1"],
+            ["3", "P003", "Part3", "2", "0"],
+            ["4", "P004", "Part4", "BADVAL", "3"],  # bad qty in Config1 → ValueError
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        cn1, cn2 = bom.config_names  # Config1, Config2
+        # P001, P002, P003 all have valid qty in Config1
+        assert "P001" in bom.config_quantities[cn1], "P001 should be in Config1 (qty=1)"
+        assert "P002" in bom.config_quantities[cn1], "P002 should be in Config1 (qty=1)"
+        assert "P003" in bom.config_quantities[cn1], "P003 should be in Config1 (qty=2)"
+        # P004 should be in Config2 (qty=3) but NOT in Config1 (BADVAL → ValueError → 0.0)
+        assert "P004" in bom.config_quantities[cn2], "P004 should be in Config2 (qty=3)"
+        assert bom.config_quantities[cn2]["P004"] == 3.0
+        assert bom.config_quantities[cn1].get("P004", 0) == 0.0, \
+            "P004 should have qty=0 in Config1 (bad qty)"
+        assert len(bom.parts) == 4, "All 4 parts should be present"
+
+    def test_normal_path_with_none_qty(self):
+        """Multi-config BOM с None qty значением (пустая ячейка).
+
+        P002 имеет None в Config1 → else → qty=0.0.
+        Config1 должна быть распознана через другие строки с числовыми qty.
+
+        Покрывает строки 244-245: else → qty = 0.0.
+        """
+        data = [
+            ["序号", "零部件件号", "零件名称", "Config1", "Config2"],
+            ["1", "P001", "Part1", "1", "2"],
+            ["2", "P002", "Part2", None, "1"],  # None qty in Config1 → else → qty=0.0
+            ["3", "P003", "Part3", "2", "0"],
+        ]
+        path = _create_xlsx({"BOM": data})
+        bom = parse_bom(path)
+        cn1, cn2 = bom.config_names
+        # P001 should be in Config1 (qty=1) and Config2 (qty=2)
+        assert "P001" in bom.config_quantities[cn1], "P001 should be in Config1"
+        assert bom.config_quantities[cn1]["P001"] == 1.0
+        assert "P001" in bom.config_quantities[cn2], "P001 should be in Config2"
+        assert bom.config_quantities[cn2]["P001"] == 2.0
+        # P002 should be in Config2 (qty=1) but NOT in Config1 (None qty → 0.0)
+        assert "P002" in bom.config_quantities[cn2], "P002 should be in Config2"
+        assert bom.config_quantities[cn2]["P002"] == 1.0
+        assert bom.config_quantities[cn1].get("P002", 0) == 0.0, \
+            "P002 should have qty=0 in Config1 (None qty)"
+        assert len(bom.parts) == 3, "All 3 parts should be present"

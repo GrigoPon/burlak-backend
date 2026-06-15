@@ -324,6 +324,18 @@ class TestExtractCardNumberFromFilepath:
         num = extract_card_number_from_filepath("card 123.xlsx")
         assert num == "card 123"
 
+    def test_letter_digits_prefix_fallback(self):
+        """CARD_NUMBER_RE fails (2 digits only), LETTERS_DIGITS_RE matches (line 365)."""
+        num = extract_card_number_from_filepath("AB12-something.xlsx")
+        # CARD_NUMBER_RE needs 3+ digits or (?:-\d+)+ pattern
+        # LETTERS_DIGITS_RE matches "AB12" (letters + 2 digits)
+        assert num == "AB12", f"Expected 'AB12', got '{num}'"
+
+    def test_letter_digits_prefix_fallback_no_dash(self):
+        """No dash after prefix, LETTERS_DIGITS_RE matches at line 365."""
+        num = extract_card_number_from_filepath("CD34_test.xlsx")
+        assert num == "CD34", f"Expected 'CD34', got '{num}'"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  8. extract_card_number (convenience wrapper)
@@ -1106,6 +1118,21 @@ class TestFindPartTableExtended:
         result = HeuristicAnalyzer.find_part_table(ws)
         assert result is None, "Should not find table without part_no keyword"
 
+    def test_multi_row_above_finds_name_and_qty(self):
+        """Both name and qty found via row-above scan — triggers debug log (lines 1102-1106)."""
+        rows: Dict[int, Dict[int, str]] = {
+            1: {20: "零件名称", 30: "数量"},                  # name + qty above
+            3: {17: "序号", 18: "零部件代号"},               # header (2 cells)
+            4: {18: "P001", 20: "Part1", 30: "1"},
+        }
+        ws = _make_ws_from_dict(rows)
+        result = HeuristicAnalyzer.find_part_table(ws)
+        assert result is not None
+        hr, pn, qty, name = result
+        assert hr == 3, f"Header should be R3, got R{hr}"
+        assert qty == 30, f"qty should be C30 (row-above), got C{qty}"
+        assert name == 20, f"name should be C20 (row-above), got C{name}"
+
     def test_single_non_empty_cell_skipped(self):
         """Row with single non-empty cell (even with part_no) skipped"""
         rows: Dict[int, Dict[int, str]] = {
@@ -1297,6 +1324,266 @@ class TestDetectColumnTypesExtended:
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
         qty = col_types.get("qty", 0)
         assert qty == 4, f"qty should be C4 (Usage per vehicle), got C{qty}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  25. Edge cases для остальных непокрытых строк
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestEdgeCasesCoverage:
+    """Целевые тесты для строк, не охваченных другими тестами.
+
+    Покрывает:
+      - looks_like_name: alpha+digit name (line 304)
+      - find_header_rows: max_rows=None (line 409)
+      - detect_column_types: part_no fuzzy match (554-555), en） marker (573),
+        desc fallback (586), content verification (617, 625, 627, 629, 638, 640, 642, 644)
+      - _find_part_no_by_content: skip None cells (line 770)
+      - _find_name_by_content: skip None cells (line 795)
+      - detect_config_columns: skip empty header (line 850)
+      - is_sheet_bom_candidate: no part_no (1162), fallback False (1183)
+      - extract_operation_name: 作业要素 branch (1213-1216)
+      - build_global_name_dict: pn is None (1251), pn_clean < 3 (1257),
+        update existing (1275, 1277)
+    """
+
+    # ── Line 304: looks_like_name alpha+digit ──
+    def test_looks_like_name_alpha_and_digit(self):
+        """String with letters+digits that is NOT a valid part number (line 304)."""
+        # "ABC123重要部件名称": has Latin letters (ABC), digits (123), CJK (重要部件名称)
+        # len=14 > 10 → len > 10 kick in
+        # is_valid_part_number returns False (CJK not in part_no pattern)
+        # has_alpha=True, has_digit=True → score -= 0.1 at line 304
+        # Expected: has_cjk=+0.5, len>10=+0.2, alpha+digit=-0.1 → 0.6
+        score = looks_like_name("ABC123重要部件名称")
+        assert score > 0, f"Should score > 0, got {score}"
+        assert score == 0.6, f"Expected 0.6, got {score}"
+
+    # ── Line 409: find_header_rows max_rows=None ──
+    def test_find_header_rows_none_max_rows(self):
+        """find_header_rows with max_rows=None uses default (line 409)."""
+        data = [
+            ["序号", "零部件件号", "名称", "数量"],
+            ["1", "P001", "Part1", "1"],
+        ]
+        ws = _make_ws(data)
+        headers = HeuristicAnalyzer.find_header_rows(ws, max_rows=None)
+        assert 1 in headers, f"Row 1 should be found, got {headers}"
+
+    # ── Lines 554-555: part_no fuzzy match ──
+    def test_detect_column_types_fuzzy_part_no(self):
+        """Part_no keyword fuzzy match via normalized form (lines 554-555)."""
+        # "Part  No" (double space): direct "part no" not in "part  no" (different spaces),
+        # but kw_norm="partno" in text_norm="partno" → fuzzy match at lines 554-555
+        data = [
+            ["Seq", "Part  No", "Name", "Qty"],
+            ["1", "ABC-123", "Part1", "1"],
+            ["2", "DEF-456", "Part2", "2"],
+        ]
+        ws = _make_ws(data)
+        col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
+        pn = col_types.get("part_no", 0)
+        assert pn == 2, f"part_no should be C2 (Part  No via fuzzy), got C{pn}"
+
+    # ── Line 573: name_en with full-width paren ──
+    def test_detect_column_types_name_en_fullwidth_paren(self):
+        """name_en detected with en）(full-width paren) marker (line 573)."""
+        # "Part Name en）": is_cn=False (no CJK), is_en=False (no (en), no en)),
+        # but "en）" in text → line 573
+        data = [
+            ["No", "Part No", "Part Name en）", "Qty"],
+            ["1", "P001", "Dashboard Crossbeam", "1"],
+            ["2", "P002", "TCU Bracket", "2"],
+        ]
+        ws = _make_ws(data)
+        col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
+        name_en = col_types.get("name_en", 0)
+        assert name_en == 3, f"name_en should be C3 (en）), got C{name_en}"
+
+    # ── Line 586: description fallback ──
+    def test_detect_column_types_description_fallback(self):
+        """'descript' in header without exact NAME_KEYWORDS match (line 586)."""
+        data = [
+            ["Code", "Descriptive Text", "Qty"],
+            ["ABC-123", "Some part description", "1"],
+            ["DEF-456", "Another part", "2"],
+            ["GHI-789", "Yet another", "3"],
+        ]
+        ws = _make_ws(data)
+        col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
+        # C2 "Descriptive Text" doesn't match NAME_KEYWORDS but has "descript"
+        # Should be detected as name via content or description fallback
+        name = col_types.get("name_cn", 0) or col_types.get("name_en", 0)
+        assert name > 0, f"Should detect a name column, got {col_types}"
+
+    # ── Lines 617, 625, 627, 629, 638, 640, 642, 644: content verification ──
+    def test_detect_column_types_content_verification(self):
+        """Content verification in detect_column_types triggers hit counters and score corrections.
+
+        C3 "名称" (2 chars) → short NAME_KEYWORD → name_cn score 0.7 → content verification
+        Content cells: CJK names score > 0.6 → name_hits++ (line 627)
+        None values → continue (line 617)
+        nm_ratio > 0.3 → score correction at line 640
+        """
+        data = [
+            ["Seq", "Part No", "名称", "Значение"],
+            [None, "ABC-123", "仪表板横梁总成 / Dashboard", 2.0],
+            [None, "DEF-456", None, 3.0],
+            ["", "GHI-789", "变速箱控制单元 / Gearbox", 1.0],
+            [None, "JKL-012", None, 4.0],
+        ]
+        ws = _make_ws(data)
+        col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
+        # Should find part_no at C2 and name_cn at C3
+        assert col_types.get("part_no", 0) == 2, f"Expected C2 for part_no, got {col_types}"
+        assert col_types.get("name_cn", 0) == 3, f"Expected C3 for name_cn, got {col_types}"
+
+    # ── Line 770: _find_part_no_by_content skip None cells ──
+    def test_find_part_no_by_content_skip_none(self):
+        """_find_part_no_by_content: continue when cell is None (line 770)."""
+        data = [
+            ["H1", None, "H3"],
+            ["ABC-123", None, "XYZ-789"],
+            ["DEF-456", None, "UVW-012"],
+            ["GHI-789", None, "RST-345"],
+        ]
+        ws = _make_ws(data)
+        result = HeuristicAnalyzer._find_part_no_by_content(
+            ws, 2, 5, 3,
+            header_texts={1: "h1", 2: "", 3: "h3"},
+        )
+        # C1 or C3 should be found
+        assert result in (1, 3), f"Should find C1 or C3, got C{result}"
+
+    # ── Line 795: _find_name_by_content skip None cells ──
+    def test_find_name_by_content_skip_none(self):
+        """_find_name_by_content: continue when cell is None (line 795)."""
+        data = [
+            ["Code", "Desc", "Other"],
+            ["ABC-123", "仪表板横梁总成 / Поперечная балка", None],
+            ["DEF-456", "变速箱控制单元支架 / Кронштейн", None],
+            ["GHI-789", "线束总成 / Жгут проводов", None],
+        ]
+        ws = _make_ws(data)
+        name_col = HeuristicAnalyzer._find_name_by_content(ws, 2, 5, 3)
+        assert name_col == 2, f"Name should be C2, got C{name_col}"
+
+    # ── Line 850: detect_config_columns skip empty header ──
+    def test_detect_config_columns_skip_empty_header(self):
+        """detect_config_columns: skip column with empty header (line 850)."""
+        data = [
+            ["序号", "零部件件号", "名称", "", "舒享版"],  # C4 header empty
+            ["1", "P001", "Part1", "", "1"],
+            ["2", "P002", "Part2", "", "2"],
+        ]
+        ws = _make_ws(data)
+        col_types = {"part_no": 2, "name_cn": 3}
+        configs = HeuristicAnalyzer.detect_config_columns(ws, [1], col_types)
+        # C4 has empty header → should be skipped, C5 should be found
+        assert 5 in configs, f"C5 (舒享版) should be in configs, got {configs}"
+        assert 4 not in configs, f"C4 (empty header) should NOT be in configs, got {configs}"
+
+    # ── Line 1162: is_sheet_bom_candidate no part_no ──
+    def test_is_sheet_bom_candidate_no_part_no(self):
+        """is_sheet_bom_candidate returns False when no part_no column (line 1162)."""
+        # Only meta columns, no part_no keyword
+        data = [
+            ["序号", "版本", "修订"],
+            ["1", "A", "1"],
+            ["2", "B", "2"],
+            ["3", "C", "3"],
+        ]
+        ws = _make_ws(data)
+        result = HeuristicAnalyzer.is_sheet_bom_candidate(ws, sheet_name="test")
+        assert result is False, "Should return False without part_no column"
+
+    # ── Line 1183: is_sheet_bom_candidate final fallback False ──
+    def test_is_sheet_bom_candidate_fallback_false(self):
+        """is_sheet_bom_candidate returns False when not BOM and not attachment (line 1183)."""
+        # Has part_no and header but too few configs and no qty col
+        data = [
+            ["序号", "零部件件号", "名称"],  # part_no + name but no configs
+            ["1", "P001", "Part1"],
+            ["2", "P002", "Part2"],
+            ["3", "P003", "Part3"],
+        ]
+        ws = _make_ws(data)
+        result = HeuristicAnalyzer.is_sheet_bom_candidate(ws, min_configs=2, sheet_name="test")
+        # No config columns, no qty column → should return False
+        assert result is False, "Should return False with no config/qty columns"
+
+    # ── Lines 1213-1216: extract_operation_name with 作业要素 ──
+    def test_extract_operation_name_zuye_yaosu(self):
+        """extract_operation_name: 作业要素 finds name in adjacent cell (lines 1213-1216)."""
+        rows: Dict[int, Dict[int, str]] = {
+            1: {1: "作业要素", 2: "安装左前门线束"},
+            3: {17: "序号", 18: "零部件代号"},
+        }
+        ws = _make_ws_from_dict(rows)
+        name = HeuristicAnalyzer.extract_operation_name(ws, 3)
+        assert name == "安装左前门线束", f"Expected operation name, got '{name}'"
+
+    def test_extract_operation_name_zuye_yaosu_skips_empty(self):
+        """extract_operation_name: 作业要素 skips empty/nearby and continues (lines 1213-1216)."""
+        rows: Dict[int, Dict[int, str]] = {
+            1: {1: "作业要素", 2: "", 3: ""},  # adjacent cells empty
+            3: {17: "序号", 18: "零部件代号"},
+        }
+        ws = _make_ws_from_dict(rows)
+        name = HeuristicAnalyzer.extract_operation_name(ws, 3)
+        # Should return empty (no valid name found near 作业要素)
+        assert name == "", f"Expected empty, got '{name}'"
+
+    # ── Line 1251: build_global_name_dict skip None pn ──
+    def test_build_global_name_dict_skip_none_pn(self):
+        """build_global_name_dict: continue when part_no is None (line 1251)."""
+        data = [
+            ["序号", "零部件件号", "名称"],
+            ["1", None, "Part1"],    # None part_no → skip
+            ["2", "P002", "Part2"],
+        ]
+        ws = _make_ws(data)
+        names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 0, 1)
+        assert "P002" in names, "P002 should be in names"
+        assert len(names) == 1, f"Expected only P002, got {list(names.keys())}"
+
+    # ── Line 1257: build_global_name_dict skip short pn_clean ──
+    def test_build_global_name_dict_skip_short_clean(self):
+        """build_global_name_dict: skip when pn_clean is < 3 chars (line 1257)."""
+        data = [
+            ["#", "Part No", "Name"],
+            ["1", "AB", "Short"],       # len 2 after clean → skip
+            ["2", "ABC", "Valid"],       # len 3 → keep
+        ]
+        ws = _make_ws(data)
+        names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 0, 1)
+        assert "AB" not in names, "AB should be skipped (too short)"
+        assert "ABC" in names, "ABC should be in names"
+
+    # ── Lines 1275, 1277: build_global_name_dict update existing ──
+    def test_build_global_name_dict_update_existing_name_cn(self):
+        """build_global_name_dict: update existing entry with non-empty name_cn (line 1275)."""
+        data = [
+            ["#", "Part No", "Name"],
+            ["1", "ABC001", ""],          # empty name first
+            ["2", "ABC001", "Real Name"],  # non-empty name second
+        ]
+        ws = _make_ws(data)
+        names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 0, 1)
+        cn, en = names.get("ABC001", ("", ""))
+        assert cn == "Real Name", f"Should update to non-empty name, got '{cn}'"
+
+    def test_build_global_name_dict_update_existing_name_en(self):
+        """build_global_name_dict: update existing entry with non-empty name_en (line 1277)."""
+        data = [
+            ["#", "Part No", "", "Name En"],
+            ["1", "ABC001", "", ""],         # both empty
+            ["2", "ABC001", "", "English"],  # name_en filled second
+        ]
+        ws = _make_ws(data)
+        names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 4, 1)
+        cn, en = names.get("ABC001", ("", ""))
+        assert en == "English", f"Should update name_en to 'English', got '{en}'"
 
 
 # ═══════════════════════════════════════════════════════════════════════

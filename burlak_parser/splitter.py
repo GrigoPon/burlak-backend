@@ -240,7 +240,13 @@ class CardSplitter:
 
         for name, r_id, _ in sheets_to_delete:
             if r_id and r_id in r_id_to_target:
-                removed_sheet = 'xl/' + r_id_to_target[r_id]
+                target = r_id_to_target[r_id]
+                # Нормализуем путь: убираем ведущий / и добавляем xl/ при необходимости
+                # openpyxl генерирует абсолютные пути (/xl/worksheets/sheet2.xml),
+                # другие генераторы — относительные (worksheets/sheet2.xml)
+                removed_sheet = target.lstrip('/')
+                if not removed_sheet.startswith('xl/'):
+                    removed_sheet = 'xl/' + removed_sheet
                 files_to_remove.add(removed_sheet)
                 _collect_related_files(zip_entries, removed_sheet, files_to_remove)
 

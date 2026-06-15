@@ -223,7 +223,21 @@ def run_pipeline(
         created_files = split_cards_to_files(
             cards, split_dir, max_workers=max_workers,
         )
+
+        # Детальная статистика split
+        operational_count = cards.total_cards_processed - cards.service_files_skipped
+        xlsx_count = sum(1 for r in cards.card_results if not r.is_service_file and r.file_path.lower().endswith('.xlsx'))
+        xls_count = sum(1 for r in cards.card_results if not r.is_service_file and r.file_path.lower().endswith('.xls'))
+        corrupted_split = len(cards.corrupted_files) if cards.corrupted_files else 0
+
         print(f"   Создано отдельных файлов: {len(created_files)}")
+        print(f"   Статистика:")
+        print(f"     - Операционных карт (всего): {operational_count}")
+        print(f"     - .xlsx файлов (разделяемых): {xlsx_count}")
+        print(f"     - .xls файлов (не разделяются): {xls_count}")
+        print(f"     - Повреждённых при разделении: {corrupted_split}")
+        if xlsx_count > 0:
+            print(f"     - Среднее листов на файл: {len(created_files)/max(xlsx_count,1):.1f}")
 
         print("\U0001f4e6 Создание ZIP-архива...")
         zip_path = os.path.join(output_dir, "split_cards.zip")
@@ -282,6 +296,45 @@ def run_pipeline(
     outputs = reporter.generate(result, output_dir, bom=bom, cards_data=cards)
     print(f"   Текстовый отчёт: {outputs.get('text_report', 'N/A')}")
     print(f"   Excel-отчёт: {outputs.get('excel_report', 'N/A')}")
+
+    # ── Верификация целостности ──
+    print(f"\n\U0001f50d Верификация целостности:")
+    print(f"{'\u2500' * 60}")
+    integrity_ok = True
+    total_discrepancies = len(result.all_discrepancies)
+    configs_ok = 0
+    for cr in result.config_results:
+        # ONLY_IN_CARDS не входят в BOM — учитываем только BOM-расхождения
+        only_bom_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
+        qty_mismatch_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
+        fuzzy_count = sum(1 for d in cr.discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
+        accounted_bom = cr.matched_parts + only_bom_count + qty_mismatch_count + fuzzy_count
+        expected = cr.total_bom_parts
+        if accounted_bom != expected:
+            logger.warning(
+                "Нарушение целостности: %s: учтено %d, ожидалось %d (diff=%d)",
+                cr.config_name[:50], accounted_bom, expected, accounted_bom - expected,
+            )
+            integrity_ok = False
+        else:
+            configs_ok += 1
+
+    # Проверка: сумма расхождений по типам должна равняться общему количеству
+    qty_m = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH)
+    only_b = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM)
+    only_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS)
+    fuzzy_c = sum(1 for d in result.all_discrepancies if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH)
+    sum_check = qty_m + only_b + only_c + fuzzy_c
+    if sum_check != total_discrepancies:
+        logger.warning("Нарушение целостности: сумма типов (%d) != общее (%d)", sum_check, total_discrepancies)
+        integrity_ok = False
+
+    if integrity_ok:
+        print(f"  \u2705 {configs_ok}/{result.total_configs} конфигураций: matched + discrepancies = total_bom_parts")
+        print(f"  \u2705 Сумма типов расхождений совпадает с общим количеством")
+    else:
+        print(f"  \u26a0\ufe0f  Обнаружены нарушения целостности (см. лог)")
+    print()
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 60}")

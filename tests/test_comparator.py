@@ -17,6 +17,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+
 import pytest
 
 from burlak_parser.bom_parser import BOMData, PartInfo
@@ -33,6 +36,7 @@ from burlak_parser.comparator import (
     MatchingEngine,
     MultiConfigComparisonResult,
     _get_card_numbers,
+    _compare_config_worker,
     compare,
     compare_all_configs,
     compare_single_config,
@@ -173,14 +177,14 @@ class TestDiscrepancy:
 
     def test_string_format_fuzzy_match(self):
         d = Discrepancy(
-            part_number="5306200ED001", name_cn="", name_en="",
+            part_number="5306200-ED001", name_cn="", name_en="",
             qty_bom=2.0, qty_cards=2.0, card_numbers=["C003"],
             discrepancy_type=DiscrepancyType.FUZZY_MATCH,
-            fuzzy_matched_to="5306200-ED001",
+            fuzzy_matched_to="5306200ED001",
         )
         s = str(d)
         assert "Разный формат" in s
-        assert "5306200ED001 -> 5306200-ED001" in s
+        assert "5306200-ED001 -> 5306200ED001" in s
 
 
 class TestConfigComparisonResult:
@@ -504,8 +508,9 @@ class TestCompareSingleConfigFuzzyMatch:
         fuzzy = [d for d in result.discrepancies
                  if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
         assert len(fuzzy) == 1, f"Expected 1 fuzzy match, got {len(fuzzy)}"
-        assert fuzzy[0].part_number == "5306200-ED001"
-        assert fuzzy[0].fuzzy_matched_to == "5306200ED001"
+        # part_number теперь показывает BOM-оригинал, fuzzy_matched_to — номер из карт
+        assert fuzzy[0].part_number == "5306200ED001"
+        assert fuzzy[0].fuzzy_matched_to == "5306200-ED001"
 
     def test_fuzzy_match_qty_preserved(self, bom_parts, cards, fuzzy_matcher):
         result = compare_single_config(
@@ -526,10 +531,13 @@ class TestCompareSingleConfigFuzzyMatch:
         )
         only_in_cards = [d for d in result.discrepancies
                          if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS]
-        fuzzy_pns = {"5306200-ED001"}
+        # После исправления: part_number = BOM-оригинал, fuzzy_matched_to = номер из карт
+        # ONLY_IN_CARDS показывают оригинальный номер из карт через original_part_numbers
+        # Поскольку CardsData создаётся через _make_minimal_cards (без original_part_numbers),
+        # номер остаётся как в all_parts ключе — "5306200-ED001" не будет, т.к. он в fuzzy
         for d in only_in_cards:
-            assert d.part_number not in fuzzy_pns, \
-                f"Fuzzy-matched {d.part_number} should not be in ONLY_IN_CARDS"
+            assert d.part_number not in {"5306200-ED001", "5306200ED001"}, \
+                f"Fuzzy-matched should not be in ONLY_IN_CARDS"
 
     def test_fuzzy_match_not_in_only_in_bom(self, bom_parts, cards, fuzzy_matcher):
         """Fuzzy-matched parts should NOT cause FALSE ONLY_IN_BOM for BOM orig."""
@@ -540,6 +548,7 @@ class TestCompareSingleConfigFuzzyMatch:
         only_in_bom = [d for d in result.discrepancies
                        if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM]
         # 5306200ED001 is fuzzy-matched → should NOT be in ONLY_IN_BOM
+        # part_number теперь BOM-оригинал (5306200ED001)
         assert not any(d.part_number == "5306200ED001" for d in only_in_bom), \
             "Fuzzy-matched BOM part should not appear in ONLY_IN_BOM"
 
@@ -553,6 +562,8 @@ class TestCompareSingleConfigFuzzyMatch:
                        if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM]
         only_in_cards = [d for d in result.discrepancies
                          if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS]
+        # ONLY_IN_BOM: part_number = part.part_number = "5306200ED001" (оригинал из BOM)
+        # ONLY_IN_CARDS: part_number из cards_data (без original_part_numbers) = "5306200-ED001"
         assert any(d.part_number == "5306200ED001" for d in only_in_bom)
         assert any(d.part_number == "5306200-ED001" for d in only_in_cards)
 
@@ -716,7 +727,8 @@ class TestCompareSingleConfigCached:
             "Fuzzy pair should exclude from ONLY_IN_CARDS"
         fuzzy = [d for d in result.discrepancies
                  if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
-        assert any(d.part_number == "5306200-ED001" for d in fuzzy)
+        # part_number теперь BOM-оригинал (5306200ED001), fuzzy_matched_to — номер из карт
+        assert any(d.part_number == "5306200ED001" for d in fuzzy)
 
     def test_cached_empty(self):
         result = compare_single_config_cached({}, _make_minimal_cards({}))
@@ -1134,7 +1146,9 @@ class TestCompareEdgeCases:
         fuzzy = [d for d in result.discrepancies
                  if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
         assert len(fuzzy) == 1, "Spaces and dashes should fuzzy-match"
-        assert fuzzy[0].fuzzy_matched_to == "ABC 123"
+        # part_number теперь BOM-оригинал ("ABC 123"), fuzzy_matched_to — номер из карт
+        assert fuzzy[0].part_number == "ABC 123"
+        assert fuzzy[0].fuzzy_matched_to == "ABC-123"
 
     def test_no_cards_at_all(self):
         """Empty cards data → all BOM parts are ONLY_IN_BOM."""
@@ -1157,3 +1171,298 @@ class TestCompareEdgeCases:
                           if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS])
         assert only_cards == 2, "All card parts should be ONLY_IN_CARDS"
         assert result.matched_parts == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  15. compare_single_config — Invalid part numbers (edge cases)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCompareSingleConfigInvalidParts:
+    """Edge cases: invalid part numbers are skipped from discrepancies."""
+
+    def test_only_in_bom_skip_invalid_part_number(self):
+        """Invalid BOM part number skipped from ONLY_IN_BOM (line 140)."""
+        bom_parts = {
+            "AB": PartInfo("AB", name_cn="Invalid", quantity=1.0),  # 2 chars → invalid
+            "P001": PartInfo("P001", name_cn="Part1", quantity=2.0),
+        }
+        cards = _make_minimal_cards({"P001": 2.0})
+        result = compare_single_config(bom_parts, cards, config_name="C1")
+        only_bom = [d for d in result.discrepancies
+                     if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM]
+        assert len(only_bom) == 0, "AB should be skipped as invalid"
+        assert result.matched_parts == 1
+
+    def test_only_in_cards_skip_invalid_part_number(self):
+        """Invalid card part number skipped from ONLY_IN_CARDS (line 161)."""
+        bom_parts = {
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({
+            "P001": 1.0,
+            "XZ": 3.0,  # 2 chars → invalid
+        })
+        result = compare_single_config(bom_parts, cards, config_name="C1")
+        only_cards = [d for d in result.discrepancies
+                      if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS]
+        assert len(only_cards) == 0, "XZ should be skipped as invalid"
+        assert result.total_cards_parts == 2
+        assert result.matched_parts == 1
+
+    def test_fuzzy_skip_invalid_bom_part(self):
+        """Fuzzy pair with invalid BOM part number is skipped (line 180)."""
+        bom_parts = {
+            "AB": PartInfo("AB", name_cn="Invalid", quantity=1.0),  # 2 chars → invalid
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({
+            "A-B": 1.0,   # normalizes to "AB"
+            "P001": 1.0,
+        })
+        fm = FuzzyMatcher(set(bom_parts.keys()))
+        result = compare_single_config(bom_parts, cards, config_name="C1", fuzzy_matcher=fm)
+        fuzzy = [d for d in result.discrepancies
+                 if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
+        assert len(fuzzy) == 0, "Fuzzy pair with invalid BOM part should be skipped"
+
+    def test_fuzzy_part_not_in_bom_parts(self):
+        """Fuzzy BOM part not in bom_parts dict is skipped (line 183)."""
+        all_bom_parts = {"P001", "P002"}
+        bom_parts = {
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({
+            "P001": 1.0,
+            "P0-02": 1.0,  # normalizes to "P002"
+        })
+        fm = FuzzyMatcher(all_bom_parts)
+        result = compare_single_config(bom_parts, cards, config_name="C1", fuzzy_matcher=fm)
+        fuzzy = [d for d in result.discrepancies
+                 if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
+        assert len(fuzzy) == 0, "Fuzzy pair with missing BOM part should be skipped"
+
+    def test_common_part_skip_invalid_part_number(self):
+        """Invalid common part skipped from qty comparison (line 204)."""
+        bom_parts = {
+            "XY": PartInfo("XY", name_cn="Invalid", quantity=2.0),
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({
+            "XY": 1.0,
+            "P001": 1.0,
+        })
+        result = compare_single_config(bom_parts, cards, config_name="C1")
+        mismatches = [d for d in result.discrepancies
+                      if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH]
+        assert len(mismatches) == 0, "XY should be skipped, P001 matches"
+        assert result.matched_parts == 1, "Only P001 counted as matched"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  16. compare_single_config_cached — Invalid part numbers
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCompareSingleConfigCachedInvalidParts:
+    """Edge cases for cached variant: invalid part numbers are skipped."""
+
+    def test_cached_only_in_bom_skip_invalid(self):
+        """Cached: invalid BOM part skipped from ONLY_IN_BOM (line 279)."""
+        bom_parts = {
+            "AB": PartInfo("AB", name_cn="Invalid", quantity=1.0),
+            "P001": PartInfo("P001", name_cn="Part1", quantity=2.0),
+        }
+        cards = _make_minimal_cards({"P001": 2.0})
+        result = compare_single_config_cached(bom_parts, cards, config_name="C1")
+        only_bom = [d for d in result.discrepancies
+                     if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM]
+        assert len(only_bom) == 0
+
+    def test_cached_only_in_cards_skip_invalid(self):
+        """Cached: invalid card part skipped from ONLY_IN_CARDS (line 292)."""
+        bom_parts = {"P001": PartInfo("P001", name_cn="Part1", quantity=1.0)}
+        cards = _make_minimal_cards({"P001": 1.0, "XZ": 3.0})
+        result = compare_single_config_cached(bom_parts, cards, config_name="C1")
+        only_cards = [d for d in result.discrepancies
+                      if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS]
+        assert len(only_cards) == 0
+
+    def test_cached_fuzzy_skip_invalid_part(self):
+        """Cached: fuzzy pair with invalid part is skipped (line 306)."""
+        bom_parts = {
+            "AB": PartInfo("AB", name_cn="Invalid", quantity=1.0),
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({"P001": 1.0, "A-B": 1.0})
+        fuzzy_pairs = {"A-B": "AB"}
+        result = compare_single_config_cached(
+            bom_parts, cards, config_name="C1",
+            fuzzy_matched_pairs=fuzzy_pairs,
+        )
+        fuzzy = [d for d in result.discrepancies
+                 if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
+        assert len(fuzzy) == 0
+
+    def test_cached_fuzzy_part_not_in_bom_parts(self):
+        """Cached: fuzzy BOM part not in bom_parts is skipped (line 309)."""
+        bom_parts = {"P001": PartInfo("P001", name_cn="Part1", quantity=1.0)}
+        cards = _make_minimal_cards({"P001": 1.0, "P0-02": 1.0})
+        fuzzy_pairs = {"P0-02": "P002"}
+        result = compare_single_config_cached(
+            bom_parts, cards, config_name="C1",
+            fuzzy_matched_pairs=fuzzy_pairs,
+        )
+        fuzzy = [d for d in result.discrepancies
+                 if d.discrepancy_type == DiscrepancyType.FUZZY_MATCH]
+        assert len(fuzzy) == 0
+
+    def test_cached_common_part_skip_invalid(self):
+        """Cached: invalid common part skipped from qty check (line 326)."""
+        bom_parts = {
+            "XY": PartInfo("XY", name_cn="Invalid", quantity=2.0),
+            "P001": PartInfo("P001", name_cn="Part1", quantity=1.0),
+        }
+        cards = _make_minimal_cards({"XY": 1.0, "P001": 1.0})
+        result = compare_single_config_cached(bom_parts, cards, config_name="C1")
+        mismatches = [d for d in result.discrepancies
+                      if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH]
+        assert len(mismatches) == 0
+        assert result.matched_parts == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  17. _compare_config_worker — Direct call
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCompareConfigWorker:
+    """Direct test of _compare_config_worker (covers lines 371-387)."""
+
+    def test_worker_direct_call(self):
+        """Call _compare_config_worker directly with proper data."""
+        bom_parts_dict = {
+            "P001": ("Part1", "Part1_EN", 2.0, "P001"),
+        }
+        cards_all_parts = {"P001": 1.0, "P002": 3.0}
+        cards_part_sources = {
+            "P001": [("C001", "f.xlsx", 1.0)],
+            "P002": [("C002", "f2.xlsx", 3.0)],
+        }
+        cards_original = {"P001": "P001", "P002": "P002"}
+        result = _compare_config_worker(
+            config_name="C1",
+            bom_parts_dict=bom_parts_dict,
+            cards_all_parts=cards_all_parts,
+            cards_part_sources=cards_part_sources,
+            cards_original_part_numbers=cards_original,
+            fuzzy_matched_pairs={},
+            cards_norm_set=set(),
+            global_names_dict={"P002": ("Global Part2", "")},
+        )
+        assert isinstance(result, ConfigComparisonResult)
+        assert result.config_name == "C1"
+        assert len(result.discrepancies) >= 1
+        only_cards = [d for d in result.discrepancies
+                      if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS]
+        assert any(d.part_number == "P002" for d in only_cards)
+        for d in only_cards:
+            if d.part_number == "P002":
+                assert d.name_cn == "Global Part2"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  18. compare_all_configs — Parallel error handling
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCompareAllConfigsParallelErrors:
+    """Error handling in parallel processing (covers lines 503-504)."""
+
+    def test_parallel_worker_error_handled(self):
+        """Worker exception in parallel is caught and logged."""
+        parts = {
+            "P001": PartInfo("P001", name_cn="Part1"),
+            "P002": PartInfo("P002", name_cn="Part2"),
+        }
+        bom = BOMData(
+            parts=parts,
+            config_names=["C1", "C2"],
+            config_quantities={
+                "C1": {"P001": 1.0},
+                "C2": {"P002": 2.0},
+            },
+            global_names={"P001": ("Part1", ""), "P002": ("Part2", "")},
+        )
+        cards = _make_minimal_cards({"P001": 1.0})
+        with patch("burlak_parser.comparator.ProcessPoolExecutor", ThreadPoolExecutor):
+            with patch("burlak_parser.comparator._compare_config_worker",
+                       side_effect=ValueError("Worker crashed")):
+                result = compare_all_configs(bom, cards, use_fuzzy=False)
+        assert len(result.config_results) == 0
+        assert len(result.all_discrepancies) == 0
+        assert result.total_configs == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  19. format_discrepancy_report — >30 parts per type
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFormatReportManyParts:
+    """Report formatting with >30 parts of one type (covers line 732)."""
+
+    def test_multi_config_report_more_than_30_parts(self):
+        """Report with >30 ONLY_IN_BOM parts shows '... и ещё N деталей'."""
+        disc = []
+        for i in range(35):
+            pn = f"P{i:03d}"
+            disc.append(Discrepancy(
+                pn, "", "", 1.0, 0.0, [],
+                DiscrepancyType.ONLY_IN_BOM, config_name="C1",
+            ))
+        cr = ConfigComparisonResult(config_name="C1", discrepancies=disc[:5])
+        mc = MultiConfigComparisonResult(
+            config_results=[cr], all_discrepancies=disc,
+            total_configs=1, total_bom_unique_parts=35, total_cards_unique_parts=0,
+        )
+        report = format_discrepancy_report(mc)
+        assert "... и ещё 5 деталей" in report
+
+    def test_multi_config_report_exactly_30_parts(self):
+        """Report with exactly 30 parts does NOT show '... и ещё'."""
+        disc = []
+        for i in range(30):
+            pn = f"P{i:03d}"
+            disc.append(Discrepancy(
+                pn, "", "", 1.0, 0.0, [],
+                DiscrepancyType.ONLY_IN_BOM, config_name="C1",
+            ))
+        cr = ConfigComparisonResult(config_name="C1", discrepancies=disc)
+        mc = MultiConfigComparisonResult(
+            config_results=[cr], all_discrepancies=disc,
+            total_configs=1, total_bom_unique_parts=30, total_cards_unique_parts=0,
+        )
+        report = format_discrepancy_report(mc)
+        assert "... и ещё" not in report
+
+    def test_multi_config_report_mixed_types_with_many(self):
+        """Multiple types each with >30 parts show '... и ещё' per type."""
+        disc = []
+        for i in range(35):
+            pn = f"P{i:03d}"
+            disc.append(Discrepancy(
+                pn, "", "", 1.0, 0.0, [],
+                DiscrepancyType.ONLY_IN_BOM, config_name="C1",
+            ))
+        qty_disc = []
+        for i in range(32):
+            pn = f"Q{i:03d}"
+            qty_disc.append(Discrepancy(
+                pn, "", "", 2.0, 1.0, [],
+                DiscrepancyType.QUANTITY_MISMATCH, config_name="C1",
+            ))
+        all_disc = disc + qty_disc
+        cr = ConfigComparisonResult(config_name="C1", discrepancies=all_disc[:5])
+        mc = MultiConfigComparisonResult(
+            config_results=[cr], all_discrepancies=all_disc,
+            total_configs=1, total_bom_unique_parts=67, total_cards_unique_parts=0,
+        )
+        report = format_discrepancy_report(mc)
+        assert "... и ещё 5 деталей" in report
+        assert "... и ещё 2 деталей" in report
