@@ -241,11 +241,17 @@ def compare_single_config_cached(
     config_name: str = "",
     cards_norm_set: set = None,
     fuzzy_matched_pairs: Dict[str, str] = None,
+    global_names: Dict[str, Tuple[str, str]] = None,
 ) -> ConfigComparisonResult:
     """Сверка BOM и карт для ОДНОЙ комплектации с кэшированными данными.
 
     Использует предварительно вычисленные нормализованные наборы и fuzzy-пары,
     что ускоряет обработку 24+ комплектаций в 3-4 раза.
+
+    Args:
+        global_names: Глобальный словарь {part_number: (name_cn, name_en)}
+                      из BOM. Используется для подстановки названий деталям,
+                      которые есть только в картах, но отсутствуют в комплектации.
     """
     discrepancies: List[Discrepancy] = []
     bom_part_numbers = set(bom_parts.keys())
@@ -256,6 +262,8 @@ def compare_single_config_cached(
         fuzzy_matched_pairs = {}
     if cards_norm_set is None:
         cards_norm_set = set()
+    if global_names is None:
+        global_names = {}
 
     # 1. Только в BOM
     only_in_bom = bom_part_numbers - cards_part_numbers
@@ -283,8 +291,10 @@ def compare_single_config_cached(
             continue
         qty = cards_data.all_parts[part_no]
         card_numbers = _get_card_numbers(part_no, cards_data)
+        # Ищем название в глобальном словаре BOM
+        name_cn, name_en = global_names.get(part_no, ("", ""))
         discrepancies.append(Discrepancy(
-            part_number=part_no, name_cn="", name_en="",
+            part_number=part_no, name_cn=name_cn, name_en=name_en,
             qty_bom=0.0, qty_cards=qty, card_numbers=card_numbers,
             discrepancy_type=DiscrepancyType.ONLY_IN_CARDS, config_name=config_name,
         ))
@@ -350,6 +360,7 @@ def _compare_config_worker(
     cards_part_sources: Dict[str, List[Tuple[str, str, float]]],
     fuzzy_matched_pairs: Dict[str, str],
     cards_norm_set: Set[str],
+    global_names_dict: Dict[str, Tuple[str, str]] = None,
 ) -> ConfigComparisonResult:
     """Параллельная сверка одной комплектации (выполняется в отдельном процессе).
 
@@ -378,6 +389,7 @@ def _compare_config_worker(
         config_name=config_name,
         cards_norm_set=cards_norm_set,
         fuzzy_matched_pairs=fuzzy_matched_pairs,
+        global_names=global_names_dict,
     )
 
 
@@ -427,6 +439,8 @@ def compare_all_configs(
 
     # Предварительно строим PartInfo для всех конфигураций (в один проход)
     config_bom_parts: Dict[str, Dict[str, PartInfo]] = {}
+    # Глобальный словарь названий (все part-no из BOM, не только из комплектации)
+    global_names = getattr(bom, 'global_names', {}) or {}
     for config_name in bom.config_names:
         parts_for_config: Dict[str, PartInfo] = {}
         for part_no, qty in bom.config_quantities[config_name].items():
@@ -470,6 +484,7 @@ def compare_all_configs(
                     cards_part_sources=cards_part_sources,
                     fuzzy_matched_pairs=fuzzy_matched_pairs,
                     cards_norm_set=cards_norm_set,
+                    global_names_dict=global_names,
                 )
                 futures[future] = i
 
@@ -504,6 +519,7 @@ def compare_all_configs(
                 config_name=config_name,
                 cards_norm_set=cards_norm_set,
                 fuzzy_matched_pairs=fuzzy_matched_pairs,
+                global_names=global_names,
             )
             config_results.append(result)
             all_discrepancies.extend(result.discrepancies)

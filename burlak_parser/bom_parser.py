@@ -1,15 +1,20 @@
 """Модуль чтения BOM-файла (Bill of Materials / Ведомость материалов).
 
-Формат: .xlsx (таблица на китайском/английском языках).
+Формат: .xlsx (таблица на китайском/английском/русском языках).
 
 Алгоритм работы:
-  1. Автоматически находит строку заголовков по ключевым словам (零件号, PartNo).
-  2. Динамически определяет колонки: парт-номер, название (CN), название (EN).
-  3. Автоматически находит ВСЕ колонки комплектаций (config columns).
-  4. Фильтрует VIN-разбивку (колонки без числовых значений).
-  5. Обрабатывает ВСЕ найденные комплектации одновременно.
+  1. Загружает .xlsx и обходит ВСЕ листы.
+  2. Для каждого листа использует эвристический анализатор для поиска:
+     - Строки заголовков
+     - Колонок с парт-номерами, названиями и количествами
+     - Колонок комплектаций
+  3. Строит ГЛОБАЛЬНЫЙ словарь парт-номеров и названий (сканирует ВСЕ строки,
+     а не только для конкретной комплектации).
+  4. Извлекает количества по каждой комплектации.
+  5. Агрегирует данные по всем листам.
 
-Универсален — не привязан к конкретным моделям автомобилей или кодам.
+Универсален — не привязан к конкретным моделям автомобилей, брендам или
+форматам. Использует эвристический анализатор из heuristic_analyzer.py.
 
 Класс BOMService — обёртка для использования в FastAPI/серверной архитектуре.
 """
@@ -19,36 +24,25 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import openpyxl
-from openpyxl.worksheet.worksheet import Worksheet
+
+from burlak_parser.heuristic_analyzer import (
+    HeuristicAnalyzer,
+    clean_part_number,
+    is_valid_part_number,
+)
 
 logger = logging.getLogger(__name__)
-
-# Константы для поиска колонок по ключевым словам (китайский / английский)
-COL_PART_NO_KEYWORDS = ["零件号", "partno", "part no", "part_no", "part number", "料号"]
-COL_NAME_CN_KEYWORDS = [
-    "零件名称(中文）",
-    "零件名称(中文)",
-    "零件名称（中文）",
-    "零件名称（中文)",
-    "物料名称/描述",
-    "零件名称",
-    "物料名称",
-    "描述",
-]
-COL_NAME_EN_KEYWORDS = ["零件名称(英文）", "零件名称(英文)", "零件名称（英文）", "part name(en)", "part name(en）"]
-COL_QTY_KEYWORDS = ["用量", "qty", "数量", "单车用量", "quantity"]
 
 
 @dataclass
 class PartInfo:
     """Информация о детали из BOM."""
     part_number: str
-    name_cn: str
-    name_en: str
+    name_cn: str = ""
+    name_en: str = ""
     # Количество для конкретной комплектации (будет заполнено после выбора)
     quantity: float = 0.0
     # Номера/коды комплектаций, для которых указана деталь
@@ -62,179 +56,8 @@ class BOMData:
     config_names: List[str]  # названия колонок комплектаций
     config_quantities: Dict[str, Dict[str, float]]  # config_name -> {part_number -> qty}
     source_file: str = ""
-
-
-def _normalize(s: Optional[str]) -> str:
-    """Привести строку к нижнему регистру, убрать пробелы и переносы строк."""
-    if s is None:
-        return ""
-    return re.sub(r"\s+", "", str(s).lower())
-
-
-def _find_header_row(ws: Worksheet) -> Optional[int]:
-    """Найти строку заголовков в листе."""
-    for row_idx in range(1, min(10, ws.max_row or 10) + 1):
-        row_values = [ws.cell(row=row_idx, column=c).value for c in range(1, min(20, (ws.max_column or 20) + 1))]
-        text = " ".join(str(v) for v in row_values if v is not None)
-        # Ищем признаки строки заголовка: наличие ключевых слов "零件号" или "PartNo"
-        if "零件号" in text or "partno" in text.lower():
-            logger.info(f"Строка заголовков найдена на строке {row_idx}")
-            return row_idx
-    return None
-
-
-def _detect_column_map(ws: Worksheet, header_row: int) -> Dict[str, int]:
-    """Определить соответствие колонок по заголовкам.
-
-    Returns:
-        Словарь: {'part_no': int, 'name_cn': int, 'name_en': int, 'config_start': int}
-    """
-    col_map: Dict[str, int] = {}
-
-    for col_idx in range(1, (ws.max_column or 200) + 1):
-        cell_value = ws.cell(row=header_row, column=col_idx).value
-        if cell_value is None:
-            continue
-        normalized = _normalize(cell_value)
-
-        # Поиск колонки парт-номера
-        if "part_no" not in col_map:
-            for kw in COL_PART_NO_KEYWORDS:
-                if _normalize(kw) in normalized or kw.lower() in normalized:
-                    col_map["part_no"] = col_idx
-                    logger.info(f"Колонка парт-номера: {col_idx} (заголовок: {cell_value})")
-                    break
-
-        # Поиск колонки названия (кит.)
-        if "name_cn" not in col_map:
-            for kw in COL_NAME_CN_KEYWORDS:
-                if _normalize(kw) in normalized or kw.lower() in normalized:
-                    col_map["name_cn"] = col_idx
-                    logger.info(f"Колонка названия (кит): {col_idx} (заголовок: {cell_value})")
-                    break
-
-        # Поиск колонки названия (англ.)
-        if "name_en" not in col_map:
-            for kw in COL_NAME_EN_KEYWORDS:
-                if _normalize(kw) in normalized or kw.lower() in normalized:
-                    col_map["name_en"] = col_idx
-                    logger.info(f"Колонка названия (англ): {col_idx} (заголовок: {cell_value})")
-                    break
-
-    return col_map
-
-
-def _detect_config_columns(ws: Worksheet, header_row: int, part_no_col: int) -> List[int]:
-    """Определить колонки комплектаций.
-
-    Колонки комплектаций — это все колонки справа от колонки парт-номера,
-    названия которых НЕ являются стандартными заголовками данных.
-
-    Дополнительно фильтрует:
-      - Metadata-колонки (MWO, даты,整车物料号)
-      - VIN-разбивку (колонки с 'S'/'-' вместо чисел — это не комплектации)
-    """
-    standard_keywords = [
-        "零件号", "partno", "part no", "零件名称(中文", "零件名称(英文",
-        "part name", "用量", "qty", "度量单位", "uom", "gpc", "fnd",
-        "零件成熟度", "零件层级", "level", "lou用法", "usage", "物料状态",
-        "make/buy", "来源车间", "source shop", "使用工厂", "using plant",
-        "目标车间", "target shop", "供应商", "supplier", "mwo单号", "mwo",
-        "生效日期", "失效日期", "整车物料号", "vehicle material",
-        "序号", "serial no", "cpac编码", "cpac code", "cpac描述",
-        "标识", "发运", "采购", "ship", "purchase", "修订",
-        "版本", "version", "有效日期", "effective date",
-    ]
-
-    candidate_cols: List[int] = []
-    max_col = ws.max_column or 200
-
-    for col_idx in range(part_no_col + 1, max_col + 1):
-        cell_value = ws.cell(row=header_row, column=col_idx).value
-        if cell_value is None:
-            continue
-        normalized = _normalize(cell_value)
-
-        if isinstance(cell_value, (int, float)):
-            continue
-
-        is_standard = False
-        for kw in standard_keywords:
-            if _normalize(kw) in normalized:
-                is_standard = True
-                break
-
-        if not is_standard and len(str(cell_value).strip()) > 2:
-            candidate_cols.append(col_idx)
-
-    # ── Пост-фильтрация: отсеять metadata и VIN-разбивку ──
-    # VIN-колонки содержат 'S' (Same — «такая же») или '-', а не числа.
-    # Проверяем выборку строк данных: если ни одного числа — это не комплектация.
-    #
-    # Алгоритм (универсальный, не привязан к конкретной структуре BOM):
-    #   1. Для каждой колонки-кандидата проверяем наличие числовых значений.
-    #   2. Находим ПЕРВУЮ колонку без чисел (VIN-разбивка начинается здесь).
-    #   3. Обрезаем ВСЕ колонки начиная с этой — всё, что после, не комплектации.
-    data_start = header_row + 1
-    sample_end = min(data_start + 50, ws.max_row or data_start + 50)
-
-    # Сначала определяем, какие колонки имеют числовые значения
-    column_has_numbers: Dict[int, bool] = {}
-    for col_idx in candidate_cols:
-        has_numeric = False
-        for r in range(data_start, sample_end + 1):
-            v = ws.cell(row=r, column=col_idx).value
-            if v is not None:
-                if isinstance(v, (int, float)):
-                    has_numeric = True
-                    break
-                elif isinstance(v, str):
-                    stripped = v.strip()
-                    if stripped not in ('S', '-', 's', ''):
-                        try:
-                            float(stripped)
-                            has_numeric = True
-                            break
-                        except ValueError:
-                            pass
-        column_has_numbers[col_idx] = has_numeric
-
-    # Найти первую колонку без чисел после группы колонок с числами
-    first_non_numeric_after_numeric: Optional[int] = None
-    found_numeric = False
-    for col_idx in candidate_cols:
-        if column_has_numbers[col_idx]:
-            found_numeric = True
-        elif found_numeric:
-            # Нашли нечисловую колонку после числовых — здесь граница
-            first_non_numeric_after_numeric = col_idx
-            break
-
-    # Отбираем только колонки до границы VIN-разбивки
-    config_cols: List[int] = []
-    if first_non_numeric_after_numeric is not None:
-        for col_idx in candidate_cols:
-            if col_idx < first_non_numeric_after_numeric and column_has_numbers[col_idx]:
-                config_cols.append(col_idx)
-        logger.info(
-            f"VIN-разбивка обнаружена с колонки {first_non_numeric_after_numeric} "
-            f"(нет числовых значений). Комплектаций отобрано: {len(config_cols)}"
-        )
-    else:
-        # Нет явной границы — берём все колонки с числами
-        config_cols = [c for c in candidate_cols if column_has_numbers[c]]
-
-    if not config_cols and candidate_cols:
-        # Если ни одна колонка не имеет чисел — вероятно, другой формат BOM.
-        # Берём все кандидаты (старое поведение).
-        logger.warning(
-            "Не найдено колонок с числовыми значениями — "
-            "используются все колонки-кандидаты (%d шт.)", len(candidate_cols)
-        )
-        config_cols = list(candidate_cols)
-
-    logger.info(f"Найдено колонок комплектаций: {len(config_cols)} (с колонки {config_cols[0] if config_cols else '?'})")
-    return config_cols
+    # Глобальный словарь названий (составлен из ВСЕХ строк, а не только для комплектации)
+    global_names: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # part_number -> (name_cn, name_en)
 
 
 def parse_bom(file_path: str) -> BOMData:
@@ -246,96 +69,232 @@ def parse_bom(file_path: str) -> BOMData:
     Returns:
         BOMData со всеми извлечёнными данными.
     """
-    logger.info(f"Загрузка BOM-файла: {file_path}")
+    logger.info("Загрузка BOM-файла: %s", file_path)
 
     wb = openpyxl.load_workbook(file_path, data_only=True)
-    sheet_name = wb.sheetnames[0]
-    ws = wb[sheet_name]
-    logger.info(f"Активный лист: {sheet_name} (строк: {ws.max_row}, колонок: {ws.max_column})")
+    sheet_names = wb.sheetnames
 
-    # Найти строку заголовков
-    header_row = _find_header_row(ws)
-    if header_row is None:
-        raise ValueError("Не удалось найти строку заголовков в BOM-файле. "
-                         "Убедитесь, что файл содержит строку с '零件号' или 'PartNo'.")
+    # ── Результаты, агрегированные по всем листам ──
+    all_parts: Dict[str, PartInfo] = {}
+    all_config_quantities: Dict[str, Dict[str, float]] = {}
+    all_config_names: List[str] = []
+    all_global_names: Dict[str, Tuple[str, str]] = {}
+    seen_config_names: Dict[str, str] = {}  # config_name -> нормализованный оригинал
 
-    # Определить карту колонок
-    col_map = _detect_column_map(ws, header_row)
+    primary_bom_found = False
 
-    part_no_col = col_map.get("part_no")
-    name_cn_col = col_map.get("name_cn")
-    name_en_col = col_map.get("name_en")
+    for sheet_name in sheet_names:
+        ws = wb[sheet_name]
+        logger.info(
+            "Анализ листа: %s (строк: %s, колонок: %s)",
+            sheet_name, ws.max_row, ws.max_column,
+        )
 
-    if part_no_col is None:
-        raise ValueError("Не удалось найти колонку с парт-номерами. "
-                         "Искались ключевые слова: 零件号, PartNo, 料号")
-
-    # Определить колонки комплектаций
-    config_cols = _detect_config_columns(ws, header_row, part_no_col)
-    config_names: List[str] = []
-    for col_idx in config_cols:
-        name = str(ws.cell(row=header_row, column=col_idx).value or f"Config_{col_idx}")
-        config_names.append(name)
-
-    # Парсинг данных
-    parts: Dict[str, PartInfo] = {}
-    config_quantities: Dict[str, Dict[str, float]] = {name: {} for name in config_names}
-    data_start = header_row + 1
-
-    for row_idx in range(data_start, ws.max_row + 1):
-        part_no = ws.cell(row=row_idx, column=part_no_col).value
-        if part_no is None:
-            continue
-        part_no = str(part_no).strip()
-        if not part_no or part_no.startswith("~$"):
+        # Проверяем, является ли лист BOM-кандидатом
+        is_bom = HeuristicAnalyzer.is_sheet_bom_candidate(
+            ws, min_configs=2, sheet_name=sheet_name,
+        )
+        if not is_bom:
+            logger.info("Лист не является BOM-кандидатом, пропуск: %s", sheet_name)
             continue
 
-        name_cn = ""
-        if name_cn_col:
-            name_cn = str(ws.cell(row=row_idx, column=name_cn_col).value or "").strip()
+        # ── 1. Поиск строки заголовков ──
+        header_rows = HeuristicAnalyzer.find_header_rows(ws)
+        if not header_rows:
+            logger.warning("Не найдена строка заголовков в листе: %s", sheet_name)
+            continue
 
-        name_en = ""
-        if name_en_col:
-            name_en = str(ws.cell(row=row_idx, column=name_en_col).value or "").strip()
+        # ── 2. Определение типов колонок ──
+        col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
+        part_no_col = col_types.get("part_no", 0)
+        name_cn_col = col_types.get("name_cn", 0)
+        name_en_col = col_types.get("name_en", 0)
 
-        # Суммируем количества для повторяющихся парт-номеров
-        if part_no in parts:
-            # Названия могут быть разными, но берём первое (или можно объединять)
-            existing = parts[part_no]
-            if not existing.name_cn and name_cn:
-                existing.name_cn = name_cn
-            if not existing.name_en and name_en:
-                existing.name_en = name_en
-        else:
-            parts[part_no] = PartInfo(part_number=part_no, name_cn=name_cn, name_en=name_en)
+        if part_no_col == 0:
+            logger.warning("Не найдена колонка парт-номеров в листе: %s", sheet_name)
+            continue
 
-        part = parts[part_no]
+        header_row = header_rows[0]
 
-        # Извлечение количества для каждой комплектации (СУММИРУЕМ, а не перезаписываем)
-        for i, col_idx in enumerate(config_cols):
-            qty_val = ws.cell(row=row_idx, column=col_idx).value
-            if qty_val is not None and isinstance(qty_val, (int, float)) and qty_val > 0:
-                config_name = config_names[i]
-                current_qty = config_quantities[config_name].get(part_no, 0.0)
-                config_quantities[config_name][part_no] = current_qty + float(qty_val)
-                if config_name not in part.applicable_configs:
-                    part.applicable_configs.append(config_name)
+        # ── 3. Строим ГЛОБАЛЬНЫЙ словарь названий (ВСЕ строки, ВСЕ листы) ──
+        sheet_names_dict = HeuristicAnalyzer.build_global_name_dict(
+            ws, part_no_col, name_cn_col, name_en_col, header_row,
+        )
+        for pn, (nc, ne) in sheet_names_dict.items():
+            if pn not in all_global_names:
+                all_global_names[pn] = (nc, ne)
+            else:
+                existing_cn, existing_en = all_global_names[pn]
+                if not existing_cn and nc:
+                    existing_cn = nc
+                if not existing_en and ne:
+                    existing_en = ne
+                all_global_names[pn] = (existing_cn, existing_en)
+
+        # ── 4. Только первый BOM-лист даёт конфигурации (остальные — только названия) ──
+        if primary_bom_found:
+            logger.info(
+                "Лист %s: только названия (первый BOM-лист уже обработан)", sheet_name,
+            )
+            continue
+
+        config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
+        qty_col = col_types.get("qty", 0)
+
+        # ── 5. Если есть отдельная qty-колонка (спец-листы 附件) ──
+        if (not config_cols or len(config_cols) < 2) and qty_col > 0:
+            data_start = header_row + 1
+            config_name = sheet_name
+            seen_config_names[config_name] = config_name
+            all_config_names.append(config_name)
+            all_config_quantities[config_name] = {}
+
+            for row_idx in range(data_start, (ws.max_row or data_start) + 1):
+                pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
+                if pn is None:
+                    continue
+                pn_str = str(pn).strip()
+                if not pn_str or pn_str.startswith("~$"):
+                    continue
+                if not is_valid_part_number(pn_str):
+                    continue
+
+                qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col)
+                qty = 0.0
+                if qty_val is not None:
+                    try:
+                        qty = float(qty_val) if isinstance(qty_val, (int, float)) else float(str(qty_val).strip())
+                    except (ValueError, TypeError):
+                        qty = 0.0
+
+                if qty > 0:
+                    pn_normalized = clean_part_number(pn_str)
+                    current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
+                    all_config_quantities[config_name][pn_normalized] = current_qty + qty
+
+                    if pn_normalized not in all_parts:
+                        all_parts[pn_normalized] = PartInfo(part_number=pn_str)
+                    if config_name not in all_parts[pn_normalized].applicable_configs:
+                        all_parts[pn_normalized].applicable_configs.append(config_name)
+
+            primary_bom_found = True
+            logger.info(
+                "Лист %s: спец-лист с qty-колонкой, %d деталей",
+                sheet_name, len(all_config_quantities[config_name]),
+            )
+            continue
+
+        if not config_cols:
+            logger.info("Лист %s: не найдено колонок комплектаций, пропуск", sheet_name)
+            continue
+
+        # ── 6. Дедупликация имён комплектаций ──
+        config_names: List[str] = []
+        for col_idx in config_cols:
+            name = HeuristicAnalyzer.get_cell_value(ws, header_row, col_idx)
+            name_str = str(name) if name is not None else f"Config_{col_idx}"
+            name_str = name_str.replace("\n", " ").replace("\r", "").strip()
+            config_names.append(name_str)
+
+        deduped_indices: List[int] = []
+        seen_norm: Set[str] = set()
+        for i, name in enumerate(config_names):
+            norm = name.lower().replace(" ", "").replace("-", "")
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                deduped_indices.append(i)
+
+        if len(deduped_indices) < len(config_cols):
+            logger.info(
+                "Дедупликация: %d -> %d имён комплектаций",
+                len(config_cols), len(deduped_indices),
+            )
+            config_cols = [config_cols[i] for i in deduped_indices]
+            config_names = [config_names[i] for i in deduped_indices]
+
+        # ── 7. Парсинг данных комплектаций ──
+        data_start = header_row + 1
+        max_row = ws.max_row or data_start
+        sheet_config_count = 0
+
+        for row_idx in range(data_start, max_row + 1):
+            pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
+            if pn is None:
+                continue
+            pn_str = str(pn).strip()
+            if not pn_str or pn_str.startswith("~$"):
+                continue
+            if not is_valid_part_number(pn_str):
+                continue
+
+            pn_normalized = clean_part_number(pn_str)
+
+            if pn_normalized not in all_parts:
+                all_parts[pn_normalized] = PartInfo(part_number=pn_str)
+
+            part = all_parts[pn_normalized]
+
+            for i, col_idx in enumerate(config_cols):
+                qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx)
+                if qty_val is not None:
+                    try:
+                        qty = float(qty_val) if isinstance(qty_val, (int, float)) else float(str(qty_val).strip())
+                    except (ValueError, TypeError):
+                        qty = 0.0
+                else:
+                    qty = 0.0
+
+                if qty > 0:
+                    config_name = config_names[i]
+                    if config_name not in seen_config_names:
+                        seen_config_names[config_name] = config_name
+                        all_config_names.append(config_name)
+
+                    if config_name not in all_config_quantities:
+                        all_config_quantities[config_name] = {}
+
+                    current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
+                    all_config_quantities[config_name][pn_normalized] = current_qty + qty
+
+                    if config_name not in part.applicable_configs:
+                        part.applicable_configs.append(config_name)
+
+                    sheet_config_count += 1
+
+        primary_bom_found = True
+        logger.info(
+            "Лист %s: основной BOM, %d колонок комплектаций, %d строк с данными",
+            sheet_name, len(config_cols), sheet_config_count,
+        )
 
     wb.close()
 
-    logger.info(f"Загружено деталей: {len(parts)}")
-    logger.info(f"Найдено комплектаций: {len(config_names)}")
-    for cn in config_names[:5]:
-        qty_count = len(config_quantities[cn])
-        logger.info(f"  {cn}: {qty_count} деталей")
-    if len(config_names) > 5:
-        logger.info(f"  ... и ещё {len(config_names) - 5} комплектаций")
+    # ── Финальная агрегация ──
+    logger.info("Загружено деталей (уникальных): %d", len(all_parts))
+    logger.info("Найдено комплектаций: %d", len(all_config_names))
+    logger.info("Глобальный словарь названий: %d записей", len(all_global_names))
+
+    for cn in all_config_names[:5]:
+        qty_count = len(all_config_quantities.get(cn, {}))
+        logger.info("  %s: %d деталей", cn[:50], qty_count)
+    if len(all_config_names) > 5:
+        logger.info("  ... и ещё %d комплектаций", len(all_config_names) - 5)
+
+    # Применяем глобальные названия к деталям, у которых нет названия
+    for pn, part in all_parts.items():
+        if (not part.name_cn and not part.name_en) and pn in all_global_names:
+            gc, ge = all_global_names[pn]
+            if not part.name_cn and gc:
+                part.name_cn = gc
+            if not part.name_en and ge:
+                part.name_en = ge
 
     return BOMData(
-        parts=parts,
-        config_names=config_names,
-        config_quantities=config_quantities,
+        parts=all_parts,
+        config_names=all_config_names,
+        config_quantities=all_config_quantities,
         source_file=file_path,
+        global_names=all_global_names,
     )
 
 
@@ -350,19 +309,30 @@ def get_config_quantities(bom: BOMData, config_name: str) -> Dict[str, PartInfo]
         Словарь {part_number: PartInfo} с заполненным quantity для комплектации.
     """
     if config_name not in bom.config_quantities:
-        raise ValueError(f"Комплектация '{config_name}' не найдена. "
-                         f"Доступные: {bom.config_names[:10]}...")
+        raise ValueError(
+            f"Комплектация '{config_name}' не найдена. "
+            f"Доступные: {bom.config_names[:10]}..."
+        )
 
     result: Dict[str, PartInfo] = {}
     for part_no, qty in bom.config_quantities[config_name].items():
         if part_no in bom.parts:
-            part = PartInfo(
+            part = bom.parts[part_no]
+            result[part_no] = PartInfo(
                 part_number=part_no,
-                name_cn=bom.parts[part_no].name_cn,
-                name_en=bom.parts[part_no].name_en,
+                name_cn=part.name_cn,
+                name_en=part.name_en,
                 quantity=qty,
             )
-            result[part_no] = part
+        else:
+            # Берём из глобального словаря
+            gc, ge = bom.global_names.get(part_no, ("", ""))
+            result[part_no] = PartInfo(
+                part_number=part_no,
+                name_cn=gc,
+                name_en=ge,
+                quantity=qty,
+            )
 
     return result
 
@@ -376,10 +346,26 @@ def get_all_config_quantities(bom: BOMData) -> Dict[str, Dict[str, PartInfo]]:
     Returns:
         Словарь {config_name: {part_number: PartInfo}}.
     """
-    result: Dict[str, Dict[str, PartInfo]] = {}
-    for config_name in bom.config_names:
-        result[config_name] = get_config_quantities(bom, config_name)
-    return result
+    return {cn: get_config_quantities(bom, cn) for cn in bom.config_names}
+
+
+def lookup_part_name(bom: BOMData, part_number: str) -> Tuple[str, str]:
+    """Найти название детали по парт-номеру.
+
+    Сначала ищет в parts, затем в global_names.
+
+    Args:
+        bom: BOM-данные.
+        part_number: Парт-номер.
+
+    Returns:
+        (name_cn, name_en)
+    """
+    if part_number in bom.parts:
+        part = bom.parts[part_number]
+        if part.name_cn or part.name_en:
+            return (part.name_cn, part.name_en)
+    return bom.global_names.get(part_number, ("", ""))
 
 
 class BOMService:
@@ -441,3 +427,9 @@ class BOMService:
         if not self._bom:
             return set()
         return set(self._bom.parts.keys())
+
+    def lookup_name(self, part_number: str) -> Tuple[str, str]:
+        """Найти название детали по парт-номеру (с учётом глобального словаря)."""
+        if not self._bom:
+            return ("", "")
+        return lookup_part_name(self._bom, part_number)
