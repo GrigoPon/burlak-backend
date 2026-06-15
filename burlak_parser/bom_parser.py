@@ -125,6 +125,10 @@ def _detect_config_columns(ws: Worksheet, header_row: int, part_no_col: int) -> 
 
     Колонки комплектаций — это все колонки справа от колонки парт-номера,
     названия которых НЕ являются стандартными заголовками данных.
+
+    Дополнительно фильтрует:
+      - Metadata-колонки (MWO, даты,整车物料号)
+      - VIN-разбивку (колонки с 'S'/'-' вместо чисел — это не комплектации)
     """
     standard_keywords = [
         "零件号", "partno", "part no", "零件名称(中文", "零件名称(英文",
@@ -138,21 +142,18 @@ def _detect_config_columns(ws: Worksheet, header_row: int, part_no_col: int) -> 
         "版本", "version", "有效日期", "effective date",
     ]
 
-    config_cols: List[int] = []
+    candidate_cols: List[int] = []
     max_col = ws.max_column or 200
 
     for col_idx in range(part_no_col + 1, max_col + 1):
         cell_value = ws.cell(row=header_row, column=col_idx).value
         if cell_value is None:
-            # Пропускаем пустые колонки
             continue
         normalized = _normalize(cell_value)
 
-        # Если значение — это число, это не заголовок комплектации
         if isinstance(cell_value, (int, float)):
             continue
 
-        # Проверяем, не является ли это стандартным заголовком
         is_standard = False
         for kw in standard_keywords:
             if _normalize(kw) in normalized:
@@ -160,7 +161,73 @@ def _detect_config_columns(ws: Worksheet, header_row: int, part_no_col: int) -> 
                 break
 
         if not is_standard and len(str(cell_value).strip()) > 2:
-            config_cols.append(col_idx)
+            candidate_cols.append(col_idx)
+
+    # ── Пост-фильтрация: отсеять metadata и VIN-разбивку ──
+    # VIN-колонки содержат 'S' (Same — «такая же») или '-', а не числа.
+    # Проверяем выборку строк данных: если ни одного числа — это не комплектация.
+    #
+    # Алгоритм (универсальный, не привязан к конкретной структуре BOM):
+    #   1. Для каждой колонки-кандидата проверяем наличие числовых значений.
+    #   2. Находим ПЕРВУЮ колонку без чисел (VIN-разбивка начинается здесь).
+    #   3. Обрезаем ВСЕ колонки начиная с этой — всё, что после, не комплектации.
+    data_start = header_row + 1
+    sample_end = min(data_start + 50, ws.max_row or data_start + 50)
+
+    # Сначала определяем, какие колонки имеют числовые значения
+    column_has_numbers: Dict[int, bool] = {}
+    for col_idx in candidate_cols:
+        has_numeric = False
+        for r in range(data_start, sample_end + 1):
+            v = ws.cell(row=r, column=col_idx).value
+            if v is not None:
+                if isinstance(v, (int, float)):
+                    has_numeric = True
+                    break
+                elif isinstance(v, str):
+                    stripped = v.strip()
+                    if stripped not in ('S', '-', 's', ''):
+                        try:
+                            float(stripped)
+                            has_numeric = True
+                            break
+                        except ValueError:
+                            pass
+        column_has_numbers[col_idx] = has_numeric
+
+    # Найти первую колонку без чисел после группы колонок с числами
+    first_non_numeric_after_numeric: Optional[int] = None
+    found_numeric = False
+    for col_idx in candidate_cols:
+        if column_has_numbers[col_idx]:
+            found_numeric = True
+        elif found_numeric:
+            # Нашли нечисловую колонку после числовых — здесь граница
+            first_non_numeric_after_numeric = col_idx
+            break
+
+    # Отбираем только колонки до границы VIN-разбивки
+    config_cols: List[int] = []
+    if first_non_numeric_after_numeric is not None:
+        for col_idx in candidate_cols:
+            if col_idx < first_non_numeric_after_numeric and column_has_numbers[col_idx]:
+                config_cols.append(col_idx)
+        logger.info(
+            f"VIN-разбивка обнаружена с колонки {first_non_numeric_after_numeric} "
+            f"(нет числовых значений). Комплектаций отобрано: {len(config_cols)}"
+        )
+    else:
+        # Нет явной границы — берём все колонки с числами
+        config_cols = [c for c in candidate_cols if column_has_numbers[c]]
+
+    if not config_cols and candidate_cols:
+        # Если ни одна колонка не имеет чисел — вероятно, другой формат BOM.
+        # Берём все кандидаты (старое поведение).
+        logger.warning(
+            "Не найдено колонок с числовыми значениями — "
+            "используются все колонки-кандидаты (%d шт.)", len(candidate_cols)
+        )
+        config_cols = list(candidate_cols)
 
     logger.info(f"Найдено колонок комплектаций: {len(config_cols)} (с колонки {config_cols[0] if config_cols else '?'})")
     return config_cols

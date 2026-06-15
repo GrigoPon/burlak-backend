@@ -392,15 +392,29 @@ def parse_card_file(file_path: str) -> CardParseResult:
             ))
             continue
 
-        # Проверяем, есть ли вообще какие-то данные (первые 5 строк)
+        # Проверяем, есть ли вообще какие-то данные на листе
+        # Стратегия: проверяем первые 10 строк, затем сэмплируем
+        # каждую 20-ю строку до конца — чтобы не пропустить данные
+        # в середине или конце листа.
         sheet_has_data = False
-        for r in range(1, min(max_row, 5) + 1):
+        # Проверка начала листа (строки 1-10)
+        for r in range(1, min(max_row, 10) + 1):
             for c in range(1, min(max_col, 10) + 1):
                 if ws.cell_value(r, c) is not None:
                     sheet_has_data = True
                     break
             if sheet_has_data:
                 break
+        # Если в начале пусто — сэмплируем с динамическим шагом (~10 проверок)
+        if not sheet_has_data and max_row > 10:
+            step = max(1, (max_row - 15) // 10)
+            for r in range(15, max_row + 1, step):
+                for c in range(1, min(max_col, 10) + 1):
+                    if ws.cell_value(r, c) is not None:
+                        sheet_has_data = True
+                        break
+                if sheet_has_data:
+                    break
 
         if not sheet_has_data:
             sheets_info.append(CardSheetInfo(

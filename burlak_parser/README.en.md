@@ -2,7 +2,7 @@
 
 BOM parsing and reconciliation with assembly operation cards.
 
-Multi-sheet xlsx card files are split into individual sheets with full formatting preservation — images, styles, merged cells, page setup — via direct ZIP structure manipulation.
+BOM files may contain both real configurations (numeric quantities) and VIN columns (S / - values). The parser automatically detects the boundary and excludes VIN breakdown, keeping only actual configurations.
 
 ---
 
@@ -24,33 +24,9 @@ Dependencies: openpyxl, pandas, xlsxwriter, tqdm.
 python -m burlak_parser.main --bom "BOM.xlsx" --cards "./cards/" [--config <name>]
 ```
 
-### Options
+### BOM Parsing
 
-| Parameter | Description |
-|-----------|-------------|
-| `--bom` | Path to BOM file (.xlsx) |
-| `--cards` | Cards folder or ZIP archive |
-| `--config` | Configuration name |
-| `--output` | Output directory (default: `./output`) |
-| `--no-split` | Skip multi-sheet splitting |
-| `--verbose` | Debug output |
-
-### Output
-
-1. `report.txt`
-2. `discrepancy_report.xlsx` (3 sheets)
-3. `split_cards/` — split single-sheet files (formatting preserved)
-4. `split_cards.zip`
-
----
-
-## Sheet Splitting
-
-Two methods:
-
-**Primary (ZIP manipulation).** xlsx is a ZIP archive of XML files. The method copies the source file byte-by-byte, then removes all sheets except the target from the ZIP structure. Preserves 100% of original formatting: fonts, colors, borders, fills, alignment, merged cells, column widths, row heights, freeze panes, images, page setup.
-
-**Fallback (openpyxl).** If the ZIP method fails, creates a new Workbook and deep-copies cell styles.
+The parser finds all columns to the right of the part number and checks their content for numeric values. Columns containing only `S` (Same) and `-` (not applicable) — VIN breakdown — are automatically excluded. Only real configurations with part quantities remain.
 
 ---
 
@@ -60,8 +36,8 @@ Two methods:
 burlak_parser/
 ├── __init__.py
 ├── main.py
-├── bom_parser.py
-├── card_parser.py       # ZIP extraction, deep style copy
+├── bom_parser.py        # Auto-exclude VIN columns
+├── card_parser.py       # ZIP splitting, improved empty-sheet detection
 ├── comparator.py
 └── report_generator.py
 ```
