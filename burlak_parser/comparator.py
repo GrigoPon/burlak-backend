@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from burlak_parser.bom_parser import BOMData, PartInfo
 from burlak_parser.card_parser import CardsData
-from burlak_parser.fuzzy_matcher import FuzzyMatcher, is_fuzzy_match, is_valid_part_number, normalize_part_number
+from burlak_parser.fuzzy_matcher import FuzzyMatcher, is_valid_part_number, normalize_part_number
 
 logger = logging.getLogger(__name__)
 
@@ -553,40 +553,6 @@ def _get_card_numbers(part_no: str, cards_data: CardsData) -> List[str]:
     return card_nums
 
 
-# ─── Совместимость со старым API ─────────────────────────────────────────────
-
-def compare(
-    bom_parts: Dict[str, PartInfo],
-    cards_data: CardsData,
-    config_name: str = "",
-) -> "ComparisonResultLegacy":
-    """Старый API для обратной совместимости (одна комплектация).
-
-    Используйте compare_all_configs для нового поведения.
-    """
-    result = compare_single_config(bom_parts, cards_data, config_name=config_name)
-
-    # Собираем в старый формат
-    discrepancies = result.discrepancies
-    return ComparisonResultLegacy(
-        discrepancies=discrepancies,
-        total_bom_parts=result.total_bom_parts,
-        total_cards_parts=result.total_cards_parts,
-        matched_parts=result.matched_parts,
-        bom_config_name=config_name,
-    )
-
-
-@dataclass
-class ComparisonResultLegacy:
-    """Старый формат результата (для обратной совместимости)."""
-    discrepancies: List[Discrepancy]
-    total_bom_parts: int = 0
-    total_cards_parts: int = 0
-    matched_parts: int = 0
-    bom_config_name: str = ""
-
-
 # ─── Форматирование отчёта ──────────────────────────────────────────────────
 
 def format_discrepancy_report(result) -> str:
@@ -609,7 +575,7 @@ def _format_single_config_report(comparison) -> str:
         "  ОТЧЁТ ПРОВЕРКИ КОМПЛЕКТАЦИИ",
         sep,
         "",
-        f"  Комплектация: {comparison.bom_config_name}",
+        f"  Комплектация: {comparison.config_name}",
         f"  Деталей в спецификации: {comparison.total_bom_parts}",
         f"  Деталей в инструкциях:  {comparison.total_cards_parts}",
         f"  Совпало:               {comparison.matched_parts}",

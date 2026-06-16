@@ -30,14 +30,12 @@ from burlak_parser.card_parser import (
 )
 from burlak_parser.comparator import (
     ConfigComparisonResult,
-    ComparisonResultLegacy,
     Discrepancy,
     DiscrepancyType,
     MatchingEngine,
     MultiConfigComparisonResult,
     _get_card_numbers,
     _compare_config_worker,
-    compare,
     compare_all_configs,
     compare_single_config,
     compare_single_config_cached,
@@ -244,22 +242,23 @@ class TestMultiConfigComparisonResult:
 
 class TestComparisonResultLegacy:
     def test_default_creation(self):
-        r = ComparisonResultLegacy(discrepancies=[])
+        r = ConfigComparisonResult(config_name="", discrepancies=[])
         assert r.discrepancies == []
         assert r.total_bom_parts == 0
         assert r.total_cards_parts == 0
         assert r.matched_parts == 0
-        assert r.bom_config_name == ""
+        assert r.config_name == ""
 
     def test_with_data(self):
         d = Discrepancy("P1", "", "", 1.0, 0.0, [],
                         DiscrepancyType.ONLY_IN_BOM)
-        r = ComparisonResultLegacy(
+        r = ConfigComparisonResult(
+            config_name="Config1",
             discrepancies=[d], total_bom_parts=5, total_cards_parts=3,
-            matched_parts=2, bom_config_name="Config1",
+            matched_parts=2,
         )
         assert len(r.discrepancies) == 1
-        assert r.bom_config_name == "Config1"
+        assert r.config_name == "Config1"
         assert r.matched_parts == 2
 
 
@@ -887,9 +886,9 @@ class TestGetCardNumbers:
 
 class TestFormatDiscrepancyReport:
     def test_single_config_no_discrepancies(self):
-        r = ComparisonResultLegacy(
-            discrepancies=[], bom_config_name="TestConfig",
-            total_bom_parts=5, total_cards_parts=5, matched_parts=5,
+        r = ConfigComparisonResult(
+            config_name="TestConfig",
+            discrepancies=[], total_bom_parts=5, total_cards_parts=5, matched_parts=5,
         )
         report = format_discrepancy_report(r)
         assert "TestConfig" in report
@@ -898,9 +897,9 @@ class TestFormatDiscrepancyReport:
     def test_single_config_with_discrepancies(self):
         d = Discrepancy("P001", "", "", 2.0, 1.0, ["C1"],
                         DiscrepancyType.QUANTITY_MISMATCH, config_name="C1")
-        r = ComparisonResultLegacy(
-            discrepancies=[d], bom_config_name="Test",
-            total_bom_parts=3, total_cards_parts=2, matched_parts=1,
+        r = ConfigComparisonResult(
+            config_name="Test",
+            discrepancies=[d], total_bom_parts=3, total_cards_parts=2, matched_parts=1,
         )
         report = format_discrepancy_report(r)
         assert "Разное количество" in report
@@ -968,34 +967,6 @@ class TestFormatDiscrepancyReport:
         report = format_discrepancy_report(mc)
         assert "Всего проверено комплектаций" in report
         assert "Найдено несоответствий" in report
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  12. compare() — Legacy API
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestCompareLegacy:
-    """Legacy compare() function for single-config backward compatibility."""
-
-    def test_legacy_perfect_match(self):
-        bom = {"P001": PartInfo("P001", quantity=1.0)}
-        cards = _make_minimal_cards({"P001": 1.0})
-        result = compare(bom, cards, config_name="Legacy")
-        assert isinstance(result, ComparisonResultLegacy)
-        assert len(result.discrepancies) == 0
-        assert result.bom_config_name == "Legacy"
-        assert result.matched_parts == 1
-
-    def test_legacy_returns_correct_counts(self):
-        bom = {
-            "P001": PartInfo("P001", quantity=1.0),
-            "P002": PartInfo("P002", quantity=2.0),
-        }
-        cards = _make_minimal_cards({"P001": 1.0})
-        result = compare(bom, cards)
-        assert result.total_bom_parts == 2
-        assert result.total_cards_parts == 1
-        assert result.matched_parts == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════

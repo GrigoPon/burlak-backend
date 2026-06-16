@@ -17,7 +17,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 from tqdm import tqdm
 
@@ -49,6 +49,11 @@ from burlak_parser.fuzzy_matcher import FuzzyMatcher
 from burlak_parser.report_generator import (
     Reporter,
     create_split_cards_archive,
+)
+from burlak_parser.diagnostic import (
+    DiagnosticDumper,
+    create_diagnostic_from_bom,
+    create_diagnostic_from_cards,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +146,7 @@ def run_pipeline(
     single_config: bool = False,
     max_workers: Optional[int] = None,
     show_split_stats: bool = False,
+    diagnostic: bool = False,
 ) -> None:
     """Запустить полный конвейер обработки.
 
@@ -181,6 +187,13 @@ def run_pipeline(
         pbar.update(1)
 
     print(f"\n\u2705 BOM загружен: {len(bom.parts)} деталей, {len(bom.config_names)} комплектаций")
+
+    # ── Диагностический дамп BOM ──
+    if diagnostic:
+        diag_dir = os.path.join(output_dir, "diagnostic")
+        os.makedirs(diag_dir, exist_ok=True)
+        bom_dump_path = create_diagnostic_from_bom(bom, diag_dir)
+        print(f"   \U0001f4cb Diagnostic: BOM dump → {bom_dump_path}")
     if not single_config:
         print(f"   Будут обработаны ВСЕ {len(bom.config_names)} комплектаций одновременно.")
     else:
@@ -217,6 +230,13 @@ def run_pipeline(
     print(f"   Из них непустых: {cards.total_sheets_processed}")
     print(f"   Пропущено (пустых): {cards.total_sheets_skipped}")
     print(f"   Уникальных деталей найдено: {len(cards.all_parts)}")
+
+    # ── Диагностический дамп карт ──
+    if diagnostic:
+        diag_dir = os.path.join(output_dir, "diagnostic")
+        os.makedirs(diag_dir, exist_ok=True)
+        oc_dump_path = create_diagnostic_from_cards(cards, diag_dir)
+        print(f"   \U0001f4cb Diagnostic: OC dump → {oc_dump_path}")
     print()
 
     # Шаг 2b: Разделение многолистовых файлов
@@ -235,6 +255,11 @@ def run_pipeline(
         print(f"   .xlsx файлов: {split_stats.total_xlsx}")
         print(f"   .xls файлов (не разделяются): {split_stats.total_xls}")
         print(f"   Повреждённых при split: {split_stats.total_errors}")
+
+        if split_stats.openpyxl_fallback_count > 0:
+            print(f"   \u2705 Успешно спасены через openpyxl (fallback): {split_stats.openpyxl_fallback_count} файлов")
+            for fname in split_stats.openpyxl_fallback_files:
+                print(f"     - {fname}")
 
         if show_split_stats and split_stats is not None:
             # ── Детальная статистика split ──
@@ -363,8 +388,6 @@ def run_pipeline(
 
 def main() -> None:
     """Точка входа CLI."""
-    import multiprocessing
-
     parser = argparse.ArgumentParser(
         description="Burlak Parser — Система сверки BOM и операционных карт",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -444,6 +467,11 @@ def main() -> None:
         action="store_true",
         help="Показать детальную статистику разделения файлов (топ причин, пропуски, ошибки)",
     )
+    parser.add_argument(
+        "--diagnostic", "-d",
+        action="store_true",
+        help="Режим диагностики: вывод промежуточных данных в JSON (BOM_dump, OC_dump, schema)",
+    )
 
     args = parser.parse_args()
 
@@ -467,6 +495,7 @@ def main() -> None:
             single_config=args.single_config,
             max_workers=args.workers,
             show_split_stats=args.split_stats,
+            diagnostic=args.diagnostic,
         )
     except KeyboardInterrupt:
         print("\n\n\u26a0\ufe0f  Прервано пользователем.")

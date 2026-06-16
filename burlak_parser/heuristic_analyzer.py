@@ -26,6 +26,11 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from burlak_parser.normalizer import (
+    clean_part_number,
+    is_valid_part_number,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,13 +80,21 @@ NAME_KEYWORDS: List[str] = [
     "описание детали",
 ]
 
+# --- Ключевые слова, которые НЕ должны быть в колонке name_cn ---
+# (колонки с factory/supplier/manufacturer — это НЕ название детали)
+NAME_ANTI_KEYWORDS: List[str] = [
+    "工厂", "厂家", "供应商", "制造商", "生产商", "模块",
+    "factory", "manufacturer", "supplier", "module",
+    "завод", "производитель", "поставщик",
+]
+
 # --- Количество ---
 QTY_KEYWORDS: List[str] = [
     # Китайский
     "用量", "数量", "单车用量", "每车用量", "数量/用量", "标配数量",
     "用量/数量", "单位用量",
     # Английский
-    "qty", "quantity", "usage", "qty per", "number",
+    "qty", "quantity", "usage", "qty per",
     # Русский
     "количество", "кол-во", "расход", "норма",
 ]
@@ -89,7 +102,7 @@ QTY_KEYWORDS: List[str] = [
 # --- Стандартные служебные колонки (не комплектации) ---
 META_KEYWORDS: List[str] = [
     # Китайский
-    "序号", "修订", "版本", "层级", "等级",
+    "序号", "行号", "修订", "版本", "层级", "等级",
     "标识", "发运", "采购", "度量单位", "uom",
     "gpc", "fnd", "物料状态", "来源车间", "使用工厂",
     "目标车间", "供应商", "供应商代码", "供应商名称",
@@ -100,6 +113,15 @@ META_KEYWORDS: List[str] = [
     "安装工厂", "装配工厂", "卸货工厂",
     "备注", "说明", "附注", "注",
     "分类", "类别", "车型",
+    "状态号", "模块状态", "供货状态", "PBOM供货",
+    "平台属性", "设计层次", "装配层次",
+    "工位范围", "工位", "工序",
+    "零件质量", "IA编码", "货源", "货源描述", "结构货源",
+    "单车用量", "组件数量", "发动机附件",
+    # Торсионные/моментные колонки — НЕ комплектации
+    "扭矩", "力矩", "动态扭矩", "残余扭矩", "扭矩角度",
+    "扭矩关重", "扭矩说明", "扭矩监控",
+    "图示编号", "图纸编号", "图纸号", "示意图编号",
     # Английский
     "serial no", "serial no.", "serial", "seq", "sequence",
     "revision", "rev", "version", "ver", "level",
@@ -111,10 +133,12 @@ META_KEYWORDS: List[str] = [
     "remark", "note", "notes", "comment",
     "category", "classification", "type",
     "logo", "identification", "id",
+    "torque", "nm", "n·m", "moment",
     # Русский
     "примечание", "комментарий", "завод",
     "поставщик", "дата", "статус",
     "система", "узел", "подразделение",
+    "расход на один автомобиль", "количество компонентов",
 ]
 
 # Только колонки с ФИКСИРОВАННЫМ текстом (не данные, не конфиги)
@@ -123,6 +147,20 @@ STRICT_META_KEYWORDS: List[str] = [
     "零件成熟度", "make/buy", "cpac编码",
     "serial no", "serial", "revision", "level",
     "变更记录", "文件编号",
+]
+
+# Колонка с номером схемы/операции (для привязки деталей к операционным картам)
+GRAPHIC_NUMBER_KEYWORDS: List[str] = [
+    # Китайский
+    "图示编号", "图号", "图纸编号", "图纸号", "示意图编号",
+    "工序号", "工位号", "工位编号",
+    # Английский
+    "graphic number", "drawing number", "drawing no", "drawing no.",
+    "operation number", "operation no", "operation no.",
+    "station number", "station no",
+    # Русский
+    "номер схемы", "номер операции", "номер чертежа",
+    "код операции", "позиция схемы",
 ]
 
 # Слова для определения "служебный лист" (не BOM)
@@ -155,7 +193,7 @@ SERVICE_SHEET_KEYWORDS: List[str] = [
 #   - Чисто цифровые коды (минимум 2 цифры) или буква + 2+ цифры
 CARD_NUMBER_RE = re.compile(
     r"(?:"
-    r"  [A-Za-z]{2,6}\d*[A-Za-z]?(?:-\d+)+[\w-]*"    # SQRT1L-17-AS-04001
+    r"  [A-Za-z]+\d*[A-Za-z]*(?:-\d+)+[\w-]*"         # SQRT1L-17-AS-04001, SQRT1JL-17-AS-01
     r"|"
     r"  [A-Za-z]{1,3}\d{3,}[\w-]*"                     # A001, G01, T1L
     r"|"
@@ -163,16 +201,6 @@ CARD_NUMBER_RE = re.compile(
     r")",
     re.IGNORECASE | re.VERBOSE,
 )
-
-# Универсальный паттерн part-number:
-#   - Содержит буквы и цифры, возможно дефисы, точки, слеши
-#   - Минимум 3 символа
-PART_NUMBER_CELL_RE = re.compile(
-    r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9\-\.\/\_\\\s]{3,}$"
-)
-
-# Паттерн для полностью цифровых номеров (минимум 2 цифры)
-NUMERIC_PART_RE = re.compile(r"^\d{4,}$")
 
 # Паттерн для номеров операций в имени файла (любой бренд):
 #   - Цифры (минимум 2) в начале имени или после префикса
@@ -195,46 +223,38 @@ CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 # Русские буквы
 CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
 
-# Символы для очистки part-number
-CLEAN_PN_CHARS = re.compile(r"[\s\-\.\/\_\,\;\:\'\"\(\)\[\]\{\}\|\\]+")
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
 
 def normalize_text(text: str) -> str:
-    """Привести текст к нижнему регистру, удалить лишние пробелы."""
-    return " ".join(str(text).lower().split())
+    """Привести текст к нижнему регистру, удалить лишние пробелы и артефакты кодировки."""
+    s = str(text).lower()
+    # Удаляем артефакты кодировки Excel XML (carriage return)
+    s = s.replace("_x000d_", "").replace("_x000A_", "")
+    s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return " ".join(s.split())
 
 
-def clean_part_number(text: str) -> str:
-    """Очистить парт-номер от спецсимволов, привести к верхнему регистру."""
-    return CLEAN_PN_CHARS.sub("", str(text).strip()).upper()
+def clean_cell_text(text: Any) -> str:
+    """Очистить текст ячейки от артефактов кодировки Excel XML.
 
-
-def is_valid_part_number(text: str) -> bool:
-    """Проверить, похожа ли строка на каталожный номер детали.
-
-    Критерии:
-      - Минимум 3 символа после очистки
-      - Содержит буквы + цифры, или минимум 4 цифры
-      - Не является служебным текстом
+    Удаляет _x000d_, _x000A_, \\r, \\n и берёт только ПЕРВУЮ часть
+    (когда в ячейке два значения: китайское + английское через \\n).
     """
-    if not text or not isinstance(text, str):
-        return False
-    cleaned = text.strip()
-    if len(cleaned) < 3:
-        return False
-    # Служебный текст
-    garbage = {"n/a", "na", "none", "无", "null", "-", "--", "---", "/"}
-    if cleaned.lower() in garbage:
-        return False
-    # Проверка: содержит буквы + цифры, или минимум 4 цифры
-    return bool(PART_NUMBER_CELL_RE.match(cleaned)) or bool(NUMERIC_PART_RE.match(cleaned))
+    if text is None:
+        return ""
+    s = str(text).strip()
+    for artifact in ("_x000d_", "_x000A_", "\r\n", "\r", "\n"):
+        idx = s.find(artifact)
+        if idx >= 0:
+            s = s[:idx]
+            break
+    return s.strip()
 
 
-def looks_like_part_number(value: Any) -> bool:
+def looks_like_part_number(value: Any) -> float:
     """Проверить значение ячейки на принадлежность к парт-номеру.
 
     Возвращает float (0.0–1.0) — уверенность.
@@ -350,7 +370,7 @@ def extract_card_number_from_filepath(file_path: str) -> str:
     # Попытка 1: Полный паттерн карты (SQRT1L-17-AS-04001 и т.д.)
     match = CARD_NUMBER_RE.match(name_no_ext)
     if match:
-        return match.group(0).strip("- ")
+        return _normalize_card_number(match.group(0).strip("- "))
 
     # Попытка 2: Префикс-AS-паттерн
     match = PREFIX_AS_RE.match(name_no_ext)
@@ -373,6 +393,19 @@ def extract_card_number_from_filepath(file_path: str) -> str:
     return name_no_ext
 
 
+def _normalize_card_number(card_no: str) -> str:
+    """Нормализовать номер карты, исправляя распространённые ошибки данных.
+
+    Исправления:
+      - SSQRT → SQRT (двойная S в начале — опечатка в исходнике)
+    """
+    if card_no.upper().startswith("SSQRT"):
+        normalized = "SQRT" + card_no[5:]
+        logger.debug("Нормализация номера карты: %s → %s", card_no, normalized)
+        return normalized
+    return card_no
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # ОСНОВНОЙ КЛАСС
 # ═══════════════════════════════════════════════════════════════════════
@@ -385,14 +418,14 @@ class HeuristicAnalyzer:
     """
 
     # Максимальное количество строк для сканирования заголовков
-    MAX_HEADER_SCAN_ROWS = 15
+    MAX_HEADER_SCAN_ROWS = 30
     # Максимальная ширина сканирования колонок (для SWM-формата, где qty может быть в C30)
     MAX_COL_SCAN_WIDTH = 40
     # Минимальный порог уверенности для определения колонки
     CONFIDENCE_THRESHOLD = 0.3
 
     @staticmethod
-    def find_header_rows(ws: Any, max_rows: int = 15) -> List[int]:
+    def find_header_rows(ws: Any, max_rows: Optional[int] = None) -> List[int]:
         """Найти строки заголовков в листе.
 
         Анализирует первые max_rows строк, вычисляя для каждой
@@ -541,23 +574,43 @@ class HeuristicAnalyzer:
 
             # Проверка на part_no (только если не анти-паттерн)
             if not is_anti_part_no:
+                best_kw = None
+                best_score = 0.0
                 for kw in PART_NO_KEYWORDS:
                     if kw.lower() in text:
-                        column_scores['part_no'].append((c, 1.0))
-                        break
+                        specificity = min(len(kw), 6) / 6.0
+                        score = 0.7 + 0.3 * specificity
+                        if score > best_score:
+                            best_score = score
+                            best_kw = kw
+                if best_kw is not None:
+                    column_scores['part_no'].append((c, best_score))
                 else:
                     # Fallback: fuzzy match
                     for kw in PART_NO_KEYWORDS:
                         kw_norm = kw.lower().replace(" ", "").replace("(", "").replace(")", "")
                         text_norm = text.replace(" ", "").replace("(", "").replace(")", "")
                         if kw_norm in text_norm:
-                            column_scores['part_no'].append((c, 0.8))
-                            break
+                            specificity = min(len(kw), 6) / 6.0
+                            score = 0.5 + 0.3 * specificity
+                            if score > best_score:
+                                best_score = score
+                                best_kw = kw
+                    if best_kw is not None:
+                        column_scores['part_no'].append((c, best_score))
 
             # Проверка на name_cn (с китайскими иероглифами)
             is_cn_name = False
+            best_name_kw = None
             for kw in NAME_KEYWORDS:
                 if kw.lower() in text:
+                    if best_name_kw is None or len(kw) > len(best_name_kw):
+                        best_name_kw = kw
+            if best_name_kw is not None:
+                kw = best_name_kw
+                # Проверяем на анти-паттерны (factory/supplier)
+                is_anti_name = any(ak in text for ak in NAME_ANTI_KEYWORDS)
+                if not is_anti_name:
                     # Проверяем на русский/английский
                     has_cjk = bool(CJK_RE.search(text))
                     has_cyrillic = bool(CYRILLIC_RE.search(text))
@@ -565,19 +618,20 @@ class HeuristicAnalyzer:
                     is_cn = has_cjk or any(h in text for h in cn_hints)
                     is_en = has_cyrillic or "英文" in text or "en)" in text or "(en" in text
 
+                    specificity = min(len(kw), 6) / 6.0
+                    base_score = 0.7 + 0.3 * specificity
+
                     if is_cn and not is_en:
-                        column_scores['name_cn'].append((c, 1.0 if len(kw) > 3 else 0.7))
+                        column_scores['name_cn'].append((c, base_score))
                     elif is_en or has_cyrillic:
-                        column_scores['name_en'].append((c, 1.0 if len(kw) > 3 else 0.7))
+                        column_scores['name_en'].append((c, base_score))
                     elif "英文" in text or "英文）" in text or "en)" in text or "en）" in text:
                         column_scores['name_en'].append((c, 1.0))
                     elif "中文" in text or "中文）" in text or "中文)" in text:
                         column_scores['name_cn'].append((c, 1.0))
                     else:
-                        # Общая колонка name — записываем в name_cn
-                        column_scores['name_cn'].append((c, 0.6))
+                        column_scores['name_cn'].append((c, base_score))
                     is_cn_name = True
-                    break
 
             if not is_cn_name:
                 # Проверка на описание (description)
@@ -842,60 +896,121 @@ class HeuristicAnalyzer:
         # Колонки-кандидаты: справа от part_no, исключая известные
         part_no_col = col_types.get('part_no', 1)
         candidates: List[int] = []
+        last_named_col = part_no_col  # последняя колонка с заголовком
         for c in range(part_no_col + 1, max_col + 1):
             if c in known_cols:
                 continue
             header_text = headers.get(c, "")
-            if not header_text:
-                continue
 
             # Проверка на служебные/мета-колонки
             is_meta = False
-            for kw in STRICT_META_KEYWORDS:
-                if kw.lower() in header_text:
-                    is_meta = True
-                    break
-            if is_meta:
-                continue
+            if header_text:
+                for kw in STRICT_META_KEYWORDS:
+                    if kw.lower() in header_text:
+                        is_meta = True
+                        break
+                if is_meta:
+                    continue
 
-            for kw in META_KEYWORDS:
-                if kw.lower() in header_text:
-                    is_meta = True
-                    break
-            if is_meta:
-                continue
+                for kw in META_KEYWORDS:
+                    if kw.lower() in header_text:
+                        is_meta = True
+                        break
+                if is_meta:
+                    continue
+                last_named_col = c
+            else:
+                # Колонка без заголовка — добавляем только если она правее
+                # последней колонки с заголовком (зона конфигураций).
+                if c <= last_named_col:
+                    continue  # та же или левее — пропускаем как мета-колонку
 
             candidates.append(c)
 
-        # Проверка на числовые значения
+        # Проверка на числовые значения и валидность контента
         data_start = header_rows[-1] + 1 if header_rows else 2
         sample_end = min(data_start + 50, (ws.max_row or data_start + 50) + 1)
 
+        # Паттерны, которые НЕ являются валидными значениями комплектаций
+        _torque_range_re = re.compile(r"\d+\s*[±\-]\s*\d+")
+        _bolt_pattern_re = re.compile(r"^[Mm]\d")
+        _text_heavy_re = re.compile(r"[^\d\s.,;:]", re.UNICODE)
+
         col_has_numbers: Dict[int, bool] = {}
+        col_has_real_numbers: Dict[int, bool] = {}  # actual numeric values (not just S/-)
         for c in candidates:
-            has_numeric = False
+            has_valid_config = False
+            has_real_number = False
+            invalid_hits = 0
+            total_non_empty = 0
             for r in range(data_start, sample_end):
                 v = HeuristicAnalyzer.get_cell_value(ws, r, c)
-                if v is not None:
-                    if isinstance(v, (int, float)) and v > 0:
-                        has_numeric = True
-                        break
-                    if isinstance(v, str):
-                        stripped = v.strip()
-                        if stripped not in ('S', '-', 's', '', '0'):
-                            try:
-                                if float(stripped) > 0:
-                                    has_numeric = True
-                                    break
-                            except ValueError:
-                                pass
-            col_has_numbers[c] = has_numeric
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    continue
+                total_non_empty += 1
 
-        # Определяем границу VIN-разбивки
+                if isinstance(v, (int, float)) and v > 0:
+                    has_valid_config = True
+                    has_real_number = True
+                    continue
+                if isinstance(v, str):
+                    stripped = v.strip()
+                    if stripped in ('S', 's', 'Y', 'y', '–', '-', ''):
+                        has_valid_config = True
+                        continue
+                    # Reject torque ranges: "40-50", "50±5", "1.6±0.1"
+                    if _torque_range_re.search(stripped):
+                        invalid_hits += 1
+                        continue
+                    # Reject bolt designations: "M6x16", "M8"
+                    if _bolt_pattern_re.match(stripped):
+                        invalid_hits += 1
+                        continue
+                    # Reject text-heavy values (not numeric config)
+                    try:
+                        val = float(stripped)
+                        if val > 0:
+                            has_valid_config = True
+                            has_real_number = True
+                            continue
+                    except ValueError:
+                        pass
+                    # If mostly non-numeric text, not a config column
+                    if len(stripped) > 3 and _text_heavy_re.search(stripped):
+                        invalid_hits += 1
+
+            # Отбрасываем столбцы, где все значения одинаковые (коды заводов
+            # типа "1020" повторяются в каждой строке — это мета-данные, а не комплектации).
+            unique_data_vals = set()
+            data_rows_checked = 0
+            for r in range(data_start, sample_end):
+                v = HeuristicAnalyzer.get_cell_value(ws, r, c)
+                if v is not None and str(v).strip():
+                    # Пропускаем значения, которые выглядят как подзаголовки
+                    # (текст на Eng/Chi без цифр — типичная строка-подзаголовок)
+                    sv = str(v).strip()
+                    if len(sv) > 2 and not any(ch.isdigit() for ch in sv):
+                        continue
+                    unique_data_vals.add(sv)
+                    data_rows_checked += 1
+            if len(unique_data_vals) <= 1 and data_rows_checked >= 8:
+                col_has_numbers[c] = False
+                col_has_real_numbers[c] = False
+                continue
+
+            # Reject column if too many invalid values or no valid config values
+            if total_non_empty > 0 and invalid_hits / total_non_empty > 0.3:
+                col_has_numbers[c] = False
+                col_has_real_numbers[c] = False
+            else:
+                col_has_numbers[c] = has_valid_config
+                col_has_real_numbers[c] = has_real_number
+
+        # Определяем границу VIN-разбивки (используем real_numbers — колонки только с S/- это маркеры)
         first_non_numeric: Optional[int] = None
         found_numeric = False
         for c in candidates:
-            if col_has_numbers.get(c, False):
+            if col_has_real_numbers.get(c, False):
                 found_numeric = True
             elif found_numeric:
                 first_non_numeric = c
@@ -903,12 +1018,14 @@ class HeuristicAnalyzer:
 
         config_cols: List[int] = []
         if first_non_numeric is not None:
-            for c in candidates:
-                if c < first_non_numeric and col_has_numbers.get(c, False):
-                    config_cols.append(c)
+            # Берём ОБЕ группы: numeric (числовые.qty) + non-numeric (S/- маркеры).
+            # Уникальные-значения фильтр уже отсеял мета-колонки (коды заводов и т.д.)
+            numeric_cols = [c for c in candidates if c < first_non_numeric and col_has_numbers.get(c, False)]
+            non_numeric_cols = [c for c in candidates if c >= first_non_numeric and col_has_numbers.get(c, False)]
+            config_cols = numeric_cols + non_numeric_cols
             logger.debug(
-                "VIN-разбивка с колонки %d. Комплектаций: %d",
-                first_non_numeric, len(config_cols),
+                "VIN-разбивка с колонки %d. Numeric: %d, Non-numeric: %d. Всего: %d",
+                first_non_numeric, len(numeric_cols), len(non_numeric_cols), len(config_cols),
             )
         else:
             config_cols = [c for c in candidates if col_has_numbers.get(c, False)]
@@ -919,6 +1036,88 @@ class HeuristicAnalyzer:
 
         logger.debug("Колонки комплектаций: %s (всего %d)", config_cols, len(config_cols))
         return config_cols
+
+    @staticmethod
+    def find_graphic_number_column(
+        ws: Any,
+        header_rows: List[int],
+        col_types: Dict[str, int],
+    ) -> int:
+        """Найти колонку с номером схемы/операции (图示编号 / Graphic Number).
+
+        Используется для привязки деталей из BOM к операционным картам
+        (формат Changan: последний столбец таблицы содержит номер операции).
+
+        Алгоритм:
+          1. Ищем колонку по ключевым словам GRAPHIC_NUMBER_KEYWORDS
+          2. Если не нашли по заголовку — ищем по содержимому (паттерн DP-CH-A01 и т.д.)
+          3. Возвращаем номер колонки или 0 если не найдена.
+
+        Args:
+            ws: Лист Excel.
+            header_rows: Найденные строки заголовков.
+            col_types: Определённые типы колонок.
+
+        Returns:
+            Номер колонки или 0.
+        """
+        max_col = ws.max_column or 50
+        known_cols = {v for v in col_types.values() if v > 0}
+
+        # Фаза 1: Поиск по заголовкам
+        for c in range(1, max_col + 1):
+            if c in known_cols:
+                continue
+            for hr in header_rows:
+                v = HeuristicAnalyzer.get_cell_value(ws, hr, c)
+                if v is not None:
+                    text = str(v).strip().lower()
+                    for kw in GRAPHIC_NUMBER_KEYWORDS:
+                        if kw.lower() in text:
+                            logger.debug(
+                                "Колонка 图示编号 найдена по заголовку: колонка %d, '%s'",
+                                c, kw,
+                            )
+                            return c
+
+        # Фаза 2: Поиск по содержимому (fallback — очень мягкий паттерн)
+        # Любой непустой строке, содержащей буквы И цифры (но не чисто число),
+        # и при этом не похожей на количество.
+        data_start = header_rows[-1] + 1 if header_rows else 2
+        sample_end = min(data_start + 30, (ws.max_row or data_start) + 1)
+
+        for c in range(1, max_col + 1):
+            if c in known_cols:
+                continue
+            hits = 0
+            total = 0
+            for r in range(data_start, sample_end):
+                v = HeuristicAnalyzer.get_cell_value(ws, r, c)
+                if v is None:
+                    continue
+                total += 1
+                s = str(v).strip()
+                if not s or len(s) < 2:
+                    continue
+                # Отсеиваем чистые числа (количество) и совсем короткие строки
+                try:
+                    float(s.replace(",", "."))
+                    continue  # Это число — не graphic number
+                except ValueError:
+                    pass
+                # Содержит буквы И цифры (любой порядок, любые разделители)
+                has_alpha = bool(re.search(r"[A-Za-z]", s))
+                has_digit = bool(re.search(r"\d", s))
+                if has_alpha and has_digit:
+                    hits += 1
+            if total > 2 and hits / total > 0.3:
+                logger.debug(
+                    "Колонка 图示编号 найдена по содержимому: колонка %d (hits=%.2f)",
+                    c, hits / total,
+                )
+                return c
+
+        return 0
 
     @staticmethod
     def extract_card_number_from_sheet(ws: Any, file_path: str, max_scan_rows: int = 15) -> str:
@@ -948,6 +1147,7 @@ class HeuristicAnalyzer:
                     match = CARD_NUMBER_RE.search(text)
                     if match:
                         card_no = match.group(0).strip("- ")
+                        card_no = _normalize_card_number(card_no)
                         logger.debug("Номер карты из содержимого листа: %s", card_no)
                         return card_no
 
@@ -1010,9 +1210,11 @@ class HeuristicAnalyzer:
             qty_col: Optional[int] = None
             name_col: Optional[int] = None
 
-            for col_idx, val in enumerate(row_values, 1):
-                if any(kw in val for kw in PART_NO_KEYWORDS):
-                    if len(val) < 50:
+            for kw in PART_NO_KEYWORDS:
+                if part_no_col is not None:
+                    break
+                for col_idx, val in enumerate(row_values, 1):
+                    if kw in val and len(val) < 50:
                         part_no_col = col_idx
                         break
 
@@ -1020,10 +1222,12 @@ class HeuristicAnalyzer:
                 continue
 
             for col_idx, val in enumerate(row_values, 1):
-                if any(kw in val for kw in QTY_KEYWORDS):
+                if qty_col is None and any(kw in val for kw in QTY_KEYWORDS):
                     qty_col = col_idx
-                if any(kw in val for kw in NAME_KEYWORDS):
-                    name_col = col_idx
+                if name_col is None and any(kw in val for kw in NAME_KEYWORDS):
+                    # Skip anti-keywords (factory/supplier)
+                    if not any(ak in val for ak in NAME_ANTI_KEYWORDS):
+                        name_col = col_idx
 
             # ── Multi-row header scan (BELOW) ──
             # Если qty или name не найдены в той же строке — ищем на следующих 10 строках
@@ -1260,13 +1464,13 @@ class HeuristicAnalyzer:
             if name_cn_col:
                 nc = HeuristicAnalyzer.get_cell_value(ws, row_idx, name_cn_col)
                 if nc is not None:
-                    name_cn = str(nc).strip()
+                    name_cn = clean_cell_text(nc)
 
             name_en = ""
             if name_en_col:
                 ne = HeuristicAnalyzer.get_cell_value(ws, row_idx, name_en_col)
                 if ne is not None:
-                    name_en = str(ne).strip()
+                    name_en = clean_cell_text(ne)
 
             # Сохраняем названия (не перезаписываем пустыми)
             if pn_clean in name_dict:
@@ -1300,6 +1504,5 @@ def extract_card_number(file_path: str, ws: Optional[Any] = None) -> str:
         Номер карты.
     """
     if ws is not None:
-        analyzer = HeuristicAnalyzer()
-        return analyzer.extract_card_number_from_sheet(ws, file_path)
+        return HeuristicAnalyzer.extract_card_number_from_sheet(ws, file_path)
     return extract_card_number_from_filepath(file_path)

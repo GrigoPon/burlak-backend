@@ -337,7 +337,7 @@ class TestSplitManyParallel:
         ]
 
         splitter = CardSplitter(max_workers=2)
-        created, errors = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert len(errors) == 0, f"Expected 0 errors, got {errors}"
         assert len(created) == 6, f"Expected 6 files from 3 cards × 2 ops, got {len(created)}"
         for fp in created:
@@ -350,14 +350,14 @@ class TestSplitManyParallel:
         tasks = [(multi_sheet_xlsx, output_dir, ["Sheet1"], "Card")]
 
         splitter = CardSplitter(max_workers=2)
-        created, errors = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert len(errors) == 0
         assert len(created) == 1
 
     def test_parallel_empty_tasks(self, tmp_dir: str):
         """Empty tasks list returns empty."""
         splitter = CardSplitter()
-        created, errors = splitter.split_many_parallel([])
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel([])
         assert len(errors) == 0
         assert created == []
 
@@ -370,7 +370,7 @@ class TestSplitFileWorker:
     def test_worker_basic(self, tmp_dir: str, multi_sheet_xlsx: str):
         """Worker function produces correct output."""
         output_dir = os.path.join(tmp_dir, "worker_out")
-        created = _split_file_worker(
+        created, oxl_count, oxl_files, manifest = _split_file_worker(
             multi_sheet_xlsx, output_dir, ["Sheet1", "Sheet2"], "TestCard",
         )
         assert len(created) == 2, f"Expected 2 files, got {len(created)}"
@@ -887,7 +887,7 @@ class TestSplitManyParallelErrors:
             ("/nonexistent/file.xlsx", output_dir, ["Sheet1"], "BadFile"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created, errors = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert created == []
         assert errors == [], "split_file catches errors internally"
 
@@ -908,7 +908,7 @@ class TestSplitManyParallelErrors:
             (valid_path, output_dir, ["Op1", "Op2"], "Good"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created, errors = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert len(created) == 2
         assert errors == [], "split_file catches errors internally"
         for fp in created:

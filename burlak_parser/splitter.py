@@ -24,12 +24,26 @@ import logging
 import os
 import re
 import shutil
+import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple
 
+# Подавляем предупреждения openpyxl о DrawingML (неполная поддержка)
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
 logger = logging.getLogger(__name__)
+
+# Символы, запрещённые в именах файлов Windows/Linux
+_ILLEGAL_FS_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Декоративные Unicode-символы, которые нужно удалять из имён файлов
+# (звёздочки, ромбы, кружки, стрелки и т.д.)
+_DECORATIVE_CHARS_RE = re.compile(r'[☆★●○◆◇■□▲△▼▽♠♣♥♦↗→←↑↓«»""''„]')
+
+# Множественные подчёркивания/точки/пробелы → одинарные
+_MULTI_SEP_RE = re.compile(r'[_ .]{2,}')
 
 # Пространства имён Excel OOXML
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -53,6 +67,9 @@ class CardSplitter:
                          По умолчанию: количество CPU.
         """
         self.max_workers = max_workers or os.cpu_count() or 4
+        self.openpyxl_fallback_count = 0
+        self.openpyxl_fallback_files: Set[str] = set()
+        self.manifest: Dict[str, List[str]] = {}
 
     def split_file(
         self,
@@ -63,8 +80,10 @@ class CardSplitter:
     ) -> List[str]:
         """Разделить один .xlsx файл на несколько однолистовых файлов.
 
+        Для .xls файлов (legacy) — копирует как есть без разделения.
+
         Args:
-            source_path: Путь к исходному .xlsx файлу.
+            source_path: Путь к исходному .xlsx/.xls файлу.
             output_dir: Директория для сохранения результатов.
             sheet_names: Имена листов, которые нужно выделить.
             file_label: Метка файла для именования выходных файлов.
@@ -74,14 +93,33 @@ class CardSplitter:
         """
         os.makedirs(output_dir, exist_ok=True)
         created: List[str] = []
+        original_name = os.path.basename(source_path)
 
-        if not source_path.lower().endswith(".xlsx"):
-            logger.debug("Пропуск не-.xlsx файла: %s", source_path)
+        ext_lower = os.path.splitext(source_path)[1].lower()
+
+        if ext_lower == ".xls":
+            safe_label = _safe_filename(file_label)[:50] if file_label else ""
+            basename = os.path.splitext(os.path.basename(source_path))[0]
+            out_name = f"{safe_label}_{basename}.xls" if safe_label else f"{basename}.xls"
+            output_path = os.path.join(output_dir, out_name)
+            counter = 1
+            while os.path.exists(output_path):
+                base, ext = os.path.splitext(out_name)
+                output_path = os.path.join(output_dir, f"{base}_{counter}{ext}")
+                counter += 1
+            shutil.copy2(source_path, output_path)
+            created.append(output_path)
+            self.manifest.setdefault(original_name, []).append(os.path.basename(output_path))
+            logger.info("Скопирован .xls файл (без разделения): %s", os.path.basename(source_path))
+            return created
+
+        if ext_lower != ".xlsx":
+            logger.debug("Пропуск не-.xlsx/.xls файла: %s", source_path)
             return created
 
         for sheet_name in sheet_names:
-            safe_label = re.sub(r"[^\w\-]", "_", file_label, flags=re.ASCII)[:50] if file_label else ""
-            safe_sheet = re.sub(r"[^\w\-]", "_", sheet_name, flags=re.ASCII)[:50]
+            safe_label = _safe_filename(file_label)[:50] if file_label else ""
+            safe_sheet = _safe_filename(sheet_name)[:50]
             if safe_label:
                 output_filename = f"{safe_label}_{safe_sheet}.xlsx"
             else:
@@ -89,7 +127,7 @@ class CardSplitter:
 
             output_path = os.path.join(output_dir, output_filename)
 
-            # Разрешение коллизий имён
+            # Разрешение коллизий имён (детерминированное)
             counter = 1
             while os.path.exists(output_path):
                 base, ext = os.path.splitext(output_filename)
@@ -97,8 +135,9 @@ class CardSplitter:
                 counter += 1
 
             try:
-                self._extract_sheet_via_zip(source_path, output_path, sheet_name)
+                self._extract_sheet(source_path, output_path, sheet_name)
                 created.append(output_path)
+                self.manifest.setdefault(original_name, []).append(os.path.basename(output_path))
                 logger.debug("Создан: %s", os.path.basename(output_path))
             except Exception as e:
                 logger.warning(
@@ -111,18 +150,24 @@ class CardSplitter:
     def split_many_parallel(
         self,
         tasks: List[Tuple[str, str, List[str], str]],
-    ) -> Tuple[List[str], List[Tuple[str, str]]]:
+    ) -> Tuple[List[str], List[Tuple[str, str]], int, List[str], Dict[str, List[str]]]:
         """Разделить множество файлов параллельно.
+
+        Гарантирует детерминированный порядок: результаты сортируются
+        по полному пути для воспроизводимости.
 
         Args:
             tasks: Список кортежей (source_path, output_dir, sheet_names, file_label).
 
         Returns:
-            Кортеж (all_created_files, errors) где errors — список
-            (source_path, error_message) для файлов, которые не удалось обработать.
+            Кортеж (all_created_files, errors, openpyxl_fallback_count,
+                    openpyxl_fallback_files, manifest).
         """
         all_created: List[str] = []
         errors: List[Tuple[str, str]] = []
+        all_openpyxl_count = 0
+        all_openpyxl_files: List[str] = []
+        merged_manifest: Dict[str, List[str]] = {}
 
         with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {}
@@ -137,7 +182,12 @@ class CardSplitter:
                 source_path = futures[future]
                 try:
                     result = future.result()
-                    all_created.extend(result)
+                    created, oxl_count, oxl_files, worker_manifest = result
+                    all_created.extend(created)
+                    all_openpyxl_count += oxl_count
+                    all_openpyxl_files.extend(oxl_files)
+                    for orig, generated in worker_manifest.items():
+                        merged_manifest.setdefault(orig, []).extend(generated)
                 except Exception as e:
                     err_msg = str(e)
                     logger.error(
@@ -146,7 +196,142 @@ class CardSplitter:
                     )
                     errors.append((source_path, err_msg))
 
-        return all_created, errors
+        # Сортируем для детерминированного порядка
+        all_created.sort()
+        errors.sort(key=lambda x: x[0])
+        all_openpyxl_files.sort()
+
+        # Сортируем значения в манифесте
+        for orig in merged_manifest:
+            merged_manifest[orig].sort()
+
+        return all_created, errors, all_openpyxl_count, all_openpyxl_files, merged_manifest
+
+    def _extract_sheet(
+        self, source_path: str, output_path: str, keep_sheet_name: str,
+    ) -> None:
+        """Выделить один лист из .xlsx файла.
+
+        Стратегия ЛИНЕЙНАЯ (без рекурсии), приоритет производительности:
+          1. ZIP-метод: быстрый (миллисекунды), обрабатывает 90%+ файлов.
+          2. При ошибке ZIP → ОДНА попытка openpyxl (медленный, для WPS/битых).
+          3. При ошибке openpyxl → исключение.
+
+        Args:
+            source_path: Путь к исходному .xlsx файлу.
+            output_path: Путь для сохранения нового .xlsx файла.
+            keep_sheet_name: Имя листа, который нужно оставить.
+
+        Raises:
+            ValueError: Если целевой лист не найден в файле.
+            Exception: Если оба метода завершились ошибкой.
+        """
+        # Попытка 1: ZIP (быстро — миллисекунды на файл)
+        try:
+            self._extract_sheet_via_zip(source_path, output_path, keep_sheet_name)
+            return
+        except Exception as e:
+            logger.warning(
+                "ZIP-метод не смог разделить %s: %s. Пробуем openpyxl...",
+                os.path.basename(source_path), e,
+            )
+
+        # Попытка 2: openpyxl (медленно — для WPS/битых файлов, одна попытка)
+        try:
+            self._extract_sheet_via_openpyxl(source_path, output_path, keep_sheet_name)
+            self.openpyxl_fallback_count += 1
+            self.openpyxl_fallback_files.add(os.path.basename(source_path))
+            logger.info(
+                "openpyxl успешно разделил лист: %s в файле %s",
+                keep_sheet_name, os.path.basename(source_path),
+            )
+        except Exception as openpyxl_e:
+            logger.error(
+                "Оба метода разделения листа '%s' из %s завершились ошибкой. "
+                "ZIP: см. выше. openpyxl: %s",
+                keep_sheet_name, os.path.basename(source_path), openpyxl_e,
+            )
+            raise
+
+    def _extract_sheet_via_openpyxl(
+        self, source_path: str, output_path: str, keep_sheet_name: str,
+    ) -> None:
+        """Выделить один лист через openpyxl (load → remove sheets → save).
+
+        Этот метод корректно обрабатывает файлы, созданные WPS Office
+        и другими генераторами OOXML, которые могут содержать
+        нестандартные CRC-суммы или повреждённые записи ZIP.
+
+        Включает обход бага WPS: DefinedNameDict без атрибута definedName.
+
+        Args:
+            source_path: Путь к исходному .xlsx файлу.
+            output_path: Путь для сохранения нового .xlsx файла.
+            keep_sheet_name: Имя листа, который нужно оставить.
+
+        Raises:
+            ValueError: Если целевой лист не найден.
+            Exception: При ошибке загрузки/сохранения openpyxl.
+        """
+        import openpyxl
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+            wb = openpyxl.load_workbook(source_path)
+        sheet_names = wb.sheetnames
+
+        if keep_sheet_name not in sheet_names:
+            wb.close()
+            raise ValueError(f"Лист '{keep_sheet_name}' не найден в файле")
+
+        if len(sheet_names) <= 1:
+            wb.save(output_path)
+            wb.close()
+            return
+
+        sheets_to_remove = [n for n in sheet_names if n != keep_sheet_name]
+
+        # ── WPS BUG FIX: Патчим DefinedNameDict перед удалением листов ──
+        # WPS Office создаёт повреждённые OOXML, где wb.defined_names
+        # не имеет атрибута definedName. openpyxl падает при del wb[sheet]
+        # с AttributeError: 'DefinedNameDict' object has no attribute 'definedName'.
+        # Решение: принудительно создаём пустые атрибуты.
+        dn = getattr(wb, 'defined_names', None)
+        if dn is not None:
+            if not hasattr(dn, 'definedName'):
+                dn.definedName = []
+            if not hasattr(dn, 'elements'):
+                dn.elements = []
+
+        # Удаляем named ranges, ссылающиеся на удаляемые листы
+        try:
+            if dn is not None and dn.definedName:
+                to_delete = []
+                for defined_name in dn.definedName:
+                    attr_text = getattr(defined_name, 'attr_text', None) or str(defined_name)
+                    for deleted in sheets_to_remove:
+                        if deleted in attr_text or f"'{deleted}'" in attr_text:
+                            to_delete.append(defined_name)
+                            break
+                for defined_name in to_delete:
+                    try:
+                        dn.definedName.remove(defined_name)
+                    except Exception:
+                        pass
+        except Exception:
+            # Если что-то пошло не чисто — не критично, openpyxl сам обработает
+            pass
+
+        for name in sheets_to_remove:
+            try:
+                del wb[name]
+            except Exception:
+                pass
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+            wb.save(output_path)
+        wb.close()
 
     def _extract_sheet_via_zip(
         self, source_path: str, output_path: str, keep_sheet_name: str,
@@ -305,6 +490,27 @@ class CardSplitter:
                 zout.writestr(name, data)
 
 
+def _safe_filename(name: str) -> str:
+    """Очистить имя файла, сохранив Unicode-символы.
+
+    Удаляет:
+      - Символы, запрещённые в именах файлов ОС: < > : " / \\ | ? *
+      - Управляющие символы (0x00-0x1f)
+      - Декоративные Unicode: ☆ ★ ● ○ ◆ ◇ ■ □ и т.д.
+      - Множественные подчёркивания/точки/пробелы → одинарные
+
+    Args:
+        name: Исходное имя файла.
+
+    Returns:
+        Безопасное имя файла с сохранёнными кириллицей/иероглифами.
+    """
+    result = _ILLEGAL_FS_CHARS_RE.sub("_", name)
+    result = _DECORATIVE_CHARS_RE.sub("", result)
+    result = _MULTI_SEP_RE.sub("_", result)
+    return result.strip("_ .")
+
+
 def _collect_related_files(
     zip_entries: Dict[str, bytes],
     removed_sheet: str,
@@ -428,7 +634,7 @@ def _split_file_worker(
     output_dir: str,
     sheet_names: List[str],
     file_label: str,
-) -> List[str]:
+) -> Tuple[List[str], int, List[str], Dict[str, List[str]]]:
     """Рабочая функция для параллельного разделения (выполняется в отдельном процессе).
 
     Args:
@@ -438,7 +644,13 @@ def _split_file_worker(
         file_label: Метка файла для именования.
 
     Returns:
-        Список созданных файлов.
+        Кортеж (created_files, openpyxl_fallback_count, openpyxl_fallback_files, manifest).
     """
     splitter = CardSplitter(max_workers=1)  # Внутри процесса — один поток
-    return splitter.split_file(source_path, output_dir, sheet_names, file_label)
+    created = splitter.split_file(source_path, output_dir, sheet_names, file_label)
+    return (
+        created,
+        splitter.openpyxl_fallback_count,
+        sorted(splitter.openpyxl_fallback_files),
+        dict(splitter.manifest),
+    )

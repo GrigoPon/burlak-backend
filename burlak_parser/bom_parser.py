@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -32,6 +31,11 @@ import openpyxl
 
 from burlak_parser.heuristic_analyzer import (
     HeuristicAnalyzer,
+    clean_cell_text,
+)
+from burlak_parser.normalizer import (
+    normalize_quantity,
+    normalize_part_number,
     clean_part_number,
     is_valid_part_number,
 )
@@ -73,7 +77,11 @@ def parse_bom(file_path: str) -> BOMData:
     """
     logger.info("Загрузка BOM-файла: %s", file_path)
 
-    wb = openpyxl.load_workbook(file_path, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception as e:
+        logger.warning("Не удалось загрузить обычным режимом (%s), пробуем read_only", e)
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
     sheet_names = wb.sheetnames
 
     # ── Результаты, агрегированные по всем листам ──
@@ -82,8 +90,6 @@ def parse_bom(file_path: str) -> BOMData:
     all_config_names: List[str] = []
     all_global_names: Dict[str, Tuple[str, str]] = {}
     seen_config_names: Dict[str, str] = {}  # config_name -> нормализованный оригинал
-
-    primary_bom_found = False
 
     for sheet_name in sheet_names:
         ws = wb[sheet_name]
@@ -133,18 +139,19 @@ def parse_bom(file_path: str) -> BOMData:
                     existing_en = ne
                 all_global_names[pn] = (existing_cn, existing_en)
 
-        # ── 4. Только первый BOM-лист даёт конфигурации (остальные — только названия) ──
-        if primary_bom_found:
-            logger.info(
-                "Лист %s: только названия (первый BOM-лист уже обработан)", sheet_name,
-            )
-            continue
-
+        # ── 4. Определяем колонки комплектаций ──
         config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
         qty_col = col_types.get("qty", 0)
 
         # ── 5. Если есть отдельная qty-колонка (спец-листы 附件) ──
-        if (not config_cols or len(config_cols) < 2) and qty_col > 0:
+        # Листы с именами-метаданными НЕ создаю конфигурации (单车用量, 发动机附件 и т.д.)
+        _NON_CONFIG_SHEET_KEYWORDS = (
+            "单车用量", "组件数量", "发动机附件",
+            "Расход на один автомобиль", "количество компонентов",
+        )
+        is_non_config_sheet = any(kw in sheet_name for kw in _NON_CONFIG_SHEET_KEYWORDS)
+
+        if (not config_cols or len(config_cols) == 0) and qty_col > 0 and not is_non_config_sheet:
             data_start = header_row + 1
             config_name = sheet_name
             seen_config_names[config_name] = config_name
@@ -155,19 +162,14 @@ def parse_bom(file_path: str) -> BOMData:
                 pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
                 if pn is None:
                     continue
-                pn_str = str(pn).strip()
+                pn_str = clean_cell_text(pn)
                 if not pn_str or pn_str.startswith("~$"):
                     continue
                 if not is_valid_part_number(pn_str):
                     continue
 
                 qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col)
-                qty = 0.0
-                if qty_val is not None:
-                    try:
-                        qty = float(qty_val) if isinstance(qty_val, (int, float)) else float(str(qty_val).strip())
-                    except (ValueError, TypeError):
-                        qty = 0.0
+                qty = normalize_quantity(qty_val)
 
                 if qty > 0:
                     pn_normalized = clean_part_number(pn_str)
@@ -179,11 +181,28 @@ def parse_bom(file_path: str) -> BOMData:
                     if config_name not in all_parts[pn_normalized].applicable_configs:
                         all_parts[pn_normalized].applicable_configs.append(config_name)
 
-            primary_bom_found = True
             logger.info(
                 "Лист %s: спец-лист с qty-колонкой, %d деталей",
                 sheet_name, len(all_config_quantities[config_name]),
             )
+            continue
+
+        # ── 5b. Non-config sheets (单车用量, 发动机附件) — collect parts only ──
+        if is_non_config_sheet and qty_col > 0:
+            data_start = header_row + 1
+            for row_idx in range(data_start, (ws.max_row or data_start) + 1):
+                pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
+                if pn is None:
+                    continue
+                pn_str = clean_cell_text(pn)
+                if not pn_str or pn_str.startswith("~$"):
+                    continue
+                if not is_valid_part_number(pn_str):
+                    continue
+                pn_normalized = clean_part_number(pn_str)
+                if pn_normalized not in all_parts:
+                    all_parts[pn_normalized] = PartInfo(part_number=pn_str)
+            logger.info("Лист %s: не-конфигурационный, детали собраны в all_parts", sheet_name)
             continue
 
         if not config_cols:
@@ -194,8 +213,21 @@ def parse_bom(file_path: str) -> BOMData:
         config_names: List[str] = []
         for col_idx in config_cols:
             name = HeuristicAnalyzer.get_cell_value(ws, header_row, col_idx)
-            name_str = str(name) if name is not None else f"Config_{col_idx}"
+            name_str = str(name) if name is not None else ""
             name_str = name_str.replace("\n", " ").replace("\r", "").strip()
+
+            # Если заголовок пуст — ищем имя в строках ВЫШЕ заголовка
+            # (метаданные: код модели, описание конфигурации и т.д.)
+            if not name_str:
+                for look_row in range(max(1, header_row - 1), 0, -1):
+                    meta_val = HeuristicAnalyzer.get_cell_value(ws, look_row, col_idx)
+                    if meta_val is not None:
+                        meta_str = str(meta_val).strip()
+                        if meta_str and len(meta_str) < 80:
+                            name_str = meta_str
+                            break
+            if not name_str:
+                name_str = f"Config_{col_idx}"
             config_names.append(name_str)
 
         deduped_indices: List[int] = []
@@ -223,7 +255,7 @@ def parse_bom(file_path: str) -> BOMData:
             pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
             if pn is None:
                 continue
-            pn_str = str(pn).strip()
+            pn_str = clean_cell_text(pn)
             if not pn_str or pn_str.startswith("~$"):
                 continue
             if not is_valid_part_number(pn_str):
@@ -237,14 +269,14 @@ def parse_bom(file_path: str) -> BOMData:
             part = all_parts[pn_normalized]
 
             for i, col_idx in enumerate(config_cols):
-                qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx)
-                if qty_val is not None:
-                    try:
-                        qty = float(qty_val) if isinstance(qty_val, (int, float)) else float(str(qty_val).strip())
-                    except (ValueError, TypeError):
-                        qty = 0.0
+                config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
+
+                if config_val.upper() == 'S' and qty_col > 0:
+                    qty = normalize_quantity(HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col))
+                elif config_val in ('-', '–', '—', ''):
+                    continue
                 else:
-                    qty = 0.0
+                    qty = normalize_quantity(config_val)
 
                 if qty > 0:
                     config_name = config_names[i]
@@ -263,9 +295,8 @@ def parse_bom(file_path: str) -> BOMData:
 
                     sheet_config_count += 1
 
-        primary_bom_found = True
         logger.info(
-            "Лист %s: основной BOM, %d колонок комплектаций, %d строк с данными",
+            "Лист %s: BOM, %d колонок комплектаций, %d строк с данными",
             sheet_name, len(config_cols), sheet_config_count,
         )
 

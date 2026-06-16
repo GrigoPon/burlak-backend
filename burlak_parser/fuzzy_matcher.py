@@ -19,42 +19,14 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
-logger = logging.getLogger(__name__)
-
-# Паттерн для каталожного номера детали:
-# Должен содержать хотя бы одну букву и хотя бы одну цифру,
-# или быть чисто цифровым достаточной длины (>= 5 символов).
-# Исключаем очевидный мусор: одиночные буквы, спецсимволы, слишком короткие строки.
-PART_NUMBER_PATTERN = re.compile(
-    r"^(?=.*[A-Za-z])[A-Za-z0-9\-\.\/\_\s]{3,}$"  # минимум 3 символа, хотя бы 1 буква
-    r"|^\d{3,}$"  # или чисто цифровой, минимум 3 цифры
+from burlak_parser.normalizer import (
+    normalize_part_number,
+    is_valid_part_number as _is_valid_part_number_strict,
 )
 
-# Символы, которые удаляются при нормализации для fuzzy matching
-NORMALIZE_STRIP_CHARS = re.compile(r"[\s\-\—\.\/\_\,\;\:\'\"\(\)\[\]\{\}\|\\]+")
-
-
-def normalize_part_number(part_no: str) -> str:
-    """Нормализовать парт-номер для сравнения.
-
-    Удаляет ВСЕ пробелы, дефисы, точки, слеши и прочие спецсимволы.
-    Приводит к верхнему регистру.
-
-    Args:
-        part_no: Исходный парт-номер.
-
-    Returns:
-        Нормализованный парт-номер (только буквы и цифры, upper case).
-
-    Example:
-        "ABCD-123" -> "ABCD123"
-        "ABCD 123" -> "ABCD123"
-        "ABCD.1.2.3" -> "ABCD123"
-    """
-    cleaned = NORMALIZE_STRIP_CHARS.sub("", part_no.strip())
-    return cleaned.upper()
+logger = logging.getLogger(__name__)
 
 
 def is_fuzzy_match(part_a: str, part_b: str) -> bool:
@@ -82,11 +54,10 @@ def is_fuzzy_match(part_a: str, part_b: str) -> bool:
 def is_valid_part_number(part_no: str) -> bool:
     """Проверить, похожа ли строка на каталожный номер детали.
 
-    Отсеивает:
-      - Слишком короткие строки (< 3 символов)
-      - Чисто буквенные строки без цифр (кроме очень длинных)
-      - Строки, состоящие только из спецсимволов
-      - Явный мусор: "N/A", "-", "无", "None" и т.д.
+    Использует МЯГКУЮ проверку (lenient) — допускает буквы-only или цифры-only
+    строки достаточной длины (для fuzzy matching).
+
+    Для строгой проверки используйте burlak_parser.normalizer.is_valid_part_number().
 
     Args:
         part_no: Строка для проверки.
@@ -94,18 +65,7 @@ def is_valid_part_number(part_no: str) -> bool:
     Returns:
         True если строка похожа на каталожный номер.
     """
-    if not part_no or len(part_no.strip()) < 3:
-        return False
-
-    cleaned = part_no.strip()
-
-    # Явный мусор
-    garbage = {"n/a", "na", "none", "无", "null", "-", "--", "---", "/", ".", ".."}
-    if cleaned.lower() in garbage:
-        return False
-
-    # Проверка паттерном
-    return bool(PART_NUMBER_PATTERN.match(cleaned))
+    return _is_valid_part_number_strict(part_no, strict=False)
 
 
 class FuzzyMatcher:
@@ -122,15 +82,12 @@ class FuzzyMatcher:
         """
         # Индекс: normalized -> список оригинальных номеров
         self._normalized_index: Dict[str, List[str]] = {}
-        # Обратный индекс: оригинальный -> normalized
-        self._reverse_index: Dict[str, str] = {}
 
         for pn in bom_part_numbers:
             norm = normalize_part_number(pn)
             if norm not in self._normalized_index:
                 self._normalized_index[norm] = []
             self._normalized_index[norm].append(pn)
-            self._reverse_index[pn] = norm
 
     def find_fuzzy_match(self, cards_part_no: str) -> Optional[str]:
         """Найти нечеткое совпадение для номера из карт в BOM.

@@ -32,7 +32,6 @@ from burlak_parser.report_generator import (
     Reporter,
     create_split_cards_archive,
     generate_discrepancy_report,
-    generate_legacy_report,
 )
 
 
@@ -578,93 +577,6 @@ class TestGenerateDiscrepancyReportErrors:
         names = _get_xlsx_sheet_names(path)
         assert "Ошибки файлов" not in names, \
             "Error sheet should not appear without cards_data"
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  7. generate_legacy_report
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestGenerateLegacyReport:
-    @pytest.fixture
-    def output_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="report_test_")
-        yield path
-        shutil.rmtree(path, ignore_errors=True)
-
-    def test_creates_file(self, output_dir: str):
-        comparison = _make_multi_result([]).config_results[0]  # empty config result
-        path = os.path.join(output_dir, "legacy.xlsx")
-        generated = generate_legacy_report(comparison, path)
-        assert generated == path
-        assert os.path.exists(path)
-        assert os.path.getsize(path) > 0
-
-    def test_legacy_discrepancies_written(self, output_dir: str):
-        discs = [
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH,
-                              qty_bom=2.0, qty_cards=1.0, name_cn="Part1"),
-            _make_discrepancy("P002", DiscrepancyType.ONLY_IN_BOM,
-                              qty_bom=1.0, qty_cards=0.0),
-        ]
-        cr = ConfigComparisonResult(config_name="C1", discrepancies=discs)
-        path = os.path.join(output_dir, "legacy.xlsx")
-        generate_legacy_report(cr, path)
-
-        wb = openpyxl.load_workbook(path)
-        ws = wb["Расхождения"]
-        rows = list(ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True))
-        wb.close()
-
-        assert len(rows) == 2, f"Expected 2 discrepancies, got {len(rows)}"
-        assert rows[0][0] == "P001"
-        assert rows[1][0] == "P002"
-
-    def test_legacy_bom_parts_sheet(self, output_dir: str):
-        """Legacy report with bom_parts creates BOM детали sheet."""
-        discs = [_make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH)]
-        cr = ConfigComparisonResult(config_name="C1", discrepancies=discs)
-        bom_parts = {"P001": PartInfo("P001", name_cn="Part1", quantity=1.0)}
-
-        path = os.path.join(output_dir, "legacy.xlsx")
-        generate_legacy_report(cr, path, bom_parts=bom_parts)
-
-        names = _get_xlsx_sheet_names(path)
-        assert "Все детали BOM" in names, "BOM sheet should exist"
-
-    def test_legacy_no_bom_parts_no_sheet(self, output_dir: str):
-        """Without bom_parts, no BOM детали sheet."""
-        discs = []
-        cr = ConfigComparisonResult(config_name="C1", discrepancies=discs)
-        path = os.path.join(output_dir, "legacy.xlsx")
-        generate_legacy_report(cr, path, bom_parts=None)
-
-        names = _get_xlsx_sheet_names(path)
-        assert "Все детали BOM" not in names, \
-            "BOM sheet should not appear without bom_parts"
-
-    def test_legacy_only_in_cards_format(self, output_dir: str):
-        """ONLY_IN_CARDS discrepancy uses cards_only_fmt.
-
-        Покрывает строку 402: fmt = cards_only_fmt в generate_legacy_report.
-        """
-        discs = [
-            _make_discrepancy("P003", DiscrepancyType.ONLY_IN_CARDS,
-                              qty_bom=0.0, qty_cards=3.0, config="C1",
-                              card_numbers=["Card1"]),
-        ]
-        cr = ConfigComparisonResult(config_name="C1", discrepancies=discs)
-        path = os.path.join(output_dir, "legacy.xlsx")
-        generate_legacy_report(cr, path)
-
-        wb = openpyxl.load_workbook(path)
-        ws = wb["Расхождения"]
-        row = list(ws.iter_rows(min_row=2, max_row=2, values_only=True))[0]
-        wb.close()
-
-        assert row[0] == "P003"
-        assert row[3] == 0.0  # qty_bom
-        assert row[4] == 3.0  # qty_cards
-        assert DiscrepancyType.ONLY_IN_CARDS in str(row[6])
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -23,7 +23,6 @@ import xlsxwriter
 
 from burlak_parser.bom_parser import BOMData
 from burlak_parser.comparator import (
-    ConfigComparisonResult,
     Discrepancy,
     DiscrepancyType,
     MultiConfigComparisonResult,
@@ -349,86 +348,6 @@ def generate_discrepancy_report(
 
     workbook.close()
     logger.info("Отчёт сохранён: %s", output_path)
-    return output_path
-
-
-def generate_legacy_report(
-    comparison,
-    output_path: str,
-    bom_parts: Optional[Dict[str, "PartInfo"]] = None,
-) -> str:
-    """Сгенерировать Excel-отчёт для одной комплектации (старый формат)."""
-    from burlak_parser.bom_parser import PartInfo
-
-    workbook = xlsxwriter.Workbook(output_path)
-
-    header_fmt = workbook.add_format({
-        'bold': True, 'bg_color': '#4472C4', 'font_color': 'white',
-        'border': 1, 'text_wrap': True, 'align': 'center',
-        'valign': 'vcenter', 'font_size': 11,
-    })
-    bom_only_fmt = workbook.add_format({
-        'border': 1, 'bg_color': '#FFF2CC', 'text_wrap': True,
-        'valign': 'vcenter', 'font_size': 10,
-    })
-    cards_only_fmt = workbook.add_format({
-        'border': 1, 'bg_color': '#D9E2F3', 'text_wrap': True,
-        'valign': 'vcenter', 'font_size': 10,
-    })
-    qty_mismatch_fmt = workbook.add_format({
-        'border': 1, 'bg_color': '#FCE4EC', 'text_wrap': True,
-        'valign': 'vcenter', 'font_size': 10,
-    })
-    cell_num_fmt = workbook.add_format({
-        'border': 1, 'align': 'center', 'valign': 'vcenter',
-        'num_format': '0.00', 'font_size': 10,
-    })
-    cell_fmt = workbook.add_format({
-        'border': 1, 'text_wrap': True, 'valign': 'vcenter', 'font_size': 10,
-    })
-
-    ws = workbook.add_worksheet('Расхождения')
-    ws.freeze_panes(1, 0)
-    headers = ['Каталожный номер', 'Название (кит.)', 'Название (англ.)',
-               'Кол-во по BOM', 'Кол-во по картам', 'Номера операционных карт', 'Тип ошибки']
-    widths = [22, 30, 30, 14, 14, 45, 20]
-    for ci, (h, w) in enumerate(zip(headers, widths)):
-        ws.set_column(ci, ci, w)
-        ws.write(0, ci, h, header_fmt)
-    ws.set_row(0, 30)
-
-    for ri, disc in enumerate(comparison.discrepancies, 1):
-        if disc.discrepancy_type == DiscrepancyType.ONLY_IN_BOM:
-            fmt = bom_only_fmt
-        elif disc.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS:
-            fmt = cards_only_fmt
-        else:
-            fmt = qty_mismatch_fmt
-        ws.write(ri, 0, disc.part_number, fmt)
-        ws.write(ri, 1, disc.name_cn, fmt)
-        ws.write(ri, 2, disc.name_en, fmt)
-        ws.write(ri, 3, disc.qty_bom, cell_num_fmt)
-        ws.write(ri, 4, disc.qty_cards, cell_num_fmt)
-        ws.write(ri, 5, ', '.join(disc.card_numbers), fmt)
-        ws.write(ri, 6, disc.discrepancy_type, fmt)
-
-    if bom_parts:
-        ws_bom = workbook.add_worksheet('Все детали BOM')
-        ws_bom.freeze_panes(1, 0)
-        bom_headers = ['Каталожный номер', 'Название (кит.)', 'Название (англ.)', 'Количество']
-        bom_widths = [22, 30, 30, 14]
-        for ci, (h, w) in enumerate(zip(bom_headers, bom_widths)):
-            ws_bom.set_column(ci, ci, w)
-            ws_bom.write(0, ci, h, header_fmt)
-        for ri, (pn, part) in enumerate(sorted(bom_parts.items()), 1):
-            # Используем оригинальный формат номера из BOM (с тире и т.д.)
-            original_no = part.part_number if part.part_number else pn
-            ws_bom.write(ri, 0, original_no, cell_fmt)
-            ws_bom.write(ri, 1, part.name_cn, cell_fmt)
-            ws_bom.write(ri, 2, part.name_en, cell_fmt)
-            ws_bom.write(ri, 3, part.quantity, cell_num_fmt)
-
-    workbook.close()
     return output_path
 
 

@@ -626,7 +626,7 @@ class TestSplitCardsToFiles:
 
         class MockSplitter:
             def split_many_parallel(self, tasks):
-                return (["out1.xlsx", "out2.xlsx"], [])
+                return (["out1.xlsx", "out2.xlsx"], [], 0, [], {})
 
         monkeypatch.setattr(
             splitter_mod, "CardSplitter",
@@ -682,7 +682,7 @@ class TestSplitCardsToFiles:
             _rmtree(tmpdir)
 
     def test_corrupted_files_none_case(self, monkeypatch, tmp_path):
-        """cards_data.corrupted_files is None → else branch (line 990)."""
+        """cards_data.corrupted_files defaults to empty list, gets populated on error."""
         from burlak_parser import splitter as splitter_mod
 
         class MockSplitter:
@@ -694,19 +694,17 @@ class TestSplitCardsToFiles:
             lambda **kw: MockSplitter(),
         )
 
-        # CardsData с corrupted_files=None (по умолчанию)
         result = CardParseResult(
             card_number="C030", file_path="test.xlsx",
             sheets=[CardSheetInfo("C030", "S1", has_data=True)],
             parts=[], aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
-        assert cd.corrupted_files is None, "Default should be None"
+        assert cd.corrupted_files == [], "Default should be empty list"
         tmpdir = str(tmp_path)
         try:
             files = split_cards_to_files(cd, tmpdir, max_workers=1)
             assert files == []
-            # Должно быть установлено в list (line 990)
             assert cd.corrupted_files == ["test.xlsx"]
         finally:
             _rmtree(tmpdir)
@@ -828,7 +826,7 @@ class TestCardsData:
         assert cd.total_sheets_processed == 0
         assert cd.total_sheets_skipped == 0
         assert cd.service_files_skipped == 0
-        assert cd.corrupted_files is None
+        assert cd.corrupted_files == []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1342,17 +1340,16 @@ class TestCollectRawRowsBoundariesExtended:
         for i in range(500):
             ws.cell(row=2 + i, column=1, value=f"P{i:03d}")
             ws.cell(row=2 + i, column=2, value=1)
-        # R502 — за пределами max_data_row (header_row=1, +500=501)
+        # R502 — now included since 500-row limit was removed
         ws.cell(row=502, column=1, value="P500")
         ws.cell(row=502, column=2, value=999)
         es = ExcelSheet(ws, "openpyxl")
 
         rows = _collect_raw_rows(es, 1, 502, 2, 1, 2, 0, "test.xlsx")
-        # Должны собрать 500 строк (R2-R501)
-        # R502 за пределами max_data_row=501 → не включается
-        assert len(rows) == 500, f"Expected 500 parts (max_data_row=501), got {len(rows)}"
+        # No 500-row limit — all 501 rows collected
+        assert len(rows) == 501, f"Expected 501 parts (no limit), got {len(rows)}"
         assert rows[0][1] == "P000"
-        assert rows[499][1] == "P499"
+        assert rows[500][1] == "P500"
 
     def test_row_has_part_no_keyword_exact_50_chars(self):
         """Ячейка длины ровно 50 символов с PART_NO_KEYWORD — НЕ триггерит границу."""
@@ -1650,7 +1647,7 @@ class TestCollectAllTables:
         assert "Q001" in pns
 
     def test_max_tables_limit(self):
-        """Loop should stop at max_tables=10 even if more headers exist."""
+        """Loop should stop at max_tables even if more headers exist."""
         # Create 12 identical headers
         rows = [["序号", "零部件代号"]]
         for i in range(12):
@@ -1661,12 +1658,11 @@ class TestCollectAllTables:
             rows.append(["序号", "零部件代号"])  # next header
         es = _make_excel_sheet(rows)
         parts = _collect_all_tables(es, len(rows), 2, "test.xlsx")
-        # Should not crash, should find at most 10 tables (10 part numbers)
-        assert len(parts) <= 10, f"Expected at most 10 tables, got {len(parts)} parts"
-        assert len(parts) == 10, f"Expected exactly 10 parts (max_tables=10), got {len(parts)}"
+        # Should not crash, should find all 12 tables (limit is now 200)
+        assert len(parts) == 12, f"Expected exactly 12 parts, got {len(parts)}"
         pns = [p[0] for p in parts]
         assert "P000" in pns
-        assert "P009" in pns
+        assert "P011" in pns
 
     def test_all_tables_empty(self):
         """When all tables have no valid parts, returns empty list."""

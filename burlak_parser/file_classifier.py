@@ -28,7 +28,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from burlak_parser.heuristic_analyzer import (
     extract_card_number_from_filepath,
@@ -46,11 +46,21 @@ SERVICE_FILE_KEYWORDS = [
     "填写说明",    # инструкция по заполнению / fill instructions
     "工艺现场工时汇总清单",  # сводка трудозатрат / work hours summary
     "工时汇总",    # сводка трудозатрат (краткая форма)
+    "对比",        # сравнение / comparison (служебный файл сравнения)
     "обложка",     # обложка
     "содержание",  # содержание
     "cover",       # cover page
     "toc",         # table of contents
     "template",    # template
+]
+
+# Ключевые слова операционных карт (файлы с этими словами — всегда ОК)
+OPERATIONAL_CARD_KEYWORDS = [
+    "作业指导书",   # BAIC: рабочая инструкция / work instruction
+    "作业要领书",   # аналогичное / similar
+    "操作指导",     # инструкция по операции
+    "工艺卡",       # технологическая карта
+    "工序卡",       # карта工序
 ]
 
 
@@ -98,11 +108,19 @@ class FileClassification:
     should_split: bool  # нужно ли разделять на листы
     should_parse_parts: bool  # нужно ли парсить детали
     operation_number: str = ""  # номер операции (если определён)
-    is_final_check: bool = False  # устаревшее поле, всегда False
 
 
 def classify_file(file_path: str) -> FileClassification:
     """Классифицировать файл Excel.
+
+    Порядок приоритетов (КЛЮЧЕВОЕ: служебные ключевые слова ПЕРВЫЕ):
+      1. Служебные ключевые слова (封面, 目录, 空表 и т.д.) → служебный
+         Даже если имя содержит "作业指导书" или номер операции.
+         Пример: "CP7作业指导书封面及目录.xlsx" → служебный (содержит "封面"+"目录")
+      2. Ключевые слова операционных карт (作业指导书 и т.д.) → карта
+      3. Номер операции / паттерн карты → карта
+      4. Эвристика (номер карты в имени) → карта
+      5. Неизвестный формат → пропуск
 
     Args:
         file_path: Полный путь к .xlsx/.xls файлу.
@@ -114,40 +132,45 @@ def classify_file(file_path: str) -> FileClassification:
     file_name = os.path.splitext(basename)[0]
     parent_dir = os.path.basename(os.path.dirname(file_path))
 
-    # Проверяем служебные ключевые слова
+    # Проверяем служебные ключевые слова (ВЫСШИЙ ПРИОРИТЕТ)
     is_service_file = _contains_service_keywords(file_name)
+
+    # Проверяем ключевые слова операционных карт (作业指导书 и т.д.)
+    is_op_card_keyword = _contains_operational_card_keyword(file_name)
 
     # Пытаемся извлечь номер операции из имени файла
     operation_number = _extract_operation_number(file_name)
-
-    # Определяем, является ли файл операционной картой (проверяем по номеру операции)
     has_card_pattern = bool(operation_number)
 
     # Определяем тип файла
-    if has_card_pattern or operation_number:
-        # Файл с номером операции или паттерном карты — всегда операционная карта
-        is_operational = True
-        should_parse = True
-        should_split = True
-        is_service_file = False  # номер операции перекрывает ключевые слова
-    elif is_service_file:
-        # Служебный файл без номера операции — не парсим детали, не разделяем
+    if is_service_file:
+        # Служебный файл — ВСЕГДА служебный, даже если содержит
+        # "作业指导书" или номер операции в имени.
+        # Пример: "CP7作业指导书封面及目录.xlsx" → служебный
         is_operational = False
         should_parse = False
         should_split = False
+    elif is_op_card_keyword:
+        # Файл с ключевым словом операционной карты — операционная карта
+        is_operational = True
+        should_parse = True
+        should_split = True
+    elif operation_number:
+        # Файл с номером операции — операционная карта
+        is_operational = True
+        should_parse = True
+        should_split = True
     else:
-        # Неизвестный формат — пробуем извлечь номер карты эвристически
+        # Дополнительная эвристика: ищем номер карты эвристически
         card_no = extract_card_number_from_filepath(file_path)
         if card_no and card_no != file_name:
-            # Имя содержит номер карты — считаем операционной
             logger.debug("Файл определён как операционная карта (эвристика): %s", basename)
             is_operational = True
             should_parse = True
             should_split = True
             operation_number = card_no
         else:
-            # Дополнительная эвристика: ищем паттерн букв+цифр в любой части имени
-            # Для файлов с изменённой кодировкой, напр. "5. G01Pш╜жщЧич║┐х╖ешЙ║хНб"
+            # Альтернативная эвристика: паттерн букв+цифр в любой части имени
             alt_card_no = _find_card_number_in_name(file_name)
             if alt_card_no:
                 logger.debug(
@@ -171,7 +194,6 @@ def classify_file(file_path: str) -> FileClassification:
         parent_folder=parent_dir,
         is_operational_card=is_operational,
         is_service_file=is_service_file,
-        is_final_check=False,
         should_split=should_split,
         should_parse_parts=should_parse,
         operation_number=operation_number,
@@ -210,6 +232,15 @@ def _contains_service_keywords(file_name: str) -> bool:
             return True
         # Английские ключевые слова
         if kw in name_lower.replace("_", " ").replace("-", " "):
+            return True
+    return False
+
+
+def _contains_operational_card_keyword(file_name: str) -> bool:
+    """Проверить, содержит ли имя файла ключевое слово операционной карты."""
+    name_lower = file_name.lower()
+    for kw in OPERATIONAL_CARD_KEYWORDS:
+        if kw in name_lower:
             return True
     return False
 

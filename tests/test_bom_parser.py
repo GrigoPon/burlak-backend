@@ -274,8 +274,8 @@ class TestParseBomG01Style:
 class TestParseBomAttachmentSheet:
     """Лист附件 (attachment) с одной qty-колонкой, без config columns.
 
-    Attachment sheet обрабатывается ВТОРЫМ (после основного BOM-листа),
-    поэтому его части добавляются только в global_names, а не в config_quantities.
+    Attachment sheet теперь тоже добавляет parts и quantities в основной BOM.
+    Его части попадают в отдельную конфигурацию (имя листа) И в global_names.
     """
 
     @pytest.fixture
@@ -303,35 +303,33 @@ class TestParseBomAttachmentSheet:
         return _create_xlsx(data)
 
     def test_attachment_sheet_adds_global_names(self, attachment_xlsx: str):
-        """Attachment sheet adds its parts to global_names (not configs).
-
-        Второй лист (零部件附件) обрабатывается после primary_bom_found=True →
-        его части попадают только в global_names, не в bom.parts.
-        """
+        """Attachment sheet adds its parts to global_names AND bom.parts."""
         bom = parse_bom(attachment_xlsx)
-        # Attachment parts are in global_names, not bom.parts
+        # Attachment parts are in global_names
         assert "P004" in bom.global_names, "Attachment part missing from global_names"
         assert "P005" in bom.global_names, "Attachment part missing from global_names"
-        # Parts from PRIMARY sheet go to bom.parts
+        # Parts from BOTH sheets go to bom.parts
         assert "P001" in bom.parts, "Primary part missing from bom.parts"
-        # Attachment parts NOT in bom.parts (second sheet, only global_names)
-        assert "P004" not in bom.parts, "Attachment part should not be in bom.parts (second sheet)"
+        assert "P004" in bom.parts, "Attachment part should now be in bom.parts"
 
     def test_primary_configs_only(self, attachment_xlsx: str):
-        """Only primary sheet contributes configs."""
+        """Both primary and attachment sheets contribute configs."""
         bom = parse_bom(attachment_xlsx)
-        # Primary sheet has 3 config columns: 舒享版-全黑, 舒享版-黑米, 奢享版-全黑
-        assert len(bom.config_names) == 3, f"Expected 3 configs, got {bom.config_names}"
-        # Attachment sheet name should NOT become a config (processed second)
-        assert "零部件附件" not in bom.config_names, "Attachment sheet should not add a config"
+        # Primary sheet has 3 config columns + attachment sheet adds 1 = 4 total
+        assert len(bom.config_names) == 4, f"Expected 4 configs, got {bom.config_names}"
+        # Attachment sheet creates a config from its sheet name
+        assert "零部件附件" in bom.config_names, "Attachment sheet should add its own config"
 
     def test_primary_parts_in_config(self, attachment_xlsx: str):
-        """Primary sheet parts should be in config quantities."""
+        """Primary and attachment sheet parts are in their respective configs."""
         bom = parse_bom(attachment_xlsx)
-        cn = bom.config_names[0]
-        assert "P001" in bom.config_quantities[cn], "Primary part missing from config"
-        # P004 from attachment should NOT be in config quantities
-        assert "P004" not in bom.config_quantities[cn], "Attachment part should not be in config"
+        # Primary sheet configs
+        for cn in bom.config_names:
+            if cn != "零部件附件":
+                assert "P001" in bom.config_quantities[cn], "Primary part missing from config"
+        # Attachment sheet config
+        assert "P004" in bom.config_quantities["零部件附件"], "Attachment part should be in attachment config"
+        assert bom.config_quantities["零部件附件"]["P004"] == 5.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -339,11 +337,11 @@ class TestParseBomAttachmentSheet:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestParseBomMultiSheet:
-    """Multiple BOM sheets: only the first provides configs, others just add names.
+    """Multiple BOM sheets: ALL sheets contribute parts and quantities.
 
     Важно: оба листа распознаются как BOM-кандидаты (有config columns + part_no + name).
-    焊装BOM — первый → даёт конфиги и global_names.
-    涂装BOM — второй → только global_names.
+    焊装BOM и 涂装BOM — оба дают конфиги, parts и global_names.
+    Если part_number встречается на нескольких листах — количества суммируются.
     """
 
     @pytest.fixture
@@ -373,13 +371,11 @@ class TestParseBomMultiSheet:
 
     def test_both_sheets_parts_collected(self, multi_xlsx: str):
         bom = parse_bom(multi_xlsx)
-        # First sheet parts go to bom.parts (焊装BOM is primary)
+        # BOTH sheets' parts go to bom.parts (all sheets now contribute)
         assert "W001" in bom.parts, "First sheet part missing"
-        # Second sheet parts go to global_names only (涂装BOM processed after primary_bom_found)
-        assert "P001" in bom.global_names, "Second sheet part missing from global_names"
-        assert "P001" not in bom.parts, "Second sheet part should NOT be in bom.parts"
-        # Total in bom.parts: only 3 parts from 焊装BOM
-        assert len(bom.parts) == 3, f"Expected 3 parts (first sheet only), got {len(bom.parts)}"
+        assert "P001" in bom.parts, "Second sheet part missing from bom.parts"
+        # Total: 3 from 焊装BOM + 3 from 涂装BOM = 6 parts
+        assert len(bom.parts) == 6, f"Expected 6 parts (both sheets), got {len(bom.parts)}"
 
     def test_second_sheet_adds_global_names(self, multi_xlsx: str):
         bom = parse_bom(multi_xlsx)
@@ -387,12 +383,40 @@ class TestParseBomMultiSheet:
         cn, _ = bom.global_names["P001"]
         assert "Painted" in cn, f"Expected 'Painted Part 1', got '{cn}'"
 
-    def test_second_sheet_does_not_add_to_configs(self, multi_xlsx: str):
+    def test_second_sheet_adds_to_configs(self, multi_xlsx: str):
         bom = parse_bom(multi_xlsx)
-        # P001 from 涂装BOM should NOT be in config quantities (second sheet only adds names)
+        # P001 from 涂装BOM SHOULD be in config quantities (both sheets contribute)
         for cn in bom.config_names:
-            assert "P001" not in bom.config_quantities[cn], \
-                f"P001 should not be in {cn} config (second sheet)"
+            if "舒享版" in cn:
+                assert bom.config_quantities[cn].get("P001") == 1.0, \
+                    f"P001 should have qty=1 in {cn} from 涂装BOM"
+            if "奢享版" in cn:
+                assert bom.config_quantities[cn].get("P001") == 2.0, \
+                    f"P001 should have qty=2 in {cn} from 涂装BOM"
+
+    def test_same_part_across_sheets_sums_quantities(self):
+        """Same part number on two sheets: quantities should be summed."""
+        data = {
+            "焊装BOM": [
+                ["序号", "零部件件号", "零件名称", "舒享版", "奢享版"],
+                ["1", "SH001", "Shared Part", "2", "1"],
+                ["2", "W002", "Weld Only", "1", "1"],
+                ["3", "W003", "Weld Only 2", "1", "0"],
+            ],
+            "涂装BOM": [
+                ["序号", "零部件件号", "零件名称", "舒享版", "奢享版"],
+                ["1", "SH001", "Shared Part", "3", "2"],
+                ["2", "P002", "Paint Only", "1", "0"],
+                ["3", "P003", "Paint Only 2", "0", "1"],
+            ],
+        }
+        path = _create_xlsx(data)
+        bom = parse_bom(path)
+        # SH001: 焊装BOM(2,1) + 涂装BOM(3,2) = (5,3)
+        assert bom.config_quantities["舒享版"]["SH001"] == 5.0, \
+            f"Expected 5.0 (2+3), got {bom.config_quantities['舒享版']['SH001']}"
+        assert bom.config_quantities["奢享版"]["SH001"] == 3.0, \
+            f"Expected 3.0 (1+2), got {bom.config_quantities['奢享版']['SH001']}"
 
 
 # ═══════════════════════════════════════════════════════════════════════

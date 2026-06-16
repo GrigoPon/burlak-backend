@@ -40,7 +40,6 @@ class TestFileClassification:
             parent_folder=".",
             is_operational_card=True,
             is_service_file=False,
-            is_final_check=False,
             should_split=True,
             should_parse_parts=True,
         )
@@ -54,7 +53,6 @@ class TestFileClassification:
             parent_folder="to",
             is_operational_card=True,
             is_service_file=False,
-            is_final_check=False,
             should_split=True,
             should_parse_parts=True,
             operation_number="A001",
@@ -76,7 +74,6 @@ class TestFileClassification:
             parent_folder=".",
             is_operational_card=False,
             is_service_file=True,
-            is_final_check=False,
             should_split=False,
             should_parse_parts=False,
         )
@@ -137,18 +134,25 @@ class TestClassifyOperational:
         assert fc.operation_number == "1234"
 
     def test_digit_start_overrides_service_keyword(self):
-        """Operation number overrides service keyword."""
+        """Service keyword takes priority over operation number.
+
+        '封面' in filename → service file, even though '038' is an operation number.
+        This ensures files like 'CP7作业指导书封面及目录.xlsx' are caught as service.
+        """
         fc = classify_file("038-封面.xlsx")
-        assert fc.is_operational_card is True
-        assert fc.is_service_file is False  # overridden
-        assert fc.should_parse_parts is True
+        assert fc.is_operational_card is False
+        assert fc.is_service_file is True  # service keyword wins
+        assert fc.should_parse_parts is False
 
     def test_as_overrides_service_keyword(self):
-        """AS pattern overrides service keyword."""
+        """Service keyword takes priority over AS pattern.
+
+        '封面' in filename → service file, even with AS pattern.
+        """
         fc = classify_file("G01-A-AS-05001-封面.xlsx")
-        assert fc.is_operational_card is True
-        assert fc.is_service_file is False
-        assert fc.should_parse_parts is True
+        assert fc.is_operational_card is False
+        assert fc.is_service_file is True  # service keyword wins
+        assert fc.should_parse_parts is False
 
     def test_file_with_spaces(self):
         """File with spaces and mixed content (starts with card pattern)."""

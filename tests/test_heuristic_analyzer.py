@@ -1592,7 +1592,11 @@ class TestEdgeCasesCoverage:
 
 class TestDetectConfigColumnsExtended:
     def test_vin_boundary_detected(self):
-        """VIN boundary: numeric configs, then non-numeric column"""
+        """VIN boundary: numeric + non-numeric columns both included (union approach).
+
+        Universal parser now takes the union of all valid config columns.
+        C4, C5 have numeric values (1, 2) and C6 has S/- markers — all are valid configs.
+        """
         data = [
             ["序号", "零部件件号", "名称", "舒享版", "奢享版", "VIN", "配置代码"],
             ["1", "P001", "Part1", "1", "2", "S", "ABC"],
@@ -1601,10 +1605,10 @@ class TestDetectConfigColumnsExtended:
         ws = _make_ws(data)
         col_types = {"part_no": 2, "name_cn": 3}
         configs = HeuristicAnalyzer.detect_config_columns(ws, [1], col_types)
-        # Should stop at C6 (VIN column is non-numeric)
+        # Union: both numeric (C4, C5) and S/- (C6) columns are valid configs
         assert 4 in configs, f"C4 (舒享版) should be in configs, got {configs}"
         assert 5 in configs, f"C5 (奢享版) should be in configs, got {configs}"
-        assert 6 not in configs, f"C6 (VIN) should NOT be in configs (first non-numeric), got {configs}"
+        assert 6 in configs, f"C6 (VIN S/-) should be in configs (union approach), got {configs}"
 
     def test_no_numeric_values_in_candidates(self):
         """Candidate columns have no numeric data → fallback: all candidates returned"""
