@@ -296,12 +296,7 @@ class TestCollectAllTablesEdgeCoverage:
     """_collect_all_tables: header_row < start_search и total_part_nos_collected==0."""
 
     def test_header_already_processed_breaks(self):
-        """find_part_table возвращает header_row < start_search → break (line 556).
-
-        Эмулируем: первая таблица найдена, данные собраны, start_search = last_row+1.
-        find_part_table снова находит ТОТ ЖЕ заголовок (ниже start_search).
-        """
-        # Создаём лист с 3+ пустыми строками после данных, а потом ещё данные
+        """find_part_table returns header_row < start_search → break."""
         es = _make_excel_sheet([
             ["序号", "零部件代号"],  # R1 — header
             ["1", "P001"],         # R2 — data
@@ -310,21 +305,17 @@ class TestCollectAllTablesEdgeCoverage:
             [None, None],          # R5 — 3 empty rows → boundary
             ["1", "NOT_DATA"],    # R6 — looks like data but starts a 'table' below
         ])
-        parts = _collect_all_tables(es, 6, 2, "test.xlsx")
-        # First table: R1-2, last_data_row=2, start_search=3
-        # find_part_table(ws, start_row=3) → finds what? R1 has "序号, 零部件代号" which IS a header.
-        # But start_row=3, so it should scan from R3. R3-R5 are empty. R6 has "1", "NOT_DATA"
-        # which might not look like a header (no keyword match). So find_part_table returns R1 again.
-        # Then header_row=1 < start_search=3 → break at line 556.
+        parts, table_count = _collect_all_tables(es, 6, 2, "test.xlsx")
         assert len(parts) == 1, f"Expected 1 part (second table skipped), got {len(parts)}"
+        assert table_count == 1
         assert parts[0][0] == "P001"
 
     def test_no_valid_parts_log_message(self):
-        """total_part_nos_collected == 0 → log message (line 608)."""
-        # Лист без таблиц → find_part_table вернёт None → parts=[] → total=0
+        """total_part_nos_collected == 0 → log message."""
         es = _make_excel_sheet([["Текст без таблиц деталей"]])
-        parts = _collect_all_tables(es, 1, 1, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 1, 1, "test.xlsx")
         assert parts == []
+        assert table_count == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1530,20 +1521,21 @@ class TestExtractCardNumber:
 
 class TestCollectAllTables:
     def test_single_table(self):
-        """T1L card: single table with 3 parts."""
+        """Single table with 3 parts."""
         es = _make_excel_sheet([
             ["物料编码", "零件名称", "数量"],
             ["P001", "Part1", "1"],
             ["P002", "Part2", "2"],
             ["P003", "Part3", "1"],
         ])
-        parts = _collect_all_tables(es, 4, 3, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 4, 3, "test.xlsx")
         assert len(parts) == 3
+        assert table_count == 1
         assert parts[0][0] == "P001"
         assert parts[1][0] == "P002"
 
     def test_multi_table(self):
-        """SWM card: 2 tables separated by a gap with header."""
+        """2 tables separated by a gap with header."""
         es = _make_excel_sheet([
             ["序号\nСерийный номер", "零部件代号\nКод детали"],
             ["1", "P001"],
@@ -1555,8 +1547,9 @@ class TestCollectAllTables:
             ["1", "Q001"],
             ["2", "Q002"],
         ])
-        parts = _collect_all_tables(es, 9, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 9, 2, "test.xlsx")
         assert len(parts) == 4, f"Expected 4 parts from 2 tables, got {len(parts)}"
+        assert table_count == 2
         pns = [p[0] for p in parts]
         assert "P001" in pns
         assert "P002" in pns
@@ -1571,26 +1564,18 @@ class TestCollectAllTables:
             ["序号", "零部件代号"],  # New header → boundary
             ["1", "Q001"],
         ])
-        parts = _collect_all_tables(es, 4, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 4, 2, "test.xlsx")
         # First table: P001. Second table: should continue past the boundary.
-        # The boundary detection stops at R3, then _collect_all_tables starts
-        # from R4 (last_data_row=2, start_search=3+1=4... wait)
-        # _collect_raw_rows for first table: header=R1, scans R2.
-        # R2 has "1", "P001" → collected.
-        # R3 is new header → boundary stop. raw_rows=[(2, "P001", ...)]
-        # last_data_row=2, start_search=3
-        # find_part_table(ws, start_row=3) → finds R3 (header)
-        # header_row=3 >= start_search=3 → OK
-        # _collect_raw_rows for second table: header=R3, scans R4
-        # R4 has "1", "Q001" → collected.
         # Both tables found.
         assert len(parts) == 2, f"Expected 2 parts from 2 tables, got {len(parts)}"
+        assert table_count == 2
 
     def test_no_tables(self):
         """Sheet without part tables returns empty."""
         es = _make_excel_sheet([["Just", "Text"]])
-        parts = _collect_all_tables(es, 1, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 1, 2, "test.xlsx")
         assert parts == []
+        assert table_count == 0
 
     def test_empty_table_skipped(self):
         """Table with no valid parts should be skipped."""
@@ -1599,9 +1584,10 @@ class TestCollectAllTables:
             ["AB", "Too Short"],  # invalid part number
             ["P001", "Valid"],
         ])
-        parts = _collect_all_tables(es, 3, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 3, 2, "test.xlsx")
         # "AB" is invalid (too short), "P001" is valid
         assert len(parts) == 1, f"Expected 1 valid part, got {len(parts)}"
+        assert table_count == 1
         assert parts[0][0] == "P001"
 
     def test_three_tables(self):
@@ -1623,8 +1609,9 @@ class TestCollectAllTables:
             ["1", "R001"],
             ["2", "R002"],
         ])
-        parts = _collect_all_tables(es, 15, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 15, 2, "test.xlsx")
         assert len(parts) == 6, f"Expected 6 parts from 3 tables, got {len(parts)}"
+        assert table_count == 3
         pns = [p[0] for p in parts]
         assert pns == ["P001", "P002", "Q001", "Q002", "R001", "R002"], \
             f"Expected ordered parts, got {pns}"
@@ -1640,8 +1627,9 @@ class TestCollectAllTables:
             ["序号", "零部件代号"],     # R6 — table 2 header
             ["1", "Q001"],
         ])
-        parts = _collect_all_tables(es, 7, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 7, 2, "test.xlsx")
         assert len(parts) == 2, f"Expected 2 parts from 2 tables, got {len(parts)}"
+        assert table_count == 2
         pns = [p[0] for p in parts]
         assert "P001" in pns
         assert "Q001" in pns
@@ -1657,9 +1645,10 @@ class TestCollectAllTables:
             rows.append([None, None])
             rows.append(["序号", "零部件代号"])  # next header
         es = _make_excel_sheet(rows)
-        parts = _collect_all_tables(es, len(rows), 2, "test.xlsx")
-        # Should not crash, should find all 12 tables (limit is now 200)
+        parts, table_count = _collect_all_tables(es, len(rows), 2, "test.xlsx")
+        # Should not crash, should find all 12 data tables + 1 trailing empty header
         assert len(parts) == 12, f"Expected exactly 12 parts, got {len(parts)}"
+        assert table_count == 13, f"Expected 13 tables (12 data + 1 empty trailing header), got {table_count}"
         pns = [p[0] for p in parts]
         assert "P000" in pns
         assert "P011" in pns
@@ -1675,8 +1664,9 @@ class TestCollectAllTables:
             ["序号", "零部件代号"],
             ["XY", "Also Short"],  # invalid (too short)
         ])
-        parts = _collect_all_tables(es, 7, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 7, 2, "test.xlsx")
         assert parts == [], f"Expected empty list (no valid parts), got {len(parts)}"
+        assert table_count == 2
 
     def test_tables_staggered_positions(self):
         """Tables at different row positions with staggered headers."""
@@ -1693,8 +1683,9 @@ class TestCollectAllTables:
             ["序号", "零部件代号"],     # R10 — table 2 deeper
             ["1", "Q001"],
         ])
-        parts = _collect_all_tables(es, 11, 2, "test.xlsx")
+        parts, table_count = _collect_all_tables(es, 11, 2, "test.xlsx")
         assert len(parts) == 2, f"Expected 2 parts from 2 staggered tables, got {len(parts)}"
+        assert table_count == 2
         pns = [p[0] for p in parts]
         assert "P001" in pns
         assert "Q001" in pns

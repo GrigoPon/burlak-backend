@@ -2,7 +2,7 @@
 
 Покрытие:
   - PartInfo, BOMData (data structures)
-  - parse_bom с T1L-стилем (много комплектаций)
+  - parse_bom с multi-config стилем (много комплектаций)
   - parse_bom с одной qty-колонкой (спец-листы附件)
   - parse_bom: мульти-листовая обработка, global_names
   - parse_bom: служебные листы (skip)
@@ -159,17 +159,17 @@ class TestBOMData:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  3. parse_bom — T1L-style BOM (multi-config)
+#  3. parse_bom — Multi-config BOM
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestParseBomT1LStyle:
-    """T1L BOM: headers at row 3, part_no=C2, name=C3, 4 config columns."""
+class TestParseBomMultiConfigStyle:
+    """BOM with multi-config structure: headers at row 3, part_no=C2, name=C3, 4 config columns."""
 
     @pytest.fixture
-    def t1l_xlsx(self) -> str:
-        """Create a T1L-style BOM file with 4 configs and 5 parts."""
+    def multi_config_xlsx(self) -> str:
+        """Create a multi-config BOM file with 4 configs and 5 parts."""
         data = [
-            ["T1L WE地区 CKD BOM CT1260301", None, None, None, None, None, None, None],
+            ["CKD BOM CT1260301", None, None, None, None, None, None, None],
             [None, None, None, None, None, None, None, None],
             ["序号", "零部件件号", "零部件名称", "CPAC编码",
              "舒享版-全黑内饰", "舒享版-黑米内饰", "奢享版-全黑内饰", "奢享版-黑米内饰"],
@@ -181,19 +181,19 @@ class TestParseBomT1LStyle:
         ]
         return _create_xlsx({"总装BOM": data})
 
-    def test_t1l_bom_parsed(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_bom_parsed(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         assert len(bom.config_names) == 4, f"Expected 4 configs, got {len(bom.config_names)}: {bom.config_names}"
         assert len(bom.parts) == 5, f"Expected 5 parts, got {len(bom.parts)}"
         assert len(bom.global_names) == 5, "All 5 parts should have names"
 
-    def test_t1l_part_numbers(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_part_numbers(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         expected_parts = {"132000184AA", "551002664AA", "5306200ED001", "Q146Z0825F36", "G086A001"}
         assert set(bom.parts.keys()) == expected_parts, f"Got {set(bom.parts.keys())}"
 
-    def test_t1l_config_quantities(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_quantities(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         # Check a specific part quantity in a specific config
         # 5306200-ED001 should have qty=2 in 奢享版 configs, qty=1 in 舒享版
         for config_name in bom.config_names:
@@ -208,21 +208,21 @@ class TestParseBomT1LStyle:
                 else:
                     assert bom.config_quantities[config_name].get("G086A001", 0) == 2.0
 
-    def test_t1l_config_names(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_names(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         expected_configs = {"舒享版-全黑内饰", "舒享版-黑米内饰", "奢享版-全黑内饰", "奢享版-黑米内饰"}
         config_set = set(bom.config_names)
         assert config_set == expected_configs, f"Got {config_set}"
 
-    def test_t1l_part_info_applicable_configs(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_applicable_configs(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         pn = "132000184AA"
         part = bom.parts[pn]
         assert len(part.applicable_configs) == 4, \
             f"Part {pn} should be in all 4 configs, got {part.applicable_configs}"
 
-    def test_t1l_global_names(self, t1l_xlsx: str):
-        bom = parse_bom(t1l_xlsx)
+    def test_multi_config_global_names(self, multi_config_xlsx: str):
+        bom = parse_bom(multi_config_xlsx)
         name_cn, name_en = bom.global_names.get("132000184AA", ("", ""))
         assert "变速箱" in name_cn, f"Expected '变速箱', got '{name_cn}'"
 
@@ -231,11 +231,11 @@ class TestParseBomT1LStyle:
 #  4. parse_bom — Russian G01-style BOM
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestParseBomG01Style:
-    """G01 Russian BOM: headers at row 1, Russian/Chinese headers."""
+class TestParseBomRussianStyle:
+    """Russian BOM: headers at row 1, Russian/Chinese headers."""
 
     @pytest.fixture
-    def g01_xlsx(self) -> str:
+    def russian_xlsx(self) -> str:
         data = [
             ["序号\nСерийный номер", "零部件件号\nКод детали",
              "零部件名称\nНаименование", "系统\nСистема",
@@ -246,18 +246,18 @@ class TestParseBomG01Style:
         ]
         return _create_xlsx({"G01 BOM": data})
 
-    def test_g01_bom_parsed(self, g01_xlsx: str):
-        bom = parse_bom(g01_xlsx)
+    def test_russian_bom_parsed(self, russian_xlsx: str):
+        bom = parse_bom(russian_xlsx)
         assert len(bom.config_names) == 4, f"Expected 4 configs, got {bom.config_names}"
         assert len(bom.parts) == 3, f"Expected 3 parts, got {len(bom.parts)}"
 
-    def test_g01_part_no_clean(self, g01_xlsx: str):
-        bom = parse_bom(g01_xlsx)
+    def test_russian_part_no_clean(self, russian_xlsx: str):
+        bom = parse_bom(russian_xlsx)
         assert "5306200ED001" in bom.parts, "Part number not cleaned correctly"
         assert "5306200-ED001" not in bom.parts, "Original part number should be cleaned"
 
-    def test_g01_config_quantities(self, g01_xlsx: str):
-        bom = parse_bom(g01_xlsx)
+    def test_russian_config_quantities(self, russian_xlsx: str):
+        bom = parse_bom(russian_xlsx)
         # 5306200ED001: qty=1 in舒享版, 2 in奢享版
         for cn in bom.config_names:
             pn = "5306200ED001"

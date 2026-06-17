@@ -162,7 +162,7 @@ def compare_single_config(
         qty = cards_data.all_parts[part_no]
         card_numbers = _get_card_numbers(part_no, cards_data)
         # Используем оригинальный формат номера из карт (если сохранён)
-        original_no = cards_data.original_part_numbers.get(part_no, part_no) if hasattr(cards_data, 'original_part_numbers') else part_no
+        original_no = cards_data.original_part_numbers.get(part_no, part_no)
         discrepancies.append(Discrepancy(
             part_number=original_no,
             name_cn="",
@@ -263,7 +263,7 @@ def compare_single_config_cached(
         global_names = {}
 
     # Словарь оригинальных номеров из карт
-    cards_original = getattr(cards_data, 'original_part_numbers', {})
+    cards_original = cards_data.original_part_numbers
 
     # 1. Только в BOM — используем оригинальный формат из BOM
     only_in_bom = bom_part_numbers - cards_part_numbers
@@ -442,7 +442,7 @@ def compare_all_configs(
     # ВАЖНО: PartInfo.part_number = оригинальный формат из BOM (с тире и т.д.)
     config_bom_parts: Dict[str, Dict[str, PartInfo]] = {}
     # Глобальный словарь названий (все part-no из BOM, не только из комплектации)
-    global_names = getattr(bom, 'global_names', {}) or {}
+    global_names = bom.global_names or {}
     for config_name in bom.config_names:
         parts_for_config: Dict[str, PartInfo] = {}
         for part_no, qty in bom.config_quantities[config_name].items():
@@ -475,7 +475,7 @@ def compare_all_configs(
         # Извлекаем только нужные данные карт (без card_results — экономия ~80% pickle)
         cards_all_parts = cards_data.all_parts
         cards_part_sources = cards_data.part_sources
-        cards_original_part_numbers = getattr(cards_data, 'original_part_numbers', {})
+        cards_original_part_numbers = cards_data.original_part_numbers
 
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {}

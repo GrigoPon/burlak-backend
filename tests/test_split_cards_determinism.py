@@ -27,8 +27,8 @@ from burlak_parser.card_parser import (
     split_cards_to_files,
 )
 
-def _create_t1l_like_card(dir_path: str, prefix: str, sheets: int) -> str:
-    """Создать .xlsx с несколькими листами, имитирующими карты T1L.
+def _create_multi_sheet_card(dir_path: str, prefix: str, sheets: int) -> str:
+    """Создать .xlsx с несколькими листами, имитирующими операционные карты.
 
     Каждый лист содержит заголовок таблицы деталей и несколько строк данных.
     """
@@ -57,10 +57,10 @@ def card_dir(tmp_path_factory) -> str:
     """Создать временную директорию с 3 .xlsx картами (каждая по 2-4 листа)."""
     tmpdir = str(tmp_path_factory.mktemp("cards_det"))
     try:
-        # 3 файла с разным количеством листов (как в T1L)
-        _create_t1l_like_card(tmpdir, "001", 4)  # 4 операции
-        _create_t1l_like_card(tmpdir, "002", 2)  # 2 операции
-        _create_t1l_like_card(tmpdir, "003", 3)  # 3 операции
+        # 3 файла с разным количеством листов
+        _create_multi_sheet_card(tmpdir, "001", 4)  # 4 операции
+        _create_multi_sheet_card(tmpdir, "002", 2)  # 2 операции
+        _create_multi_sheet_card(tmpdir, "003", 3)  # 3 операции
     except Exception:
         pass
     yield tmpdir

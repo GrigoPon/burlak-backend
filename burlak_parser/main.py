@@ -17,7 +17,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from tqdm import tqdm
 

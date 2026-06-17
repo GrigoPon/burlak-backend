@@ -40,6 +40,12 @@ from burlak_parser.normalizer import (
     is_valid_part_number,
 )
 
+# Листы с мета-именами, которые НЕ создают конфигурации (单车用量, 发动机附件 и т.д.)
+_NON_CONFIG_SHEET_KEYWORDS = (
+    "单车用量", "组件数量", "发动机附件",
+    "Расход на один автомобиль", "количество компонентов",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,115 +88,171 @@ def parse_bom(file_path: str) -> BOMData:
     except Exception as e:
         logger.warning("Не удалось загрузить обычным режимом (%s), пробуем read_only", e)
         wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-    sheet_names = wb.sheetnames
 
-    # ── Результаты, агрегированные по всем листам ──
-    all_parts: Dict[str, PartInfo] = {}
-    all_config_quantities: Dict[str, Dict[str, float]] = {}
-    all_config_names: List[str] = []
-    all_global_names: Dict[str, Tuple[str, str]] = {}
-    seen_config_names: Dict[str, str] = {}  # config_name -> нормализованный оригинал
+    try:
+        sheet_names = wb.sheetnames
 
-    for sheet_name in sheet_names:
-        ws = wb[sheet_name]
-        logger.info(
-            "Анализ листа: %s (строк: %s, колонок: %s)",
-            sheet_name, ws.max_row, ws.max_column,
-        )
+        # ── Результаты, агрегированные по всем листам ──
+        all_parts: Dict[str, PartInfo] = {}
+        all_config_quantities: Dict[str, Dict[str, float]] = {}
+        all_config_names: List[str] = []
+        all_global_names: Dict[str, Tuple[str, str]] = {}
+        seen_config_names: Dict[str, str] = {}  # config_name -> нормализованный оригинал
 
-        # Проверяем, является ли лист BOM-кандидатом
-        is_bom = HeuristicAnalyzer.is_sheet_bom_candidate(
-            ws, min_configs=2, sheet_name=sheet_name,
-        )
-        if not is_bom:
-            logger.info("Лист не является BOM-кандидатом, пропуск: %s", sheet_name)
-            continue
+        for sheet_name in sheet_names:
+            ws = wb[sheet_name]
+            logger.info(
+                "Анализ листа: %s (строк: %s, колонок: %s)",
+                sheet_name, ws.max_row, ws.max_column,
+            )
 
-        # ── 1. Поиск строки заголовков ──
-        header_rows = HeuristicAnalyzer.find_header_rows(ws)
-        if not header_rows:
-            logger.warning("Не найдена строка заголовков в листе: %s", sheet_name)
-            continue
+            # Проверяем, является ли лист BOM-кандидатом
+            is_bom = HeuristicAnalyzer.is_sheet_bom_candidate(
+                ws, min_configs=2, sheet_name=sheet_name,
+            )
+            if not is_bom:
+                logger.info("Лист не является BOM-кандидатом, пропуск: %s", sheet_name)
+                continue
 
-        # ── 2. Определение типов колонок ──
-        col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
-        part_no_col = col_types.get("part_no", 0)
-        name_cn_col = col_types.get("name_cn", 0)
-        name_en_col = col_types.get("name_en", 0)
+            # ── 1. Поиск строки заголовков ──
+            header_rows = HeuristicAnalyzer.find_header_rows(ws)
+            if not header_rows:
+                logger.warning("Не найдена строка заголовков в листе: %s", sheet_name)
+                continue
 
-        if part_no_col == 0:
-            logger.warning("Не найдена колонка парт-номеров в листе: %s", sheet_name)
-            continue
+            # ── 2. Определение типов колонок ──
+            col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
+            part_no_col = col_types.get("part_no", 0)
+            name_cn_col = col_types.get("name_cn", 0)
+            name_en_col = col_types.get("name_en", 0)
 
-        header_row = header_rows[0]
+            if part_no_col == 0:
+                logger.warning("Не найдена колонка парт-номеров в листе: %s", sheet_name)
+                continue
 
-        # ── 3. Строим ГЛОБАЛЬНЫЙ словарь названий (ВСЕ строки, ВСЕ листы) ──
-        sheet_names_dict = HeuristicAnalyzer.build_global_name_dict(
-            ws, part_no_col, name_cn_col, name_en_col, header_row,
-        )
-        for pn, (nc, ne) in sheet_names_dict.items():
-            if pn not in all_global_names:
-                all_global_names[pn] = (nc, ne)
-            else:
-                existing_cn, existing_en = all_global_names[pn]
-                if not existing_cn and nc:
-                    existing_cn = nc
-                if not existing_en and ne:
-                    existing_en = ne
-                all_global_names[pn] = (existing_cn, existing_en)
+            header_row = header_rows[0]
 
-        # ── 4. Определяем колонки комплектаций ──
-        config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
-        qty_col = col_types.get("qty", 0)
+            # ── 3. Строим ГЛОБАЛЬНЫЙ словарь названий (ВСЕ строки, ВСЕ листы) ──
+            sheet_names_dict = HeuristicAnalyzer.build_global_name_dict(
+                ws, part_no_col, name_cn_col, name_en_col, header_row,
+            )
+            for pn, (nc, ne) in sheet_names_dict.items():
+                if pn not in all_global_names:
+                    all_global_names[pn] = (nc, ne)
+                else:
+                    existing_cn, existing_en = all_global_names[pn]
+                    if not existing_cn and nc:
+                        existing_cn = nc
+                    if not existing_en and ne:
+                        existing_en = ne
+                    all_global_names[pn] = (existing_cn, existing_en)
 
-        # ── 5. Если есть отдельная qty-колонка (спец-листы 附件) ──
-        # Листы с именами-метаданными НЕ создаю конфигурации (单车用量, 发动机附件 и т.д.)
-        _NON_CONFIG_SHEET_KEYWORDS = (
-            "单车用量", "组件数量", "发动机附件",
-            "Расход на один автомобиль", "количество компонентов",
-        )
-        is_non_config_sheet = any(kw in sheet_name for kw in _NON_CONFIG_SHEET_KEYWORDS)
+            # ── 4. Определяем колонки комплектаций ──
+            config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
+            qty_col = col_types.get("qty", 0)
 
-        if (not config_cols or len(config_cols) == 0) and qty_col > 0 and not is_non_config_sheet:
-            data_start = header_row + 1
-            config_name = sheet_name
-            seen_config_names[config_name] = config_name
-            all_config_names.append(config_name)
-            all_config_quantities[config_name] = {}
+            # ── 5. Если есть отдельная qty-колонка (спец-листы 附件) ──
+            is_non_config_sheet = any(kw in sheet_name for kw in _NON_CONFIG_SHEET_KEYWORDS)
 
-            for row_idx in range(data_start, (ws.max_row or data_start) + 1):
-                pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
-                if pn is None:
-                    continue
-                pn_str = clean_cell_text(pn)
-                if not pn_str or pn_str.startswith("~$"):
-                    continue
-                if not is_valid_part_number(pn_str):
-                    continue
+            if (not config_cols or len(config_cols) == 0) and qty_col > 0 and not is_non_config_sheet:
+                data_start = header_row + 1
+                config_name = sheet_name
+                seen_config_names[config_name] = config_name
+                all_config_names.append(config_name)
+                all_config_quantities[config_name] = {}
 
-                qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col)
-                qty = normalize_quantity(qty_val)
+                for row_idx in range(data_start, (ws.max_row or data_start) + 1):
+                    pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
+                    if pn is None:
+                        continue
+                    pn_str = clean_cell_text(pn)
+                    if not pn_str or pn_str.startswith("~$"):
+                        continue
+                    if not is_valid_part_number(pn_str):
+                        continue
 
-                if qty > 0:
+                    qty_val = HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col)
+                    qty = normalize_quantity(qty_val)
+
+                    if qty > 0:
+                        pn_normalized = clean_part_number(pn_str)
+                        current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
+                        all_config_quantities[config_name][pn_normalized] = current_qty + qty
+
+                        if pn_normalized not in all_parts:
+                            all_parts[pn_normalized] = PartInfo(part_number=pn_str)
+                        if config_name not in all_parts[pn_normalized].applicable_configs:
+                            all_parts[pn_normalized].applicable_configs.append(config_name)
+
+                logger.info(
+                    "Лист %s: спец-лист с qty-колонкой, %d деталей",
+                    sheet_name, len(all_config_quantities[config_name]),
+                )
+                continue
+
+            # ── 5b. Non-config sheets (单车用量, 发动机附件) — collect parts only ──
+            if is_non_config_sheet and qty_col > 0:
+                data_start = header_row + 1
+                for row_idx in range(data_start, (ws.max_row or data_start) + 1):
+                    pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
+                    if pn is None:
+                        continue
+                    pn_str = clean_cell_text(pn)
+                    if not pn_str or pn_str.startswith("~$"):
+                        continue
+                    if not is_valid_part_number(pn_str):
+                        continue
                     pn_normalized = clean_part_number(pn_str)
-                    current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
-                    all_config_quantities[config_name][pn_normalized] = current_qty + qty
-
                     if pn_normalized not in all_parts:
                         all_parts[pn_normalized] = PartInfo(part_number=pn_str)
-                    if config_name not in all_parts[pn_normalized].applicable_configs:
-                        all_parts[pn_normalized].applicable_configs.append(config_name)
+                logger.info("Лист %s: не-конфигурационный, детали собраны в all_parts", sheet_name)
+                continue
 
-            logger.info(
-                "Лист %s: спец-лист с qty-колонкой, %d деталей",
-                sheet_name, len(all_config_quantities[config_name]),
-            )
-            continue
+            if not config_cols:
+                logger.info("Лист %s: не найдено колонок комплектаций, пропуск", sheet_name)
+                continue
 
-        # ── 5b. Non-config sheets (单车用量, 发动机附件) — collect parts only ──
-        if is_non_config_sheet and qty_col > 0:
+            # ── 6. Дедупликация имён комплектаций ──
+            config_names: List[str] = []
+            for col_idx in config_cols:
+                name = HeuristicAnalyzer.get_cell_value(ws, header_row, col_idx)
+                name_str = str(name) if name is not None else ""
+                name_str = name_str.replace("\n", " ").replace("\r", "").strip()
+
+                if not name_str:
+                    for look_row in range(max(1, header_row - 1), 0, -1):
+                        meta_val = HeuristicAnalyzer.get_cell_value(ws, look_row, col_idx)
+                        if meta_val is not None:
+                            meta_str = str(meta_val).strip()
+                            if meta_str and len(meta_str) < 80:
+                                name_str = meta_str
+                                break
+                if not name_str:
+                    name_str = f"Config_{col_idx}"
+                config_names.append(name_str)
+
+            deduped_indices: List[int] = []
+            seen_norm: Set[str] = set()
+            for i, name in enumerate(config_names):
+                norm = name.lower().replace(" ", "").replace("-", "")
+                if norm not in seen_norm:
+                    seen_norm.add(norm)
+                    deduped_indices.append(i)
+
+            if len(deduped_indices) < len(config_cols):
+                logger.info(
+                    "Дедупликация: %d -> %d имён комплектаций",
+                    len(config_cols), len(deduped_indices),
+                )
+                config_cols = [config_cols[i] for i in deduped_indices]
+                config_names = [config_names[i] for i in deduped_indices]
+
+            # ── 7. Парсинг данных комплектаций ──
             data_start = header_row + 1
-            for row_idx in range(data_start, (ws.max_row or data_start) + 1):
+            max_row = ws.max_row or data_start
+            sheet_config_count = 0
+
+            for row_idx in range(data_start, max_row + 1):
                 pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
                 if pn is None:
                     continue
@@ -199,108 +261,48 @@ def parse_bom(file_path: str) -> BOMData:
                     continue
                 if not is_valid_part_number(pn_str):
                     continue
+
                 pn_normalized = clean_part_number(pn_str)
+
                 if pn_normalized not in all_parts:
                     all_parts[pn_normalized] = PartInfo(part_number=pn_str)
-            logger.info("Лист %s: не-конфигурационный, детали собраны в all_parts", sheet_name)
-            continue
 
-        if not config_cols:
-            logger.info("Лист %s: не найдено колонок комплектаций, пропуск", sheet_name)
-            continue
+                part = all_parts[pn_normalized]
 
-        # ── 6. Дедупликация имён комплектаций ──
-        config_names: List[str] = []
-        for col_idx in config_cols:
-            name = HeuristicAnalyzer.get_cell_value(ws, header_row, col_idx)
-            name_str = str(name) if name is not None else ""
-            name_str = name_str.replace("\n", " ").replace("\r", "").strip()
+                for i, col_idx in enumerate(config_cols):
+                    config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
 
-            # Если заголовок пуст — ищем имя в строках ВЫШЕ заголовка
-            # (метаданные: код модели, описание конфигурации и т.д.)
-            if not name_str:
-                for look_row in range(max(1, header_row - 1), 0, -1):
-                    meta_val = HeuristicAnalyzer.get_cell_value(ws, look_row, col_idx)
-                    if meta_val is not None:
-                        meta_str = str(meta_val).strip()
-                        if meta_str and len(meta_str) < 80:
-                            name_str = meta_str
-                            break
-            if not name_str:
-                name_str = f"Config_{col_idx}"
-            config_names.append(name_str)
+                    if config_val.upper() == 'S' and qty_col > 0:
+                        qty = normalize_quantity(HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col))
+                    elif config_val in ('-', '–', '—', ''):
+                        continue
+                    else:
+                        qty = normalize_quantity(config_val)
 
-        deduped_indices: List[int] = []
-        seen_norm: Set[str] = set()
-        for i, name in enumerate(config_names):
-            norm = name.lower().replace(" ", "").replace("-", "")
-            if norm not in seen_norm:
-                seen_norm.add(norm)
-                deduped_indices.append(i)
+                    if qty > 0:
+                        config_name = config_names[i]
+                        if config_name not in seen_config_names:
+                            seen_config_names[config_name] = config_name
+                            all_config_names.append(config_name)
 
-        if len(deduped_indices) < len(config_cols):
+                        if config_name not in all_config_quantities:
+                            all_config_quantities[config_name] = {}
+
+                        current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
+                        all_config_quantities[config_name][pn_normalized] = current_qty + qty
+
+                        if config_name not in part.applicable_configs:
+                            part.applicable_configs.append(config_name)
+
+                        sheet_config_count += 1
+
             logger.info(
-                "Дедупликация: %d -> %d имён комплектаций",
-                len(config_cols), len(deduped_indices),
+                "Лист %s: BOM, %d колонок комплектаций, %d строк с данными",
+                sheet_name, len(config_cols), sheet_config_count,
             )
-            config_cols = [config_cols[i] for i in deduped_indices]
-            config_names = [config_names[i] for i in deduped_indices]
 
-        # ── 7. Парсинг данных комплектаций ──
-        data_start = header_row + 1
-        max_row = ws.max_row or data_start
-        sheet_config_count = 0
-
-        for row_idx in range(data_start, max_row + 1):
-            pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
-            if pn is None:
-                continue
-            pn_str = clean_cell_text(pn)
-            if not pn_str or pn_str.startswith("~$"):
-                continue
-            if not is_valid_part_number(pn_str):
-                continue
-
-            pn_normalized = clean_part_number(pn_str)
-
-            if pn_normalized not in all_parts:
-                all_parts[pn_normalized] = PartInfo(part_number=pn_str)
-
-            part = all_parts[pn_normalized]
-
-            for i, col_idx in enumerate(config_cols):
-                config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
-
-                if config_val.upper() == 'S' and qty_col > 0:
-                    qty = normalize_quantity(HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col))
-                elif config_val in ('-', '–', '—', ''):
-                    continue
-                else:
-                    qty = normalize_quantity(config_val)
-
-                if qty > 0:
-                    config_name = config_names[i]
-                    if config_name not in seen_config_names:
-                        seen_config_names[config_name] = config_name
-                        all_config_names.append(config_name)
-
-                    if config_name not in all_config_quantities:
-                        all_config_quantities[config_name] = {}
-
-                    current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
-                    all_config_quantities[config_name][pn_normalized] = current_qty + qty
-
-                    if config_name not in part.applicable_configs:
-                        part.applicable_configs.append(config_name)
-
-                    sheet_config_count += 1
-
-        logger.info(
-            "Лист %s: BOM, %d колонок комплектаций, %d строк с данными",
-            sheet_name, len(config_cols), sheet_config_count,
-        )
-
-    wb.close()
+    finally:
+        wb.close()
 
     # ── Финальная агрегация ──
     logger.info("Загружено деталей (уникальных): %d", len(all_parts))

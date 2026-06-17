@@ -222,6 +222,7 @@ class CardParseResult:
     parts: List[CardPart]
     aggregated_parts: Dict[str, float]  # part_number -> total_qty
     is_service_file: bool = False  # True если файл был определён как служебный
+    tables_extracted: int = 0  # Количество таблиц (операций) найденных во всех листах
 
 
 @dataclass
@@ -236,6 +237,7 @@ class CardsData:
     total_sheets_skipped: int = 0
     service_files_skipped: int = 0
     corrupted_files: List[str] = field(default_factory=list)
+    total_tables_extracted: int = 0  # Количество таблиц (операций) во всех листах
     split_stats: Optional[SplitStatistics] = None
 
 
@@ -373,128 +375,133 @@ def parse_card_file(
     logger.debug("Обработка файла: %s", basename)
 
     reader = ExcelReader(file_path)
-    card_parts: List[CardPart] = []
-    sheets_info: List[CardSheetInfo] = []
-    aggregated: Dict[str, float] = {}
-    card_number = ""
+    try:
+        card_parts: List[CardPart] = []
+        sheets_info: List[CardSheetInfo] = []
+        aggregated: Dict[str, float] = {}
+        card_number = ""
 
-    # Если файл служебный — только собираем информацию о листах, без парсинга деталей
-    if is_service_file:
+        # Если файл служебный — только собираем информацию о листах, без парсинга деталей
+        if is_service_file:
+            for sheet_name in reader.sheet_names:
+                ws = reader.get_sheet(sheet_name)
+                sheet_has_data = _check_sheet_has_data(ws)
+                sheets_info.append(CardSheetInfo(
+                    card_number=card_number or basename,
+                    sheet_name=sheet_name,
+                    is_valid=False,
+                    has_data=sheet_has_data,
+                ))
+            return CardParseResult(
+                card_number=basename,
+                file_path=file_path,
+                sheets=sheets_info,
+                parts=card_parts,
+                aggregated_parts=aggregated,
+                is_service_file=True,
+            )
+
+        tables_extracted = 0  # Счётчик таблиц (операций) на всех листах файла
+
         for sheet_name in reader.sheet_names:
             ws = reader.get_sheet(sheet_name)
-            sheet_has_data = _check_sheet_has_data(ws)
-            sheets_info.append(CardSheetInfo(
-                card_number=card_number or basename,
-                sheet_name=sheet_name,
-                is_valid=False,
-                has_data=sheet_has_data,
-            ))
-        reader.close()
-        return CardParseResult(
-            card_number=basename,
-            file_path=file_path,
-            sheets=sheets_info,
-            parts=card_parts,
-            aggregated_parts=aggregated,
-            is_service_file=True,
-        )
+            max_row = ws.max_row
+            max_col = ws.max_column
 
-    for sheet_name in reader.sheet_names:
-        ws = reader.get_sheet(sheet_name)
-        max_row = ws.max_row
-        max_col = ws.max_column
-
-        # Пропускаем пустые листы
-        if max_row == 0 or max_col == 0:
-            sheets_info.append(CardSheetInfo(
-                card_number=card_number or basename,
-                sheet_name=sheet_name,
-                is_valid=False,
-                has_data=False,
-            ))
-            continue
-
-        sheet_has_data = _check_sheet_has_data(ws)
-
-        if not sheet_has_data:
-            sheets_info.append(CardSheetInfo(
-                card_number=card_number or basename,
-                sheet_name=sheet_name,
-                is_valid=False,
-                has_data=False,
-            ))
-            continue
-
-        # Извлекаем номер карты из первого непустого листа (эвристически)
-        if not card_number:
-            card_number = _extract_card_number(file_path, ws)
-
-        # Ищем таблицы с деталями через эвристический анализатор
-        # Поддерживает многооперационные листы (SWM карты)
-        first_table_info = HeuristicAnalyzer.find_part_table(ws)
-        if first_table_info is None:
-            # Fallback: Changan-формат с 图示编号 (Graphic Number)
-            header_rows = HeuristicAnalyzer.find_header_rows(ws)
-            col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows) if header_rows else {}
-            graphic_parts = _collect_parts_with_graphic_number(
-                ws, max_row, max_col, header_rows, col_types, basename,
-            )
-            if graphic_parts:
-                for part_no, qty, name, graphic_number in graphic_parts:
-                    card_parts.append(CardPart(
-                        part_number=part_no,
-                        quantity=qty,
-                        source_card=graphic_number or card_number or basename,
-                        source_sheet=sheet_name,
-                    ))
-                    aggregated[part_no] = aggregated.get(part_no, 0.0) + qty
-
+            # Пропускаем пустые листы
+            if max_row == 0 or max_col == 0:
                 sheets_info.append(CardSheetInfo(
                     card_number=card_number or basename,
                     sheet_name=sheet_name,
-                    operation_name=f"Graphic number linked ({len(graphic_parts)} parts)",
-                    is_valid=True,
-                    has_data=True,
-                ))
-            else:
-                sheets_info.append(CardSheetInfo(
-                    card_number=card_number or basename,
-                    sheet_name=sheet_name,
-                    operation_name="Лист без таблицы деталей",
                     is_valid=False,
-                    has_data=True,
+                    has_data=False,
                 ))
-            continue
+                continue
 
-        header_row, part_no_col, qty_col, name_col = first_table_info
+            sheet_has_data = _check_sheet_has_data(ws)
 
-        # Извлекаем название операции
-        operation_name = HeuristicAnalyzer.extract_operation_name(ws, header_row)
+            if not sheet_has_data:
+                sheets_info.append(CardSheetInfo(
+                    card_number=card_number or basename,
+                    sheet_name=sheet_name,
+                    is_valid=False,
+                    has_data=False,
+                ))
+                continue
 
-        # Собираем детали из ВСЕХ таблиц на листе (многооперационные карты)
-        merged_parts = _collect_all_tables(
-            ws, max_row, max_col, basename,
-        )
+            # Извлекаем номер карты из первого непустого листа (эвристически)
+            if not card_number:
+                card_number = _extract_card_number(file_path, ws)
 
-        # Добавляем в результаты
-        for part_no, qty, name, _ in merged_parts:
-            card_parts.append(CardPart(
-                part_number=part_no,
-                quantity=qty,
-                source_card=card_number or basename,
-                source_sheet=sheet_name,
+            # Ищем таблицы с деталями через эвристический анализатор
+            # Поддерживает многооперационные листы (SWM карты)
+            first_table_info = HeuristicAnalyzer.find_part_table(ws)
+            if first_table_info is None:
+                # Fallback: Changan-формат с 图示编号 (Graphic Number)
+                header_rows = HeuristicAnalyzer.find_header_rows(ws)
+                col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows) if header_rows else {}
+                graphic_parts = _collect_parts_with_graphic_number(
+                    ws, max_row, max_col, header_rows, col_types, basename,
+                )
+                if graphic_parts:
+                    tables_extracted += 1
+                    for part_no, qty, name, graphic_number in graphic_parts:
+                        card_parts.append(CardPart(
+                            part_number=part_no,
+                            quantity=qty,
+                            source_card=graphic_number or card_number or basename,
+                            source_sheet=sheet_name,
+                        ))
+                        aggregated[part_no] = aggregated.get(part_no, 0.0) + qty
+
+                    sheets_info.append(CardSheetInfo(
+                        card_number=card_number or basename,
+                        sheet_name=sheet_name,
+                        operation_name=f"Graphic number linked ({len(graphic_parts)} parts)",
+                        is_valid=True,
+                        has_data=True,
+                    ))
+                else:
+                    sheets_info.append(CardSheetInfo(
+                        card_number=card_number or basename,
+                        sheet_name=sheet_name,
+                        operation_name="Лист без таблицы деталей",
+                        is_valid=False,
+                        has_data=True,
+                    ))
+                continue
+
+            header_row, part_no_col, qty_col, name_col = first_table_info
+
+            # Извлекаем название операции
+            operation_name = HeuristicAnalyzer.extract_operation_name(ws, header_row)
+
+            # Собираем детали из ВСЕХ таблиц на листе (многооперационные карты)
+            merged_parts, sheet_tables = _collect_all_tables(
+                ws, max_row, max_col, basename,
+            )
+            tables_extracted += sheet_tables
+
+            # Добавляем в результаты
+            for part_no, qty, name, _ in merged_parts:
+                card_parts.append(CardPart(
+                    part_number=part_no,
+                    quantity=qty,
+                    source_card=card_number or basename,
+                    source_sheet=sheet_name,
+                ))
+                aggregated[part_no] = aggregated.get(part_no, 0.0) + qty
+
+            sheets_info.append(CardSheetInfo(
+                card_number=card_number or basename,
+                sheet_name=sheet_name,
+                operation_name=operation_name,
+                is_valid=len(merged_parts) > 0,
+                has_data=True,
             ))
-            aggregated[part_no] = aggregated.get(part_no, 0.0) + qty
 
-        sheets_info.append(CardSheetInfo(
-            card_number=card_number or basename,
-            sheet_name=sheet_name,
-            operation_name=operation_name,
-            is_valid=len(merged_parts) > 0,
-            has_data=True,
-        ))
-
-    reader.close()
+    finally:
+        reader.close()
 
     return CardParseResult(
         card_number=card_number or basename,
@@ -502,7 +509,7 @@ def parse_card_file(
         sheets=sheets_info,
         parts=card_parts,
         aggregated_parts=aggregated,
-
+        tables_extracted=tables_extracted,
     )
 
 
@@ -637,7 +644,7 @@ def _collect_all_tables(
     max_row: int,
     max_col: int,
     basename: str,
-) -> List[Tuple[str, float, str, int]]:
+) -> Tuple[List[Tuple[str, float, str, int]], int]:
     """Собрать детали из ВСЕХ таблиц на листе (многооперационные карты).
 
     Последовательно находит таблицы деталей через find_part_table(),
@@ -645,18 +652,22 @@ def _collect_all_tables(
     Пропускает найденные таблицы, если в них нет валидных part-number.
 
     Returns:
-        Список кортежей (part_no, qty, name, source_row) для всех найденных деталей.
+        Кортеж (parts, table_count):
+          - parts: список кортежей (part_no, qty, name, source_row)
+          - table_count: количество найденных таблиц (включая пустые)
     """
     all_parts: List[Tuple[str, float, str, int]] = []
     total_part_nos_collected = 0
     start_search = 1
-    max_tables = 200  # поддержка больших файлов (G01: 90+ операционных карт)
+    tables_found = 0
+    max_tables = 500  # поддержка больших файлов (G01 SWM: 217 таблиц)
 
     for table_idx in range(max_tables):
         table_info = HeuristicAnalyzer.find_part_table(ws, start_row=start_search)
         if table_info is None:
             break
 
+        tables_found += 1
         header_row, part_no_col, qty_col, name_col = table_info
 
         # Если заголовок уже обработан — выходим
@@ -692,7 +703,7 @@ def _collect_all_tables(
     if total_part_nos_collected == 0:
         logger.debug("Не найдено таблиц с деталями")
 
-    return all_parts
+    return all_parts, tables_found
 
 
 def _collect_parts_with_graphic_number(
@@ -1041,6 +1052,9 @@ def parse_cards(
     logger.info("Всего листов: %d, пропущено (пустых): %d", total_sheets, total_skipped)
     logger.info("Уникальных деталей найдено: %d", len(all_aggregated))
 
+    # Суммируем количество таблиц (операций) во всех результатах
+    total_tables = sum(r.tables_extracted for r in card_results)
+
     # Сортируем card_results для детерминированного порядка
     card_results.sort(key=lambda r: r.file_path)
 
@@ -1062,6 +1076,7 @@ def parse_cards(
         total_sheets_skipped=total_skipped,
         service_files_skipped=len(service_files),
         corrupted_files=corrupted,
+        total_tables_extracted=total_tables,
     )
 
 
@@ -1432,10 +1447,7 @@ def split_cards_to_files(
         # Выводим имена повреждённых файлов в лог
         for cf in corrupted:
             logger.warning("  ⚠️  %s", os.path.basename(cf))
-    if getattr(cards_data, 'corrupted_files', None) is not None:
-        cards_data.corrupted_files.extend(corrupted)
-    else:
-        cards_data.corrupted_files = list(corrupted)
+    cards_data.corrupted_files.extend(corrupted)
 
     # Подсчёт created_files на задачу: для каждого task сопоставляем
     # созданные файлы по префиксу из safe_label (совпадает с именованием splitter)
