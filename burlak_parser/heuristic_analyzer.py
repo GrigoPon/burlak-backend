@@ -106,11 +106,12 @@ META_KEYWORDS: List[str] = [
     "标识", "发运", "采购", "度量单位", "uom",
     "gpc", "fnd", "物料状态", "来源车间", "使用工厂",
     "目标车间", "供应商", "供应商代码", "供应商名称",
+    "生产工厂", "供货工厂", "制造工厂", "装配工厂", "安装工厂",
     "mwo", "mwo单号", "生效日期", "失效日期",
     "整车物料号", "变更单号", "eop", "eos",
     "零件成熟度", "物料组", "物料组描述",
     "cpac编码", "cpac描述", "品牌", "车系",
-    "安装工厂", "装配工厂", "卸货工厂",
+    "卸货工厂",
     "备注", "说明", "附注", "注",
     "分类", "类别", "车型",
     "状态号", "模块状态", "供货状态", "PBOM供货",
@@ -404,6 +405,15 @@ def _normalize_card_number(card_no: str) -> str:
         logger.debug("Нормализация номера карты: %s → %s", card_no, normalized)
         return normalized
     return card_no
+
+
+def _is_numeric_string(s: str) -> bool:
+    """Проверить, представляет ли строка число (целое или дробное)."""
+    try:
+        float(s.replace(",", "."))
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -980,7 +990,8 @@ class HeuristicAnalyzer:
                         invalid_hits += 1
 
             # Отбрасываем столбцы, где все значения одинаковые (коды заводов
-            # типа "1020" повторяются в каждой строке — это мета-данные, а не комплектации).
+            # типа "1020" повторяются в каждой строке — это мета-данные, а не комплектации),
+            # НО только если это значение не является валидным маркером комплектации (S/-/Y/число).
             unique_data_vals = set()
             data_rows_checked = 0
             for r in range(data_start, sample_end):
@@ -994,9 +1005,25 @@ class HeuristicAnalyzer:
                     unique_data_vals.add(sv)
                     data_rows_checked += 1
             if len(unique_data_vals) <= 1 and data_rows_checked >= 8:
-                col_has_numbers[c] = False
-                col_has_real_numbers[c] = False
-                continue
+                # Не отбрасываем, если единственное значение — валидный маркер
+                # комплектации (S, Y, число, тире).
+                if unique_data_vals:
+                    only_val = next(iter(unique_data_vals))
+                    is_valid_marker = (
+                        only_val.upper() in ('S', 'Y') or
+                        only_val in ('-', '\u2013', '\u2014') or
+                        _is_numeric_string(only_val)
+                    )
+                    if is_valid_marker:
+                        pass  # continue to normal validation below
+                    else:
+                        col_has_numbers[c] = False
+                        col_has_real_numbers[c] = False
+                        continue
+                else:
+                    col_has_numbers[c] = False
+                    col_has_real_numbers[c] = False
+                    continue
 
             # Reject column if too many invalid values or no valid config values
             if total_non_empty > 0 and invalid_hits / total_non_empty > 0.3:

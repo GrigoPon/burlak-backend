@@ -838,8 +838,9 @@ def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _se
     """
     nested_zips: List[str] = []
 
-    for root, _, filenames in os.walk(walk_root):
-        for fn in filenames:
+    # Детерминированный обход: сортируем корни и имена файлов
+    for root, _, filenames in sorted(os.walk(walk_root), key=lambda x: x[0]):
+        for fn in sorted(filenames):
             # Фильтруем файлы блокировки Excel (~$), метаданные macOS (._*), и мусор
             if fn.startswith("~$") or fn.startswith("._"):
                 if is_temp:
@@ -862,8 +863,8 @@ def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _se
                 if is_temp:
                     _safe_remove(full_path)
 
-    # Обрабатываем вложенные ZIP ПОСЛЕ основных файлов
-    for full_path in nested_zips:
+    # Обрабатываем вложенные ZIP ПОСЛЕ основных файлов (отсортировано)
+    for full_path in sorted(nested_zips):
         fn = os.path.basename(full_path)
         nested_dir = os.path.join(extract_base, f"_nested_{_safe_name(fn)}")
         os.makedirs(nested_dir, exist_ok=True)
@@ -1431,8 +1432,7 @@ def split_cards_to_files(
         # Выводим имена повреждённых файлов в лог
         for cf in corrupted:
             logger.warning("  ⚠️  %s", os.path.basename(cf))
-
-    if hasattr(cards_data, 'corrupted_files') and cards_data.corrupted_files is not None:
+    if getattr(cards_data, 'corrupted_files', None) is not None:
         cards_data.corrupted_files.extend(corrupted)
     else:
         cards_data.corrupted_files = list(corrupted)

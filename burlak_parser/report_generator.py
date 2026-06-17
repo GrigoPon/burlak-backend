@@ -31,8 +31,8 @@ from burlak_parser.card_parser import CardsData
 
 logger = logging.getLogger(__name__)
 
-MAX_CONFIGS_IN_MATRIX = 50
-
+# Без лимита — показываем ВСЕ комплектации в матрице
+# (T1L BOM: 78, может быть больше)
 
 def generate_discrepancy_report(
     result: MultiConfigComparisonResult,
@@ -307,7 +307,7 @@ def generate_discrepancy_report(
         bom_widths = [22, 35, 35]
         if bom.config_names:
             # Показываем количества по каждой комплектации
-            for cn in bom.config_names[:MAX_CONFIGS_IN_MATRIX]:
+            for cn in bom.config_names:
                 short = cn if len(cn) <= 25 else cn[:22] + "..."
                 bom_headers.append(short)
                 bom_widths.append(10)
@@ -326,7 +326,7 @@ def generate_discrepancy_report(
             ws_bom.write(ri, 0, original_no, cell_fmt)
             ws_bom.write(ri, 1, part.name_cn, cell_fmt)
             ws_bom.write(ri, 2, part.name_en, cell_fmt)
-            for ci, cn in enumerate(bom.config_names[:MAX_CONFIGS_IN_MATRIX], 3):
+            for ci, cn in enumerate(bom.config_names, 3):
                 qty = bom.config_quantities[cn].get(pn, 0.0)
                 ws_bom.write(ri, ci, qty if qty > 0 else "", cell_num_fmt)
 
