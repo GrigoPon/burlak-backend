@@ -2087,9 +2087,19 @@ def split_cards_to_files(
                 _sheet_name = (
                     _wb.active.title if _wb.active else ""
                 ) or (_wb.sheetnames[0] if _wb.sheetnames else "")
+                _max_row = 0
+                if _sheet_name and _sheet_name in _wb.sheetnames:
+                    _ws = _wb[_sheet_name]
+                    _max_row = _ws.max_row or 0
                 _wb.close()
 
             if _sheet_count != 1 or not _sheet_name:
+                continue
+
+            # Skip small files: < 100 rows can't be meaningfully split vertically
+            # (Jetour 作业指导书 files have ~79 rows with steps + materials as
+            # separate "tables" — these are NOT separate operations)
+            if _max_row < 100:
                 continue
 
             boundaries = find_table_boundaries(split_path, _sheet_name)
