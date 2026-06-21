@@ -441,6 +441,8 @@ def parse_card_file(
             if not card_number:
                 card_number = _extract_card_number(file_path, ws)
 
+            operation_name = ""
+
             # Ищем таблицы с деталями через эвристический анализатор
             # Поддерживает многооперационные листы (SWM карты)
             first_table_info = HeuristicAnalyzer.find_part_table(ws)
@@ -471,14 +473,32 @@ def parse_card_file(
                         max_data_row=max_row,
                     ))
                 else:
-                    sheets_info.append(CardSheetInfo(
-                        card_number=card_number or basename,
-                        sheet_name=sheet_name,
-                        operation_name="Лист без таблицы деталей",
-                        is_valid=False,
-                        has_data=True,
-                        max_data_row=max_row,
-                    ))
+                    # ── Fallback: Inspection format (检验作业指导书) ──
+                    # JC-031 style: sheets with "检验项目" headers,
+                    # no standard part table, but multiple inspection operations
+                    inspection_ops = _detect_inspection_operations(ws, max_row)
+                    if inspection_ops > 1:
+                        tables_extracted += inspection_ops
+                        operation_name = "Inspection" if not operation_name else operation_name
+                        sheets_info.append(CardSheetInfo(
+                            card_number=card_number or basename,
+                            sheet_name=sheet_name,
+                            operation_name=(
+                                f"Inspection ({inspection_ops} ops)"
+                            ),
+                            is_valid=True,
+                            has_data=True,
+                            max_data_row=max_row,
+                        ))
+                    else:
+                        sheets_info.append(CardSheetInfo(
+                            card_number=card_number or basename,
+                            sheet_name=sheet_name,
+                            operation_name="Лист без таблицы деталей",
+                            is_valid=False,
+                            has_data=True,
+                            max_data_row=max_row,
+                        ))
                 continue
 
             header_row, part_no_col, qty_col, name_col = first_table_info
@@ -541,6 +561,74 @@ def _check_sheet_has_data(ws: ExcelSheet) -> bool:
                     return True
 
     return False
+
+
+_INSPECTION_HEADER_KW = '检验项目'
+
+
+def _detect_inspection_operations(ws: ExcelSheet, max_row: int) -> int:
+    """Detect inspection-format operations (检验作业指导书) in a sheet.
+
+    JC-031 style format:
+      - Row with "检验项目" in column B marks each operation
+      - Operation name follows in column D
+      - Operations repeat every ~20 rows
+
+    Returns the number of inspection operations found, or 0 if not
+    an inspection-format sheet.
+    """
+    if max_row < 20:
+        return 0
+
+    # Find all rows with "检验项目" in column B (col 2)
+    header_rows: List[int] = []
+    for r in range(1, max_row + 1):
+        val = ws.cell_value(r, 2)
+        if val is not None and _INSPECTION_HEADER_KW in str(val):
+            header_rows.append(r)
+
+    if len(header_rows) < 2:
+        return 0
+
+    # Validate consistency: spacings should be roughly uniform
+    spacings = [header_rows[i + 1] - header_rows[i]
+                for i in range(len(header_rows) - 1)]
+    if not spacings:
+        return 0
+
+    step = sorted(spacings)[len(spacings) // 2]  # median
+    consistent = sum(1 for s in spacings if abs(s - step) <= 3)
+    if consistent < len(spacings) * 0.5:
+        return 0
+
+    # Validate data density: at least some rows between headers have content
+    dataful_blocks = 0
+    for i, hr in enumerate(header_rows):
+        next_hr = header_rows[i + 1] if i + 1 < len(header_rows) else max_row + 1
+        has_content = False
+        for r in range(hr + 1, min(hr + 6, next_hr)):
+            for c in range(1, 9):
+                val = ws.cell_value(r, c)
+                if val is not None and str(val).strip():
+                    has_content = True
+                    break
+            if has_content:
+                break
+        if has_content:
+            dataful_blocks += 1
+
+    if dataful_blocks < len(header_rows) * 0.5:
+        logger.debug(
+            "Inspection detection: only %d/%d blocks have data, rejecting",
+            dataful_blocks, len(header_rows),
+        )
+        return 0
+
+    logger.info(
+        "Inspection format detected: %d operations (spacing ~%d rows)",
+        len(header_rows), step,
+    )
+    return len(header_rows)
 
 
 def _collect_raw_rows(
@@ -1275,6 +1363,28 @@ class CardService:
 TEMPLATE_SHEET_KEYWORDS = ["空表", "填写范本", "范本"]
 
 
+def _find_main_data_sheet(
+    sheets: List[CardSheetInfo],
+    service_keywords: List[str],
+) -> Optional[CardSheetInfo]:
+    """Return the data sheet with the most rows, excluding service sheets
+    when multiple sheets exist.
+
+    Used to find the primary operational sheet in files that may have
+    service sheets (封面, 目录) alongside real data sheets.
+    """
+    best = None
+    for s in sheets:
+        if not s.has_data:
+            continue
+        is_svc = any(kw in s.sheet_name for kw in service_keywords)
+        if is_svc and len(sheets) > 1:
+            continue
+        if best is None or s.max_data_row > best.max_data_row:
+            best = s
+    return best
+
+
 # Причины пропуска листов
 SKIP_REASON_TEMPLATE = "Имя листа содержит ключевое слово шаблона"
 SKIP_REASON_NO_DATA = "Пустой лист (нет данных)"
@@ -1455,34 +1565,70 @@ def split_cards_to_files(
     # Файлы с 1 листом и >1 таблицами (операциями) на этом листе
     # требуют вертикального разделения: каждая операция → отдельный .xlsx.
     #
-    # ⚠️  ЗАЩИТА от ложных срабатываний:
-    # Вертикальное разделение ТОЛЬКО для файлов, где одновременно:
-    #   1. tables_extracted > 1 (найдено несколько таблиц)
-    #   2. Единственный лист содержит данные
-    #   3. ⭐ Найдено >= 200+ уникальных деталей (нормальные карты: 20–200)
-    #      SWM-мегалисты: 1000–8000 деталей
-    #   4. ⭐ Среднее количество на деталь не слишком высоко (защита от
-    #      ложных таблиц, где одни и те же данные повторно сканируются)
+    # Универсальный детектор: вертикальный split для ЛЮБОГО файла
+    # с >1 таблицей на одном листе ИЛИ с очень большим количеством строк
+    # на одном листе (SWM мегалисты с 1000+ строк содержат много операций,
+    # даже если эвристика нашла только 1 таблицу).
     #
-    # Это предотвращает запуск openpyxl-вертикального split на нормальных
-    # Jetour/Changan файлах (20–200 строк), где эвристика находит >1 таблицы,
-    # но файл является стандартной однолистовой картой.
+    # Confidence scoring в find_table_boundaries отсеивает false positives
+    # на маленьких файлах.
     vertical_split_files: Dict[str, int] = {}  # file_path -> tables_extracted
     for result in cards_data.card_results:
-        max_data_rows = result.sheets[0].max_data_row if result.sheets else 0
-        if (not result.is_service_file
-                and result.tables_extracted > 1
-                and len(result.sheets) == 1
-                and result.sheets[0].has_data
-                and max_data_rows > 500  # GUARD: only megasheets with 500+ rows
-                # .xls files cannot be split by openpyxl — skip vertical split
-                and os.path.splitext(result.file_path)[1].lower() == ".xlsx"):
-            vertical_split_files[result.file_path] = result.tables_extracted
+        is_xlsx = os.path.splitext(result.file_path)[1].lower() == ".xlsx"
+
+        if not is_xlsx:
+            continue
+        if result.is_service_file:
+            continue
+
+        # Find the MAIN data sheet (the one with the most rows)
+        main_sheet = _find_main_data_sheet(
+            result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
+        )
+        if main_sheet is None:
+            continue
+
+        max_data_rows = main_sheet.max_data_row
+
+        # Условие 1: Несколько таблиц на одном листе
+        multi_table = (
+            result.tables_extracted > 1
+            and len(result.sheets) == 1
+        )
+
+        # Условие 2: Очень большой лист (SWM мегалист: 500+ строк на одном листе
+        # с большой вероятностью содержит несколько операционных карт)
+        mega_sheet = (
+            len(result.sheets) == 1
+            and max_data_rows > 500
+            and len(result.parts) > 100
+        )
+
+        # Условие 3: Инспекционный формат с множеством операций
+        # (JC-031 style: 300+ rows, many inspection ops detected by heuristic)
+        # NOTE: len(result.sheets) == 1 guard prevents data loss on multi-sheet
+        # inspection files — non-main sheets would be filtered from normal_tasks
+        # otherwise. Multi-sheet files go through horizontal split first,
+        # then step 4.6 handles vertical split on each sheet independently.
+        inspection_mega = (
+            result.tables_extracted > 5
+            and max_data_rows > 100
+            and len(result.sheets) == 1
+        )
+
+        if multi_table or mega_sheet or inspection_mega:
+            vertical_split_files[result.file_path] = max(result.tables_extracted, 2)
+            if multi_table:
+                reason = "много таблиц"
+            elif mega_sheet:
+                reason = "мегалист (SWM)"
+            else:
+                reason = "инспекционный формат"
             logger.info(
-                "Обнаружен многооперационный megasheet: %s (%d таблиц, %d строк) "
+                "Обнаружен многооперационный файл: %s (%s, %d таблиц, %d строк, %d деталей) "
                 "— будет разделён вертикально",
                 os.path.basename(result.file_path),
-                result.tables_extracted, max_data_rows,
+                reason, result.tables_extracted, max_data_rows, len(result.parts),
             )
 
     # ── ШАГ 1: Детерминированная предварительная разметка путей (ГЛАВНЫЙ ПОТОК) ──
@@ -1619,6 +1765,11 @@ def split_cards_to_files(
     # ── ШАГ 4.5: Вертикальное разделение многооперационных файлов ──
     # Для файлов с 1 листом и N таблицами (SWM-стиль),
     # находим границы таблиц и создаём отдельный .xlsx для каждой.
+    #
+    # Если границы не найдены (false positive detection) — файл
+    # возвращается в normal_tasks для обычного горизонтального split.
+    vertical_fallback_to_normal: List[str] = []
+    already_vertically_split: List[str] = []  # Файлы, созданные вертикальным split — НЕ обрабатывать в ШАГ 4.6
     for result in cards_data.card_results:
         if result.file_path not in vertical_split_files:
             continue
@@ -1633,18 +1784,24 @@ def split_cards_to_files(
                 file_name,
             )
             continue
-        sheet_name = result.sheets[0].sheet_name if result.sheets else ""
-        if not sheet_name:
+        # Find the MAIN data sheet for vertical split
+        main_sheet_v = _find_main_data_sheet(
+            result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
+        )
+        if main_sheet_v is None:
             continue
+        sheet_name = main_sheet_v.sheet_name
 
         try:
             # Находим границы всех таблиц на листе
             boundaries = find_table_boundaries(source_path, sheet_name)
             if not boundaries:
                 logger.warning(
-                    "Вертикальный split: не найдены границы таблиц в %s",
+                    "Вертикальный split: не найдены границы таблиц в %s "
+                    "— возврат к горизонтальному split",
                     file_name,
                 )
+                vertical_fallback_to_normal.append(source_path)
                 continue
 
             logger.info(
@@ -1662,6 +1819,7 @@ def split_cards_to_files(
             )
 
             all_created.extend(created_vertical)
+            already_vertically_split.extend(created_vertical)
             for vpath in created_vertical:
                 manifest.setdefault(file_name, []).append(
                     os.path.basename(vpath),
@@ -1688,10 +1846,88 @@ def split_cards_to_files(
                     fs.error_message = err_msg
                     break
 
+    # ── Возвращаем false-positive вертикальные файлы в normal_tasks ──
+    # ВАЖНО: удаляем файлы из vertical_split_files чтобы они не
+    # фильтровались повторно при пересчёте normal_tasks.
+    # НЕ добавляем новые tasks — оригинальные записи уже в tasks.
+    for fb_path in vertical_fallback_to_normal:
+        del vertical_split_files[fb_path]
+        logger.info(
+            "Файл %s возвращён в горизонтальный split",
+            os.path.basename(fb_path),
+        )
+
+    if vertical_fallback_to_normal:
+        # Recompute path_map with updated normal_tasks (fallback files now included)
+        tasks.sort(key=lambda t: t[0])
+        normal_tasks = [t for t in tasks if t[0] not in vertical_split_files]
+        additional_path_map = preallocate_split_paths(normal_tasks, output_dir)
+        path_map.update(additional_path_map)
+
+        # Build sheet_tasks for the fallback files only (use original task entries)
+        additional_sheet_tasks: List[Tuple[str, str, str]] = []
+        for source_path, _out_dir, sheet_names, file_label in normal_tasks:
+            if source_path not in vertical_fallback_to_normal:
+                continue
+            for sheet_name in sheet_names:
+                output_path = path_map.get((source_path, sheet_name))
+                if output_path:
+                    additional_sheet_tasks.append((source_path, output_path, sheet_name))
+
+        # Process additional tasks (sequential, since fallback is rare)
+        for src, out, sheet in additional_sheet_tasks:
+            try:
+                worker_result = _extract_to_path_worker(src, out, sheet)
+                result_path = worker_result.get("path")
+                err_msg = worker_result.get("error")
+
+                if result_path:
+                    all_created.append(result_path)
+                    if worker_result.get("used_fallback"):
+                        openpyxl_count += 1
+                        source_basename = worker_result.get("source_basename", "")
+                        if source_basename:
+                            openpyxl_files.append(source_basename)
+                    original_name = worker_result.get("source_basename", "")
+                    if original_name:
+                        manifest.setdefault(original_name, []).append(
+                            os.path.basename(result_path),
+                        )
+                else:
+                    logger.warning(
+                        "Повреждённый файл при разделении %s: %s",
+                        os.path.basename(src), err_msg,
+                    )
+                    corrupted.append(src)
+                    for fs in file_stats:
+                        if fs.file_path == src:
+                            fs.has_error = True
+                            fs.error_message = err_msg or "Unknown error"
+                            break
+            except Exception as e:
+                err_msg = str(e)
+                logger.warning(
+                    "Повреждённый файл при разделении %s: %s",
+                    os.path.basename(src), err_msg,
+                )
+                corrupted.append(src)
+                for fs in file_stats:
+                    if fs.file_path == src:
+                        fs.has_error = True
+                        fs.error_message = err_msg
+                        break
+
     # ── ШАГ 4.6: Вертикальный split для файлов, созданных горизонтальным split ──
     # После горизонтального split каждый файл содержит 1 лист.
     # Если на этом листе >1 операции — разделяем вертикально.
-    post_split_files = list(all_created)  # копия, т.к. all_created будет расширяться
+    #
+    # ВАЖНО: Исключаем файлы, уже созданные вертикальным split в ШАГ 4.5,
+    # чтобы не разделять повторно корректно разрезанные карты.
+    already_vertically_split_set = set(already_vertically_split)
+    post_split_files = [
+        f for f in all_created
+        if f not in already_vertically_split_set
+    ]
     for split_path in post_split_files:
         if os.path.splitext(split_path)[1].lower() != ".xlsx":
             continue
@@ -1704,7 +1940,10 @@ def split_cards_to_files(
                 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
                 _wb = openpyxl.load_workbook(split_path, read_only=True, data_only=True)
                 _sheet_count = len(_wb.sheetnames)
-                _sheet_name = _wb.active.title if _wb.active else ""
+                # Use sheets[0] as fallback: ZIP-splitter doesn't set activeTab
+                _sheet_name = (
+                    _wb.active.title if _wb.active else ""
+                ) or (_wb.sheetnames[0] if _wb.sheetnames else "")
                 _wb.close()
 
             if _sheet_count != 1 or not _sheet_name:

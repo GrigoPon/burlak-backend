@@ -31,6 +31,40 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+try:
+    from openpyxl.utils.cell import range_boundaries, get_column_letter
+except ImportError:
+    # Fallback implementations if openpyxl is not installed
+    import string
+
+    def get_column_letter(col_idx: int) -> str:
+        """Convert column index to Excel column letter (A=1, B=2, ...)."""
+        result = ""
+        while col_idx > 0:
+            col_idx, remainder = divmod(col_idx - 1, 26)
+            result = string.ascii_uppercase[remainder] + result
+        return result
+
+    def range_boundaries(range_string: str) -> tuple:
+        """Parse Excel range string like 'A1:B10' into (min_col, min_row, max_col, max_row)."""
+        if ':' not in range_string:
+            range_string = f"{range_string}:{range_string}"
+        start, end = range_string.split(':', 1)
+        start_col, start_row = _split_cell_ref(start.strip())
+        end_col, end_row = _split_cell_ref(end.strip())
+        return (start_col, start_row, end_col, end_row)
+
+    def _split_cell_ref(ref: str) -> tuple:
+        """Split cell reference like 'A1' into (col_index, row_number)."""
+        match = re.match(r'^([A-Za-z]+)(\d+)$', ref.strip())
+        if not match:
+            raise ValueError(f"Invalid cell reference: {ref}")
+        col_str, row_str = match.groups()
+        col = 0
+        for ch in col_str.upper():
+            col = col * 26 + (ord(ch) - ord('A') + 1)
+        return (col, int(row_str))
+
 # Подавляем предупреждения openpyxl о DrawingML (неполная поддержка)
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -142,6 +176,8 @@ class CardSplitter:
         self.max_workers = max_workers or os.cpu_count() or 4
         self.openpyxl_fallback_count = 0
         self.openpyxl_fallback_files: Set[str] = set()
+        self.copy_fallback_count = 0
+        self.copy_fallback_files: Set[str] = set()
         self.manifest: Dict[str, List[str]] = {}
 
     def split_file(
@@ -351,11 +387,33 @@ class CardSplitter:
                 "openpyxl успешно разделил лист: %s в файле %s",
                 keep_sheet_name, os.path.basename(source_path),
             )
+            return
         except Exception as openpyxl_e:
-            logger.error(
-                "Оба метода разделения листа '%s' из %s завершились ошибкой. "
-                "ZIP: см. выше. openpyxl: %s",
+            logger.warning(
+                "openpyxl не смог разделить лист '%s' из %s: %s. "
+                "Пробуем скопировать исходный файл...",
                 keep_sheet_name, os.path.basename(source_path), openpyxl_e,
+            )
+
+        # Попытка 3: Копирование исходного файла (последний шанс)
+        # Если файл валидный и открывается, но не поддаётся разделению —
+        # копируем его как есть. Лучше получить неразделённый файл,
+        # чем потерять данные из-за отправки в corrupted_cards.
+        try:
+            _copy_source_as_fallback(source_path, output_path)
+            self.copy_fallback_count += 1
+            self.copy_fallback_files.add(os.path.basename(source_path))
+            logger.info(
+                "Исходный файл скопирован (copy fallback) для листа '%s' из %s "
+                "(возможно несколько листов в выходном файле)",
+                keep_sheet_name, os.path.basename(source_path),
+            )
+            return
+        except Exception as copy_e:
+            logger.error(
+                "Все три метода разделения листа '%s' из %s завершились ошибкой. "
+                "ZIP: см. выше. openpyxl: %s. Copy: %s",
+                keep_sheet_name, os.path.basename(source_path), openpyxl_e, copy_e,
             )
             raise
 
@@ -472,19 +530,30 @@ class CardSplitter:
             ValueError: Если целевой лист не найден в файле.
         """
         # ── ФАЗА 1: Прочитать оригинальный ZIP ──
+        # Пробуем несколько кодировок для имён файлов в ZIP.
+        # Китайские Windows системы создают ZIP с GBK-кодировкой имён,
+        # но Python zipfile по умолчанию использует CP437, что ломает
+        # пути к файлам (mojibake) и делает невозможным поиск по имени.
         with open(source_path, 'rb') as f:
             zip_data = f.read()
 
         orig_entries: Dict[str, bytes] = {}
-        try:
-            with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-                for name in zf.namelist():
-                    try:
-                        orig_entries[name] = zf.read(name)
-                    except (zipfile.BadZipFile, Exception):
-                        pass
-        except zipfile.BadZipFile as e:
-            raise ValueError(f"Cannot read source ZIP: {e}")
+        _zip_loaded = False
+        for _enc in (None, 'gbk', 'utf-8', 'cp1251', 'latin-1'):
+            try:
+                kwargs = {'metadata_encoding': _enc} if _enc else {}
+                with zipfile.ZipFile(io.BytesIO(zip_data), 'r', **kwargs) as zf:
+                    for name in zf.namelist():
+                        try:
+                            orig_entries[name] = zf.read(name)
+                        except (zipfile.BadZipFile, Exception):
+                            pass
+                _zip_loaded = True
+                break
+            except (zipfile.BadZipFile, UnicodeDecodeError):
+                continue
+        if not _zip_loaded:
+            raise ValueError(f"Cannot read source ZIP with any encoding: {source_path}")
 
         # ── ФАЗА 2: Найти лист в workbook.xml ──
         wb_xml = orig_entries.get('xl/workbook.xml')
@@ -572,22 +641,37 @@ class CardSplitter:
             needed.add(sheet_rels_path)
             _trace_rels(sheet_rels_path, sheet_dir)
 
-        # Добавляем shared items (styles, theme, sharedStrings) из workbook.xml.rels
+        # Добавляем зависимости из workbook.xml.rels.
+        # Оставляем shared items, customXml, datastore, VBA и т.д.,
+        # но исключаем другие листы (worksheet/chartsheet/dialogsheet)
+        # и calcChain (цепь вычислений, невалидна после удаления листов).
         for rel_el in rels_root:
             rel_id = rel_el.get('Id', '')
-            rel_type = rel_el.get('Type', '')
+            rel_type = rel_el.get('Type', '').lower()
             rel_target = rel_el.get('Target', '')
             if rel_id == target_r_id:
                 continue  # Пропускаем сам лист (уже добавлен)
-            # Добавляем styles, theme, sharedStrings
-            if ('styles' in rel_type.lower()
-                    or 'theme' in rel_type.lower()
-                    or 'sharedstrings' in rel_type.lower()):
+            # Исключаем связи на другие листы и невалидный calcChain
+            if any(t in rel_type for t in [
+                'worksheet', 'chartsheet', 'dialogsheet', 'calcchain',
+            ]):
+                continue
+            # Ресолвим путь
+            if rel_target.startswith('/'):
+                resolved = rel_target.lstrip('/')
+            else:
                 resolved = os.path.normpath(
                     os.path.join('xl', rel_target)
                 ).replace(os.sep, '/')
-                if resolved in orig_entries:
-                    needed.add(resolved)
+            if resolved in orig_entries:
+                needed.add(resolved)
+                # Трассируем под-связи (например customXml/_rels/item1.xml.rels)
+                res_dir = os.path.dirname(resolved)
+                res_base = os.path.basename(resolved)
+                sub_rels = f"{res_dir}/_rels/{res_base}.rels"
+                if sub_rels in orig_entries:
+                    needed.add(sub_rels)
+                    _trace_rels(sub_rels, res_dir)
 
         # Добавляем docProps (core, app, custom) — не влияют на загрузку листа
         doc_props = [n for n in orig_entries if n.startswith('docProps/')]
@@ -773,11 +857,13 @@ def _modify_workbook_rels_text(
         # Всегда оставляем сохранённый лист
         if rid == target_r_id:
             return rel
-        # Оставляем shared items
-        if any(st in rtype for st in ['styles', 'theme', 'sharedstrings']):
-            return rel
-        # Удаляем всё остальное
-        return ''
+        # Удаляем связи других листов и невалидный calcChain
+        if any(t in rtype for t in [
+            'worksheet', 'chartsheet', 'dialogsheet', 'calcchain',
+        ]):
+            return ''
+        # Остальные связи (styles, theme, sharedStrings, customXml, VBA и др.) сохраняем
+        return rel
 
     return re.sub(r'<Relationship[^>]*/>', _keep_relevant_rels, rels_text)
 
@@ -853,29 +939,44 @@ def _infer_content_type(path: str) -> Optional[str]:
 def _validate_split_file(path: str) -> bool:
     """Verify a split .xlsx file has valid sheet XML and can be opened.
 
+    Использует ValidationPipeline для comprehensive проверки
+    (structural + schema levels).
+
     Returns True if the file is valid, False if it should be deleted.
     """
     try:
-        with zipfile.ZipFile(path, 'r') as zf:
-            has_sheet = False
-            for name in zf.namelist():
-                if (name.endswith('.xml')
-                        and 'sheet' in name.lower()
-                        and '_rels' not in name):
-                    data = zf.read(name)
-                    root = ET.fromstring(data)
-                    ns = f'{{{NS_MAIN}}}sheetData'
-                    if root.find(ns) is None:
-                        logger.warning(
-                            "Invalid split file %s: missing sheetData in %s",
-                            os.path.basename(path), name)
-                        return False
-                    has_sheet = True
-                    break
-            return has_sheet
-    except (zipfile.BadZipFile, ET.ParseError, OSError) as e:
-        logger.warning("Invalid split file %s: %s", os.path.basename(path), e)
-        return False
+        from burlak_parser.validator import validate_split_file
+        result = validate_split_file(path)
+        if not result.is_valid:
+            for issue in result.errors:
+                logger.warning(
+                    "Invalid split file %s: [%s] %s",
+                    os.path.basename(path), issue.level, issue.message,
+                )
+        return result.is_valid
+    except ImportError:
+        # Fallback: если validator недоступен, используем простую проверку
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                has_sheet = False
+                for name in zf.namelist():
+                    if (name.endswith('.xml')
+                            and 'sheet' in name.lower()
+                            and '_rels' not in name):
+                        data = zf.read(name)
+                        root = ET.fromstring(data)
+                        ns = f'{{{NS_MAIN}}}sheetData'
+                        if root.find(ns) is None:
+                            logger.warning(
+                                "Invalid split file %s: missing sheetData in %s",
+                                os.path.basename(path), name)
+                            return False
+                        has_sheet = True
+                        break
+                return has_sheet
+        except (zipfile.BadZipFile, ET.ParseError, OSError) as e:
+            logger.warning("Invalid split file %s: %s", os.path.basename(path), e)
+            return False
 
 
 def _safe_filename(name: str) -> str:
@@ -885,7 +986,13 @@ def _safe_filename(name: str) -> str:
       - Символы, запрещённые в именах файлов ОС: < > : " / \\ | ? *
       - Управляющие символы (0x00-0x1f)
       - Декоративные Unicode: ☆ ★ ● ○ ◆ ◇ ■ □ и т.д.
+      - Суррогатные пары (некорректный Unicode)
       - Множественные подчёркивания/точки/пробелы → одинарные
+
+    Сохраняет:
+      - Китайские иероглифы (CJK)
+      - Кириллицу
+      - Латиницу и цифры
 
     Args:
         name: Исходное имя файла.
@@ -893,7 +1000,9 @@ def _safe_filename(name: str) -> str:
     Returns:
         Безопасное имя файла с сохранёнными кириллицей/иероглифами.
     """
-    result = _ILLEGAL_FS_CHARS_RE.sub("_", name)
+    # Удаляем суррогатные пары (некорректный Unicode из битых кодировок)
+    result = name.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+    result = _ILLEGAL_FS_CHARS_RE.sub("_", result)
     result = _DECORATIVE_CHARS_RE.sub("", result)
     result = _MULTI_SEP_RE.sub("_", result)
     return result.strip("_ .")
@@ -1121,6 +1230,40 @@ def _verify_xlsx_integrity(file_path: str) -> Tuple[bool, str]:
 
 
 
+def _copy_source_as_fallback(
+    source_path: str,
+    output_path: str,
+) -> None:
+    """Скопировать исходный файл как есть — последний шанс перед corrupted.
+
+    Используется когда и ZIP-метод, и openpyxl не смогли выделить лист.
+    Проверяет, что исходный файл открывается через openpyxl (lenient check).
+    Если файл валидный — копирует его в выходной путь.
+
+    Это предотвращает попадание в corrupted_cards файлов, которые
+    являются функционально валидными, но не поддаются разделению
+    из-за нестандартной структуры OOXML (WPS Office и т.д.).
+
+    Args:
+        source_path: Путь к исходному .xlsx файлу.
+        output_path: Путь для сохранения.
+
+    Raises:
+        ValueError: Если исходный файл не открывается.
+    """
+    try:
+        from burlak_parser.validator import validate_split_file_lenient
+        result = validate_split_file_lenient(source_path)
+        if not result.is_valid:
+            raise ValueError(
+                f"Source file cannot be opened: {result.errors[0].message if result.errors else 'unknown'}"
+            )
+        shutil.copy2(source_path, output_path)
+    except ImportError:
+        # Fallback: just try to copy if validator not available
+        shutil.copy2(source_path, output_path)
+
+
 def _extract_to_path_worker(
     source_path: str,
     output_path: str,
@@ -1171,18 +1314,127 @@ def _extract_to_path_worker(
 
 
 
-def find_table_boundaries(
+def _detect_xinyuan_boundaries(
     source_path: str,
     sheet_name: str,
 ) -> List[TableBoundary]:
+    """Обнаружить границы операций по маркеру '鑫源汽车'.
+
+    Специальный детектор для SWM мега-файлов (4_G01P作业指导书, G01P后备箱 и т.д.),
+    где каждая операционная карта начинается с '鑫源汽车'.
+    Карты расположены вертикально с фиксированным шагом (36-37 строк).
+
+    Args:
+        source_path: Путь к .xlsx файлу.
+        sheet_name: Имя листа.
+
+    Returns:
+        Список TableBoundary для каждой найденной операции.
+    """
+    from burlak_parser.card_parser import ExcelReader
+
+    boundaries: List[TableBoundary] = []
+    reader = ExcelReader(source_path)
+    try:
+        if sheet_name not in reader.sheet_names:
+            return boundaries
+
+        ws = reader.get_sheet(sheet_name)
+        max_row = ws.max_row or 0
+        if max_row < 10:
+            return boundaries
+
+        max_col = min((ws.max_column or 10) + 1, 20)
+
+        # Ищем все строки с '鑫源汽车' в первых 10 колонках
+        marker_rows: List[int] = []
+        for r in range(1, max_row + 1):
+            for c in range(1, min(max_col, 10)):
+                val = ws.cell_value(r, c)
+                if val is not None and '鑫源汽车' in str(val):
+                    marker_rows.append(r)
+                    break
+
+        if len(marker_rows) < 2:
+            return boundaries
+
+        # Вычисляем шаг (медиана интервалов)
+        spacings = [marker_rows[i + 1] - marker_rows[i]
+                    for i in range(len(marker_rows) - 1)]
+        step = sorted(spacings)[len(spacings) // 2]  # медиана
+
+        # Проверяем стабильность шага (>60% интервалов в пределах ±5 от медианы)
+        consistent = sum(1 for s in spacings if abs(s - step) <= 5)
+        if consistent < len(spacings) * 0.6:
+            logger.debug(
+                'Xinyuan boundaries: inconsistent spacing (step=%d, consistent=%d/%d)',
+                step, consistent, len(spacings),
+            )
+            return boundaries
+
+        # Строим границы: каждая '鑫源汽车' — начало новой карты
+        for idx, marker_row in enumerate(marker_rows):
+            # Граница данных: от текущего маркера до следующего (или конца файла)
+            if idx + 1 < len(marker_rows):
+                data_end = marker_rows[idx + 1] - 1
+            else:
+                data_end = max_row
+
+            # Извлекаем имя операции: ищем CJK текст в строке маркера
+            # (колонки B-J, пропуская колонку A где сам маркер)
+            op_name = ''
+            for c in range(2, min(max_col, 10)):
+                val = ws.cell_value(marker_row, c)
+                if val is not None:
+                    val_str = str(val).strip()
+                    if len(val_str) > 2 and re.search(r'[\u4e00-\u9fff]', val_str):
+                        op_name = val_str
+                        break
+
+            boundaries.append(TableBoundary(
+                header_row=marker_row,
+                data_start=marker_row + 1,
+                data_end=data_end,
+                operation_name=op_name,
+                source_path=source_path,
+                sheet_name=sheet_name,
+                card_label=(
+                    f"{idx + 1:03d}_{_safe_filename(op_name)[:30]}"
+                    if op_name else f"Op{idx + 1:03d}"
+                ),
+            ))
+
+        logger.info(
+            'Xinyuan boundaries: found %d cards (step=%d rows) in %s',
+            len(boundaries), step, os.path.basename(source_path),
+        )
+
+    finally:
+        reader.close()
+
+    return boundaries
+
+
+def find_table_boundaries(
+    source_path: str,
+    sheet_name: str,
+    min_confidence: float = 0.2,
+) -> List[TableBoundary]:
     """Обнаружить границы таблиц (операций) внутри одного листа.
 
-    Для SWM-карт, где один лист содержит несколько операций,
-    каждая со своим заголовком и данными.
+    Универсальный детектор для любых брендов и структур файлов.
+    Жёсткий лимит max_row <= 500 УДАЛЁН — анализируются все листы.
+    Каждая найденная граница получает confidence score для фильтрации
+    ложных срабатываний (меньше false positives на маленьких файлах).
+
+    SWM-формат: таблицы могут не иметь явной qty-колонки (qty_col=0).
+    Для таких случаев confidence score вычисляется без учёта qty.
 
     Args:
         source_path: Путь к .xlsx файлу.
         sheet_name: Имя листа для анализа.
+        min_confidence: Минимальный порог уверенности (0.0-1.0).
+                        Понижен с 0.3 до 0.2 для поддержки SWM-формата.
 
     Returns:
         Список TableBoundary с границами каждой таблицы.
@@ -1201,12 +1453,21 @@ def find_table_boundaries(
         start_search = 1
         max_row = ws.max_row or 0
 
-        # ── GUARD: NEVER trigger vertical split on sheets with <= 500 rows ──
-        # Standard Jetour/Changan cards are small (20-200 rows), and vertical
-        # splitting them deletes the original single-sheet file, losing data.
-        # Only SWM megasheets (1000-8000 rows) should be vertically split.
-        if max_row <= 500:
+        if max_row < 3:
             return boundaries
+
+        # ── High-priority: SWM '鑫源汽车' marker detection ──
+        # Проверяем FIRST, до HeuristicAnalyzer, потому что
+        # find_part_table находит границы НЕ совпадающие с 鑫源汽车
+        # (смещены на ~20 строк), что приводит к 2 картам в одном файле.
+        xinyuan_first = _detect_xinyuan_boundaries(source_path, sheet_name)
+        if xinyuan_first:
+            logger.info(
+                'Xinyuan (primary): found %d cards in %s',
+                len(xinyuan_first), os.path.basename(source_path),
+            )
+            reader.close()
+            return xinyuan_first
 
         max_tables = 500
 
@@ -1223,28 +1484,27 @@ def find_table_boundaries(
             if header_row < start_search:
                 break
 
-            # False-positive check: reject if qty_col not found (real tables need qty)
-            if qty_col is None or qty_col <= 0:
-                start_search = header_row + 1
-                continue
-
-            # False-positive check: skip if header row has too few non-empty cells
-            # (change-record rows like "标记 | 处数 | 更改文件号" have few meaningful cells)
-            header_non_empty = 0
-            max_check_col = min((ws.max_column or 10) + 1, 50)
-            for hc in range(1, max_check_col):
-                hv = ws.cell_value(header_row, hc)
-                if hv is not None and str(hv).strip():
-                    header_non_empty += 1
-            if header_non_empty < 3:
-                start_search = header_row + 1
-                continue
-
             # Определяем operation_name
             operation_name = HeuristicAnalyzer.extract_operation_name(ws, header_row)
 
             # Определяем последнюю строку данных (data_end)
             data_end = _find_table_data_end(ws, header_row, max_row, part_no_col)
+
+            # Confidence scoring: отсеиваем false positives
+            # ВАЖНО: qty_col может быть 0 в SWM-формате — confidence
+            # вычисляется и без qty (с пониженным порогом)
+            confidence = _compute_boundary_confidence(
+                ws, header_row, data_end, part_no_col,
+                qty_col if qty_col and qty_col > 0 else 0,
+                name_col if name_col and name_col > 0 else 0,
+            )
+            if confidence < min_confidence:
+                logger.debug(
+                    "Boundary at row %d rejected: confidence %.2f < %.2f",
+                    header_row, confidence, min_confidence,
+                )
+                start_search = header_row + 1
+                continue
 
             boundaries.append(TableBoundary(
                 header_row=header_row,
@@ -1261,13 +1521,144 @@ def find_table_boundaries(
     finally:
         reader.close()
 
+    # High-priority fallback: SWM-формат '鑫源汽车' (mega-files с 83+ картами)
+    if not boundaries and max_row > 50:
+        boundaries = _detect_xinyuan_boundaries(source_path, sheet_name)
+
     # Fallback: обнаружение таблиц проверки качества (检验项目 pattern)
-    # Если стандартные таблицы деталей не найдены, ищем повторяющиеся
-    # блоки с заголовком "检验项目" в колонке B каждые ~20 строк.
     if not boundaries:
         boundaries = _detect_inspection_boundaries(source_path, sheet_name)
 
+    # Fallback: универсальный детектор по повторяющимся шаблонам строк
+    # (для SWM-формата, где find_part_table может пропускать таблицы)
+    if not boundaries and max_row > 100:
+        boundaries = _detect_repeating_pattern_boundaries(source_path, sheet_name)
+
+    # Mega-sheet force: если лист очень большой (500+ строк), а найдено
+    # слишком мало границ (менее 5% строк покрыто) — эвристика могла
+    # пропустить большинство таблиц. Принудительно запускаем
+    # универсальный детектор повторяющихся шаблонов.
+    if boundaries and max_row > 200:
+        covered_rows = sum(b.data_end - b.header_row for b in boundaries)
+        coverage_ratio = covered_rows / max(max_row, 1)
+        if coverage_ratio < 0.3 or len(boundaries) < 3:
+            logger.info(
+                "Mega-sheet (%d rows, %d boundaries, %.1f%% coverage) "
+                "— forcing re-detection",
+                max_row, len(boundaries), coverage_ratio * 100,
+            )
+            # Prefer xinyuan detection for SWM files
+            xinyuan_boundaries = _detect_xinyuan_boundaries(
+                source_path, sheet_name,
+            )
+            if xinyuan_boundaries and len(xinyuan_boundaries) > len(boundaries):
+                boundaries = xinyuan_boundaries
+                logger.info(
+                    "Xinyuan detection found %d boundaries",
+                    len(boundaries),
+                )
+            else:
+                pattern_boundaries = _detect_repeating_pattern_boundaries(
+                    source_path, sheet_name,
+                )
+                if pattern_boundaries and len(pattern_boundaries) > len(boundaries):
+                    boundaries = pattern_boundaries
+                    logger.info(
+                        "Repeating pattern detection found %d boundaries",
+                        len(boundaries),
+                    )
+
+    # ── Boundary snapping: close gaps between operations ──
+    # Ensures every row between consecutive operations is assigned.
+    # Without this, rows between data_end and next header_row are lost.
+    if boundaries:
+        boundaries.sort(key=lambda b: b.header_row)
+        for i in range(len(boundaries) - 1):
+            if boundaries[i].data_end < boundaries[i + 1].header_row - 1:
+                boundaries[i].data_end = boundaries[i + 1].header_row - 1
+
     return boundaries
+
+
+def _compute_boundary_confidence(
+    ws: Any,
+    header_row: int,
+    data_end: int,
+    part_no_col: int,
+    qty_col: int,
+    name_col: int,
+) -> float:
+    """Вычислить уверенность в границах таблицы (0.0-1.0).
+
+    Оценка на основе:
+      - Количество ключевых слов в заголовке (до 0.4)
+      - Плотность данных: непустые строки / общие строки (до 0.3)
+      - Количество валидных part-номеров в данных (до 0.3)
+
+    ВАЖНО: qty_col может быть 0 (SWM-формат) — в этом случае
+    проверка qty пропускается, confidence снижается через более
+    низкий min_confidence порог.
+    """
+    from burlak_parser.heuristic_analyzer import (
+        HeuristicAnalyzer, PART_NO_KEYWORDS, QTY_KEYWORDS, NAME_KEYWORDS,
+    )
+    from burlak_parser.normalizer import is_valid_part_number
+
+    score = 0.0
+
+    # 1. Header quality (0.0-0.4)
+    max_check_col = min((ws.max_column or 10) + 1, 50)
+    header_non_empty = 0
+    header_keywords = 0
+    for hc in range(1, max_check_col):
+        hv = HeuristicAnalyzer.get_cell_value(ws, header_row, hc)
+        if hv is not None and str(hv).strip():
+            header_non_empty += 1
+            hv_lower = str(hv).strip().lower()
+            if any(kw in hv_lower for kw in PART_NO_KEYWORDS):
+                header_keywords += 1
+            if qty_col > 0 and any(kw in hv_lower for kw in QTY_KEYWORDS):
+                header_keywords += 1
+            if name_col > 0 and any(kw in hv_lower for kw in NAME_KEYWORDS):
+                header_keywords += 1
+
+    if header_non_empty >= 3:
+        score += 0.2
+    elif header_non_empty >= 2:
+        score += 0.1
+    score += min(header_keywords * 0.1, 0.2)
+
+    # 2. Data density (0.0-0.3)
+    data_rows = data_end - header_row
+    if data_rows > 0:
+        non_empty_data = 0
+        sample_start = header_row + 1
+        sample_end = min(data_end + 1, header_row + 50)
+        sample_count = sample_end - sample_start
+        for r in range(sample_start, sample_end):
+            v = HeuristicAnalyzer.get_cell_value(ws, r, part_no_col)
+            if v is not None and str(v).strip():
+                non_empty_data += 1
+        if sample_count > 0:
+            density = non_empty_data / sample_count
+            score += density * 0.3
+
+    # 3. Valid part numbers (0.0-0.3)
+    valid_pn = 0
+    total_pn = 0
+    check_end = min(data_end + 1, header_row + 30)
+    for r in range(header_row + 1, check_end):
+        v = HeuristicAnalyzer.get_cell_value(ws, r, part_no_col)
+        if v is not None:
+            total_pn += 1
+            pn_str = str(v).strip()
+            if is_valid_part_number(pn_str):
+                valid_pn += 1
+    if total_pn > 0:
+        pn_ratio = valid_pn / total_pn
+        score += pn_ratio * 0.3
+
+    return min(score, 1.0)
 
 
 # Ключевые слова для обнаружения таблиц проверки качества
@@ -1368,15 +1759,29 @@ def _find_table_data_end(
 ) -> int:
     """Найти последнюю строку данных таблицы.
 
-    Определяет границу между текущей таблицей и следующей операцией,
-    используя полный список PART_NO_KEYWORDS и сканирование 25 колонок.
+    Определяет границу между текущей таблицей и следующей операцией.
+    Срабатывает на:
+      1. Строку-заголовок следующей таблицы (содержит PART_NO_KEYWORDS)
+      2. Название следующей операции (строка с CJK текстом, где part_no_col пуст)
+      3. 5+ полностью пустых строк подряд (ВСЕ колонки пусты)
+      4. Резкое изменение формата строки (мерджи, пустые колонки)
+
+    ВАЖНО: empty-run проверяет ВСЮ строку на пустоту, а не только part_no колонку.
+    В SWM мега-файлах part-номера занимают первые несколько строк операции,
+    а затем идут строки инструкций и картинок где part_no_col пуст.
+    Проверка только part_no_col обрезала бы операцию после 2 строк.
     """
     from burlak_parser.heuristic_analyzer import HeuristicAnalyzer, PART_NO_KEYWORDS
+    CJK_RE = re.compile(r'[一-鿿㐀-䶿]')
 
     empty_run = 0
-    for r in range(header_row + 1, min(max_row + 1, header_row + 500)):
-        # ── New-header detection: check ALL rows, not just empty part_no_col ──
-        # A new operation header has 2+ non-empty cells and a PART_NO_KEYWORD
+    max_scan = min(max_row - header_row, 500)
+    for r in range(header_row + 1, header_row + max_scan + 1):
+        if r > max_row:
+            break
+
+        # Count non-empty cells across ALL scanned columns to determine
+        # if the ENTIRE row is empty (not just part_no column)
         non_empty = 0
         row_values_check: List[str] = []
         max_check_col = min((ws.max_column or 10) + 1, 25)
@@ -1394,19 +1799,180 @@ def _find_table_data_end(
                 for rv in row_values_check
             )
             if has_part_no_keyword:
-                # This is a new table header — end current table at previous row
                 return r - 1
 
-        # ── Empty-run detection (fallback for tables with blank separator rows) ──
-        val = ws.cell_value(r, part_no_col)
-        if val is None or (isinstance(val, str) and not val.strip()):
+        # ── Operation title detection ──
+        # Если part_no_col пуст, но в строке есть CJK текст (название операции),
+        # это граница следующей операции
+        pn_val = ws.cell_value(r, part_no_col)
+        pn_is_empty = pn_val is None or (isinstance(pn_val, str) and not pn_val.strip())
+
+        if pn_is_empty and non_empty >= 1:
+            # Проверяем: есть ли CJK текст в строке (признак названия операции)
+            has_cjk = False
+            for c in range(1, max_check_col):
+                v = ws.cell_value(r, c)
+                if v is not None and CJK_RE.search(str(v)):
+                    has_cjk = True
+                    break
+            if has_cjk:
+                # Проверяем: не является ли это просто пустой строкой с одним значением
+                # Если CJK текст и part_no_col пуст — вероятно, это название операции
+                # Проверяем что следующая строка тоже пуста или содержит заголовок
+                if r + 1 <= max_row:
+                    next_pn = ws.cell_value(r + 1, part_no_col)
+                    next_is_empty = next_pn is None or (isinstance(next_pn, str) and not next_pn.strip())
+                    if next_is_empty:
+                        # Два пустых part_no подряд с CJK текстом — граница
+                        return r - 1
+                # Одинокая CJK-строка с пустым part_no — тоже граница
+                # (для SWM где заголовки идут вплотную)
+                if r - header_row > 3:
+                    return r - 1
+
+        # ── Empty-run detection: check FULL row emptiness ──
+        # Only count as "empty" when ALL scanned columns are empty.
+        # Part-number column being empty is normal for instruction/image rows.
+        if non_empty == 0:
             empty_run += 1
-            if empty_run >= 3:
-                return r - 3
+            if empty_run >= 5:
+                return r - 5
         else:
             empty_run = 0
 
-    return min(max_row, header_row + 499)
+    return min(max_row, header_row + max_scan)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# УНИВЕРСАЛЬНЫЙ ДЕТЕКТОР ПОВТОРЯЮЩИХСЯ ШАБЛОНОВ (SWM-style)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _detect_repeating_pattern_boundaries(
+    source_path: str,
+    sheet_name: str,
+) -> List[TableBoundary]:
+    """Обнаружить границы таблиц через поиск повторяющихся шаблонов строк.
+
+    Используется как универсальный fallback для SWM-формата, где
+    find_part_table() может пропускать таблицы из-за нестандартных
+    заголовков или отсутствия явных qty/name колонок.
+
+    Алгоритм:
+      1. Находит строки, где колонка A содержит числа (признак part-number)
+      2. Группирует последовательные блоки данных
+      3. Разделяет блоки по пустым строкам или строкам-заголовкам
+
+    Returns:
+        Список TableBoundary.
+    """
+    from burlak_parser.heuristic_analyzer import HeuristicAnalyzer
+    from burlak_parser.card_parser import ExcelReader
+
+    boundaries: List[TableBoundary] = []
+    reader = ExcelReader(source_path)
+    try:
+        if sheet_name not in reader.sheet_names:
+            return boundaries
+
+        ws = reader.get_sheet(sheet_name)
+        max_row = ws.max_row or 0
+        if max_row < 20:
+            return boundaries
+
+        CJK_RE = re.compile(r'[一-鿿㐀-䶿]')
+
+        # Сканируем все строки: ищем блоки данных (part-number в колонках A-D)
+        # Универсальный поиск: part-numbers могут быть в любой из первых 4 колонок
+        data_blocks: List[Tuple[int, int]] = []  # (start_row, end_row)
+        in_block = False
+        block_start = 0
+        empty_count = 0
+        SCAN_COLS = 8  # Columns A-H (wider scan for SWM where data may be right-aligned)
+
+        for r in range(1, max_row + 1):
+            # Check data in columns A-H
+            has_data = False
+            for c in range(1, SCAN_COLS + 1):
+                val = ws.cell_value(r, c)
+                if val is not None and str(val).strip():
+                    has_data = True
+                    break
+
+            # Check for CJK header row (operation title) in columns A-C
+            is_cjk_header = False
+            for c in range(1, 4):
+                val = ws.cell_value(r, c)
+                if val is not None and CJK_RE.search(str(val)):
+                    is_cjk_header = True
+                    break
+
+            if has_data and not is_cjk_header:
+                if not in_block:
+                    in_block = True
+                    block_start = r
+                    empty_count = 0
+                empty_count = 0
+            else:
+                if in_block:
+                    empty_count += 1
+                    # Use threshold 5 (consistent with _find_table_data_end)
+                    # to avoid premature block splitting on instruction/image rows
+                    if empty_count >= 5 or is_cjk_header:
+                        # End of block
+                        data_blocks.append((block_start, r - empty_count))
+                        in_block = False
+                        empty_count = 0
+
+        # Закрываем последний блок
+        if in_block:
+            data_blocks.append((block_start, max_row))
+
+        # Фильтруем: минимум 3 строки данных в блоке
+        for idx, (start, end) in enumerate(data_blocks):
+            if end - start < 2:
+                continue
+
+            # Ищем заголовок над блоком
+            header_row = start
+            for r in range(max(1, start - 5), start):
+                row_vals = []
+                for c in range(1, 12):
+                    v = ws.cell_value(r, c)
+                    if v is not None:
+                        row_vals.append(str(v).strip().lower())
+                if any(
+                    any(kw in rv for kw in HeuristicAnalyzer._get_part_no_keywords())
+                    for rv in row_vals
+                ):
+                    header_row = r
+                    break
+
+            # Extract operation name
+            op_name = ""
+            for r in range(max(1, header_row - 3), header_row):
+                for c in range(1, 8):
+                    v = ws.cell_value(r, c)
+                    if v is not None and CJK_RE.search(str(v)):
+                        op_name = str(v).strip()
+                        if len(op_name) > 3:
+                            break
+                if op_name:
+                    break
+
+            boundaries.append(TableBoundary(
+                header_row=header_row,
+                data_start=start,
+                data_end=end,
+                operation_name=op_name,
+                source_path=source_path,
+                sheet_name=sheet_name,
+                card_label=f"{idx + 1:03d}_{_safe_filename(op_name)[:30]}" if op_name else f"Op{idx + 1:03d}",
+            ))
+
+    finally:
+        reader.close()
+
+    return boundaries
 
 
 def _vertical_split_worker(
@@ -1527,12 +2093,33 @@ def _vertical_split_worker(
             elif 'vml' in rtype.lower():
                 vml_path = resolved
 
-    # Читаем drawing XML (если есть)
-    drawing_xml: Optional[ET.Element] = None
+    # Читаем drawing XML как bytes (НЕ через ET — сохраняем оригинальные namespaces)
+    drawing_xml_bytes: Optional[bytes] = None
     if drawing_path and drawing_path in all_entries:
-        drawing_xml = ET.fromstring(all_entries[drawing_path])
+        drawing_xml_bytes = all_entries[drawing_path]
 
     safe_label_prefix = _safe_filename(card_label)[:50] if card_label else ""
+
+    # ── Предвычисляем rId → media_path маппинг для drawing .rels ──
+    drawing_rels_map: Dict[str, str] = {}  # rId -> resolved media path
+    drawing_rels_path: Optional[str] = None
+    if drawing_path:
+        drawing_dir = os.path.dirname(drawing_path)
+        drawing_base = os.path.basename(drawing_path)
+        drawing_rels_path = f"{drawing_dir}/_rels/{drawing_base}.rels"
+        if drawing_rels_path in all_entries:
+            try:
+                dr_root = ET.fromstring(all_entries[drawing_rels_path])
+                for dr_el in dr_root:
+                    rid = dr_el.get('Id', '')
+                    target = dr_el.get('Target', '')
+                    if rid and target:
+                        resolved = os.path.normpath(
+                            os.path.join(drawing_dir, target)
+                        ).replace(os.sep, '/')
+                        drawing_rels_map[rid] = resolved
+            except Exception as e:
+                logger.debug("Failed to parse drawing rels: %s", e)
 
     for i, boundary in enumerate(boundaries):
         op_label = boundary.card_label or f"Op{i + 1:03d}"
@@ -1551,6 +2138,21 @@ def _vertical_split_worker(
                 i + 1, os.path.basename(source_path))
             continue
 
+        # ── Фильтруем drawing XML и собираем retained rIds ──
+        # Regex-based: bytes immutable → no deep copy needed.
+        filtered_drawing_bytes: Optional[bytes] = None
+        retained_image_paths: Set[str] = set()
+        current_retained_rids: Set[str] = set()
+        if drawing_path and drawing_xml_bytes is not None:
+            filtered_drawing_bytes, current_retained_rids = _filter_drawing_xml_with_rids(
+                drawing_xml_bytes, boundary.header_row, boundary.data_end,
+            )
+            # Маппим retained rIds → media paths
+            for rid in current_retained_rids:
+                media_path = drawing_rels_map.get(rid, '')
+                if media_path:
+                    retained_image_paths.add(media_path)
+
         try:
             with zipfile.ZipFile(output_path, 'w',
                                  zipfile.ZIP_DEFLATED) as zf_write:
@@ -1558,14 +2160,26 @@ def _vertical_split_worker(
                     if name == sheet_target:
                         data = _filter_sheet_xml(
                             data, boundary.header_row, boundary.data_end)
-                    elif name == drawing_path and drawing_xml is not None:
-                        data = _filter_drawing_xml(
-                            drawing_xml, boundary.header_row,
-                            boundary.data_end)
+                    elif name == drawing_path and filtered_drawing_bytes is not None:
+                        data = filtered_drawing_bytes
+                    elif (drawing_rels_path and name == drawing_rels_path
+                          and filtered_drawing_bytes is not None):
+                        data = _filter_drawing_rels(data, current_retained_rids)
                     elif name == vml_path and vml_path is not None:
                         data = _filter_vml_xml(
                             data, boundary.header_row,
                             boundary.data_end)
+
+                    # ── Фильтрация медиа: пропускаем неиспользуемые изображения ──
+                    # Фильтруем ТОЛЬКО если:
+                    #   1. drawing_rels_map непустой (успешно распарсили .rels)
+                    #   2. retained_image_paths непустой (есть anchors в диапазоне)
+                    # Если оба пусты — копируем все медиа (safe default, нет потери).
+                    if (name.startswith('xl/media/')
+                            and drawing_rels_map
+                            and retained_image_paths):
+                        if name not in retained_image_paths:
+                            continue  # Не копируем неиспользуемое изображение
 
                     zf_write.writestr(name, data)
 
@@ -1598,172 +2212,363 @@ def _filter_sheet_xml(
     keep_from_row: int,
     keep_to_row: int,
 ) -> bytes:
-    """Отфильтровать sheet XML, оставляя только строки в диапазоне.
+    """Filter sheet XML using regex to preserve namespace declarations.
 
-    Корректирует позиции строк, merged cells, auto filter,
-    conditional formatting и data validation.
+    Uses regex/string-based approach instead of ET.fromstring/ET.tostring
+    to preserve original XML declaration, namespace declarations
+    (xmlns:mc, xmlns:x14ac, mc:Ignorable, etc.) and avoid Excel error
+    HRESULT 0x808c0002 when opening files.
     """
-    root = ET.fromstring(sheet_data)
-    ns = NS_MAIN
+    xml_text = sheet_data.decode("utf-8")
 
-    # 1. Фильтруем <row> элементы
-    sheet_data_elem = root.find(f'{{{ns}}}sheetData')
-    if sheet_data_elem is not None:
-        rows_to_remove = []
-        for row_el in sheet_data_elem.findall(f'{{{ns}}}row'):
-            r = int(row_el.get('r', '0'))
-            if r < keep_from_row or r > keep_to_row:
-                rows_to_remove.append(row_el)
-            else:
-                # Корректируем номер строки
-                new_r = r - keep_from_row + 1
-                row_el.set('r', str(new_r))
-                # Корректируем cell references (r="A3390" → r="A1")
-                for c_el in row_el.findall(f'{{{ns}}}c'):
-                    ref = c_el.get('r', '')
-                    m = _CELL_REF_RE.match(ref)
-                    if m:
-                        c_el.set('r', f'{m.group(1)}{new_r}')
-                # Корректируем row spans
-                spans = row_el.get('spans')
-                if spans:
-                    row_el.set('spans', spans)  # spans — col range, не меняем
-        for row_el in rows_to_remove:
-            sheet_data_elem.remove(row_el)
-
-    # 1b. Обновляем <dimension> чтобы отражал реальное количество строк
-    dim_elem = root.find(f'{{{ns}}}dimension')
-    if dim_elem is not None:
-        # Parse existing dimension to get max column
-        old_ref = dim_elem.get('ref', 'A1')
-        from openpyxl.utils import get_column_letter, range_boundaries
+    # 1. Update <dimension ref="A1:X999"/>
+    def _update_dim(m: re.Match) -> str:
+        full = m.group(0)
+        ref = m.group(1)
         try:
-            _, _, max_col, _ = range_boundaries(old_ref)
+            _, _, max_col, _ = range_boundaries(ref)
         except (ValueError, IndexError):
             max_col = 10
         new_count = keep_to_row - keep_from_row + 1
-        dim_elem.set('ref', f'A1:{get_column_letter(max_col)}{new_count}')
+        return re.sub(
+            r'ref="[^"]*"',
+            f'ref="A1:{get_column_letter(max_col)}{new_count}"',
+            full,
+        )
+    xml_text = re.sub(
+        r'<[^>]*dimension[^>]*ref="([^"]+)"[^>]*/?\s*>',
+        _update_dim, xml_text, count=1,
+    )
 
-    # 2. Фильтруем mergeCells
-    merge_cells = root.find(f'{{{ns}}}mergeCells')
-    if merge_cells is not None:
-        to_remove = []
-        for mc in merge_cells.findall(f'{{{ns}}}mergeCell'):
-            ref = mc.get('ref', '')
-            if not ref:
+    # 2. Filter rows inside <sheetData> and reindex
+    _CELL_REF_RE = re.compile(r'(r=")([A-Za-z]+)(\d+)(")')
+
+    def _filter_sd(m: re.Match) -> str:
+        sd_open = m.group(1)
+        sd_content = m.group(2)
+        sd_close = m.group(3)
+
+        kept_rows = []
+        for row_m in re.finditer(
+            r'(<(?:[\w\-]+:)?row\b[^>]*>.*?</(?:[\w\-]+:)?row>)',
+            sd_content, re.DOTALL,
+        ):
+            row_xml = row_m.group(0)
+            r_match = re.search(r'\br="(\d+)"', row_xml)
+            if not r_match:
                 continue
-            parts = ref.split(':')
+            r = int(r_match.group(1))
+
+            if r < keep_from_row or r > keep_to_row:
+                continue
+
+            new_r = r - keep_from_row + 1
+            row_xml = re.sub(
+                r'(\br=")\d+(")',
+                lambda m, nr=new_r: f'{m.group(1)}{nr}{m.group(2)}',
+                row_xml,
+            )
+            def _upd_cref(cm: re.Match, nr=new_r) -> str:
+                return f'{cm.group(1)}{cm.group(2)}{nr}{cm.group(4)}'
+            row_xml = _CELL_REF_RE.sub(_upd_cref, row_xml)
+
+            kept_rows.append(row_xml)
+
+        return sd_open + "".join(kept_rows) + sd_close
+
+    xml_text = re.sub(
+        r'(<(?:[\w\-]+:)?sheetData[^>]*>)(.*?)(</(?:[\w\-]+:)?sheetData>)',
+        _filter_sd, xml_text, flags=re.DOTALL,
+    )
+
+    # 3. Filter mergeCells
+    def _filter_mc(m: re.Match) -> str:
+        mc_open = m.group(1)
+        mc_content = m.group(2)
+        mc_close = m.group(3)
+
+        kept_mcs = []
+        for cell_m in re.finditer(
+            r'<(?:[\w\-]+:)?mergeCell[^/]*/>', mc_content,
+        ):
+            cx = cell_m.group(0)
+            ref_m = re.search(r'ref="([^"]+)"', cx)
+            if not ref_m:
+                continue
+            ref = ref_m.group(1)
+            parts = ref.split(":")
             if len(parts) != 2:
                 continue
             try:
-                from openpyxl.utils import range_boundaries
                 min_col, min_r, max_col, max_r = range_boundaries(ref)
             except (ValueError, IndexError):
                 continue
             if max_r < keep_from_row or min_r > keep_to_row:
-                to_remove.append(mc)
-            else:
-                new_min_r = max(min_r, keep_from_row) - keep_from_row + 1
-                new_max_r = min(max_r, keep_to_row) - keep_from_row + 1
-                from openpyxl.utils import get_column_letter
-                new_ref = (
-                    f"{get_column_letter(min_col)}{new_min_r}:"
-                    f"{get_column_letter(max_col)}{new_max_r}")
-                mc.set('ref', new_ref)
-        for mc in to_remove:
-            merge_cells.remove(mc)
+                continue
+            nr1 = max(min_r, keep_from_row) - keep_from_row + 1
+            nr2 = min(max_r, keep_to_row) - keep_from_row + 1
+            new_ref = f"{get_column_letter(min_col)}{nr1}:{get_column_letter(max_col)}{nr2}"
+            cx = re.sub(r'ref="[^"]*"', f'ref="{new_ref}"', cx)
+            kept_mcs.append(cx)
 
-    # 3. Очищаем autoFilter (может ссылаться на удалённые строки)
-    auto_filter = root.find(f'{{{ns}}}autoFilter')
-    if auto_filter is not None:
-        root.remove(auto_filter)
+        if not kept_mcs:
+            return ""
+        mc_open = re.sub(
+            r'count="\d+"', f'count="{len(kept_mcs)}"', mc_open,
+        )
+        return mc_open + "".join(kept_mcs) + mc_close
 
-    # 4. Очищаем dataValidations
-    data_validations = root.find(f'{{{ns}}}dataValidations')
-    if data_validations is not None:
-        root.remove(data_validations)
+    xml_text = re.sub(
+        r'(<(?:[\w\-]+:)?mergeCells[^>]*>)(.*?)(</(?:[\w\-]+:)?mergeCells>)',
+        _filter_mc, xml_text, flags=re.DOTALL,
+    )
 
-    # 5. Фильтруем pageBreaks (rowBreaks)
-    for tag in (f'{{{ns}}}rowBreaks', f'{{{ns}}}colBreaks'):
-        breaks = root.find(tag)
-        if breaks is None:
-            continue
-        if tag.endswith('}rowBreaks'):
-            to_remove = []
-            for br in breaks.findall(f'{{{ns}}}brk'):
-                r = int(br.get('id', '0'))
-                if r < keep_from_row or r > keep_to_row:
-                    to_remove.append(br)
-                else:
-                    br.set('id', str(r - keep_from_row + 1))
-            for br in to_remove:
-                breaks.remove(br)
+    # 4. Remove autoFilter
+    xml_text = re.sub(r'<(?:[\w\-]+:)?autoFilter[^>]*/>\s*', "", xml_text)
+    xml_text = re.sub(
+        r'<(?:[\w\-]+:)?autoFilter[^>]*>.*?</(?:[\w\-]+:)?autoFilter>\s*',
+        "", xml_text, flags=re.DOTALL,
+    )
+    # Remove filterMode attribute from sheetPr (causes Excel repair if autoFilter is gone)
+    xml_text = re.sub(r'(\bsheetPr[^>]*?)\s+filterMode="[^"]*"', r'\1', xml_text)
+    # Remove entire extLst block — extended properties reference sheet features
+    # (dataValidations, conditionalFormatting, etc.) that become invalid after
+    # vertical split with reindexed rows. Excel handles missing extLst gracefully.
+    xml_text = re.sub(
+        r'<(?:[\w\-]+:)?extLst[^>]*>.*?</(?:[\w\-]+:)?extLst>\s*',
+        "", xml_text, flags=re.DOTALL,
+    )
 
-    return _serialize_xml(root, NS_MAIN)
+    # 5. Remove dataValidations
+    xml_text = re.sub(r'<(?:[\w\-]+:)?dataValidations[^>]*/>\s*', "", xml_text)
+    xml_text = re.sub(
+        r'<(?:[\w\-]+:)?dataValidations[^>]*>.*?</(?:[\w\-]+:)?dataValidations>\s*',
+        "", xml_text, flags=re.DOTALL,
+    )
 
+    # 6. Reset sheetView: topLeftCell, activeCell, view mode
+    # After vertical split, the original sheet's topLeftCell (e.g. A972)
+    # and activeCell (e.g. AA1014) reference rows from the mega-sheet.
+    # This causes Excel to scroll to row ~1000 when opening, and
+    # pageBreakPreview mode makes images appear stretched/shifted.
+    def _reset_sheetview(m: re.Match) -> str:
+        sv = m.group(0)
+        # Reset topLeftCell to A1
+        sv = re.sub(r'topLeftCell="[A-Z]+\d+"', 'topLeftCell="A1"', sv)
+        # Remove pageBreakPreview view mode — switch to normal view
+        sv = re.sub(r' ?view="pageBreakPreview"', '', sv)
+        return sv
+    xml_text = re.sub(
+        r'<(?:[\w\-]+:)?sheetView\b[^>]*/>',
+        _reset_sheetview, xml_text,
+    )
+    xml_text = re.sub(
+        r'<(?:[\w\-]+:)?sheetView\b[^>]*>.*?</(?:[\w\-]+:)?sheetView>',
+        _reset_sheetview, xml_text, flags=re.DOTALL,
+    )
+
+    # Reset activeCell and sqref inside <selection> elements
+    def _reset_selection(m: re.Match) -> str:
+        sel = m.group(0)
+        sel = re.sub(r'activeCell="[A-Z]+\d+"', 'activeCell="A1"', sel)
+        sel = re.sub(r'sqref="[A-Z]+\d+(?::[A-Z]+\d+)?"', 'sqref="A1"', sel)
+        return sel
+    xml_text = re.sub(r'<(?:[\w\-]+:)?selection\b[^>]*/>', _reset_selection, xml_text)
+
+    # 7. Filter page breaks (rowBreaks)
+    def _filter_breaks(m: re.Match) -> str:
+        bk_open = m.group(1)
+        bk_content = m.group(2)
+        bk_close = m.group(3)
+
+        kept_brs = []
+        for br_m in re.finditer(r'<(?:[\w\-]+:)?brk[^>]*/>', bk_content):
+            bx = br_m.group(0)
+            id_m = re.search(r'id="(\d+)"', bx)
+            if not id_m:
+                continue
+            br_r = int(id_m.group(1))
+            if br_r < keep_from_row or br_r > keep_to_row:
+                continue
+            new_br_r = br_r - keep_from_row + 1
+            bx = re.sub(r'id="\d+"', f'id="{new_br_r}"', bx)
+            kept_brs.append(bx)
+
+        if not kept_brs:
+            return ""
+        return bk_open + "".join(kept_brs) + bk_close
+
+    xml_text = re.sub(
+        r'(<(?:[\w\-]+:)?rowBreaks[^>]*>)(.*?)(</(?:[\w\-]+:)?rowBreaks>)',
+        _filter_breaks, xml_text, flags=re.DOTALL,
+    )
+
+    return xml_text.encode("utf-8")
 
 def _filter_drawing_xml(
-    drawing_root: ET.Element,
+    drawing_data: bytes,
     keep_from_row: int,
     keep_to_row: int,
 ) -> bytes:
     """Отфильтровать drawing XML, оставляя только anchors нужного диапазона.
 
-    Поддерживает twoCellAnchor и oneCellAnchor.
+    Использует regex-based строковые операции вместо ET.fromstring/ET.tostring
+    для сохранения оригинальных namespace declarations (xmlns:ns2, xmlns:ns4
+    и т.д.), которые Python ET может переименовать при сериализации,
+    вызывая ошибку Excel "Repaired Records: Drawing shape".
+
+    Поддерживает twoCellAnchor, oneCellAnchor и absoluteAnchor.
     Корректирует row-позиции anchors.
     """
-    ns = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing'
-
-    for tag in (f'{{{ns}}}twoCellAnchor', f'{{{ns}}}oneCellAnchor',
-                f'{{{ns}}}absoluteAnchor'):
-        to_remove = []
-        for anchor in drawing_root.findall(f'.//{tag}'):
-            from_elem = anchor.find(f'{{{ns}}}from')
-            to_elem = anchor.find(f'{{{ns}}}to')
-
-            if from_elem is not None:
-                row_elem = from_elem.find(f'{{{ns}}}row')
-                if row_elem is not None and row_elem.text is not None:
-                    from_row = int(row_elem.text)
-                else:
-                    from_row = 0
-            else:
-                from_row = 0
-
-            if to_elem is not None:
-                row_elem = to_elem.find(f'{{{ns}}}row')
-                if row_elem is not None and row_elem.text is not None:
-                    to_row = int(row_elem.text)
-                else:
-                    to_row = from_row
-            else:
-                to_row = from_row
-
-            # Проверяем overlap с диапазоном строк
-            if to_row < keep_from_row or from_row > keep_to_row:
-                to_remove.append(anchor)
-                continue
-
-            # Корректируем row-позиции
-            if from_elem is not None:
-                row_elem = from_elem.find(f'{{{ns}}}row')
-                if row_elem is not None:
-                    row_elem.text = str(from_row - keep_from_row + 1)
-            if to_elem is not None:
-                row_elem = to_elem.find(f'{{{ns}}}row')
-                if row_elem is not None:
-                    row_elem.text = str(to_row - keep_from_row + 1)
-
-        for anchor in to_remove:
-            for parent in drawing_root.iter():
-                if anchor in list(parent):
-                    parent.remove(anchor)
-                    break
-
-    return _serialize_xml(
-        drawing_root, NS_MAIN,
-        extra_ns={'xdr': NS_DRAWING, 'a': NS_DRAWINGML},
+    result, _ = _filter_drawing_xml_with_rids(
+        drawing_data, keep_from_row, keep_to_row,
     )
+    return result
+
+
+def _filter_drawing_xml_with_rids(
+    drawing_data: bytes,
+    keep_from_row: int,
+    keep_to_row: int,
+) -> Tuple[bytes, Set[str]]:
+    """Отфильтровать drawing XML и вернуть retained image rIds.
+
+    Использует regex-based строковые операции вместо ET.fromstring/ET.tostring
+    для сохранения оригинальных namespace declarations.
+
+    Поддерживает twoCellAnchor, oneCellAnchor и absoluteAnchor.
+    Собирает r:embed rIds из оставшихся <a:blip> элементов —
+    это позволяет определить, какие изображения из xl/media/ сохранить.
+
+    Returns:
+        Кортеж (filtered_xml_bytes, retained_rids).
+    """
+    xml_text = drawing_data.decode('utf-8')
+    retained_rids: Set[str] = set()
+
+    # Anchors may have namespace prefix (xdr:) or not
+    _ANCHOR_TAG_RE = re.compile(
+        r'<(?:[\w\-]+:)?(?:two|one)CellAnchor\b[^>]*>'
+        r'.*?'
+        r'</(?:[\w\-]+:)?(?:two|one)CellAnchor>',
+        re.DOTALL,
+    )
+    _ABS_ANCHOR_RE = re.compile(
+        r'<(?:[\w\-]+:)?absoluteAnchor\b[^>]*>'
+        r'.*?'
+        r'</(?:[\w\-]+:)?absoluteAnchor>',
+        re.DOTALL,
+    )
+
+    def _filter_anchor(m: re.Match) -> str:
+        anchor_xml = m.group(0)
+
+        # Извлекаем from_row из <xdr:from>…<xdr:row>N</xdr:row>…</xdr:from>
+        from_row = 0
+        from_m = re.search(
+            r'<(?:[\w\-]+:)?from\b[^>]*>(.*?)</(?:[\w\-]+:)?from>',
+            anchor_xml, re.DOTALL,
+        )
+        if from_m:
+            row_m = re.search(
+                r'<(?:[\w\-]+:)?row>(\d+)</(?:[\w\-]+:)?row>',
+                from_m.group(1),
+            )
+            if row_m:
+                from_row = int(row_m.group(1))
+
+        # Извлекаем to_row из <xdr:to>…<xdr:row>N</xdr:row>…</xdr:to>
+        to_row = from_row
+        to_m = re.search(
+            r'<(?:[\w\-]+:)?to\b[^>]*>(.*?)</(?:[\w\-]+:)?to>',
+            anchor_xml, re.DOTALL,
+        )
+        if to_m:
+            row_m = re.search(
+                r'<(?:[\w\-]+:)?row>(\d+)</(?:[\w\-]+:)?row>',
+                to_m.group(1),
+            )
+            if row_m:
+                to_row = int(row_m.group(1))
+
+        # Удаляем anchors, которые НЕ полностью входят в диапазон.
+        # Только anchors с from_row И to_row внутри [keep_from_row, keep_to_row]
+        # сохраняются. Anchors, пересекающие границу карты, удаляются —
+        # иначе to_row уходит далеко за пределы листа (напр. 432 в 36-строчном файле),
+        # что приводит к сплющиванию изображений.
+        if from_row < keep_from_row or to_row > keep_to_row:
+            return ''
+
+        # Корректируем row-позиции в remaining anchors
+        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: max(1, ...) предотвращает отрицательные
+        # row-значения, когда anchor частично перекрывает диапазон
+        # (from_row < keep_from_row, но to_row >= keep_from_row).
+        # Отрицательные row-значения вызывают Excel "Repaired Records: Drawing shape".
+        def _update_row(row_m_inner: re.Match) -> str:
+            tag_open = row_m_inner.group(1)
+            val = int(row_m_inner.group(2))
+            tag_close = row_m_inner.group(3)
+            new_val = max(1, val - keep_from_row + 1)
+            return f'{tag_open}{new_val}{tag_close}'
+
+        anchor_xml = re.sub(
+            r'(<(?:[\w\-]+:)?row>)(\d+)(</(?:[\w\-]+:)?row>)',
+            _update_row, anchor_xml,
+        )
+
+        # Собираем rIds из a:blip r:embed
+        for blip_m in re.finditer(
+            r'<(?:[\w\-]+:)?blip\b[^>]*>', anchor_xml,
+        ):
+            embed_m = re.search(
+                r'r:embed="([^"]+)"', blip_m.group(0),
+            )
+            if embed_m:
+                retained_rids.add(embed_m.group(1))
+
+        return anchor_xml
+
+    # Фильтруем twoCellAnchor и oneCellAnchor
+    xml_text = _ANCHOR_TAG_RE.sub(_filter_anchor, xml_text)
+
+    # Фильтруем absoluteAnchor (нет row-атрибутов — удаляем при вертикальном split)
+    def _filter_absolute(m: re.Match) -> str:
+        if keep_from_row > 0:
+            return ''
+        return m.group(0)
+
+    xml_text = _ABS_ANCHOR_RE.sub(_filter_absolute, xml_text)
+
+    return xml_text.encode('utf-8'), retained_rids
+
+
+def _filter_drawing_rels(
+    rels_data: bytes,
+    retained_rids: Set[str],
+) -> bytes:
+    """Отфильтровать drawing .rels, оставляя только нужные Relationship.
+
+    Удаляет Relationship для rIds, не входящих в retained_rids.
+    Это предотвращает "Repaired Records" ошибки, когда drawing .rels
+    ссылается на изображения, отсутствующие в ZIP.
+
+    Args:
+        rels_data: Оригинальное содержимое drawing .rels файла.
+        retained_rids: Множество rIds, которые нужно сохранить.
+
+    Returns:
+        Отфильтрованный .rels XML (bytes).
+    """
+    rels_text = rels_data.decode('utf-8')
+
+    def _filter_rel(m: re.Match) -> str:
+        rel_xml = m.group(0)
+        id_m = re.search(r'Id="([^"]+)"', rel_xml)
+        if id_m and id_m.group(1) not in retained_rids:
+            return ''  # Удаляем Relationship
+        return rel_xml
+
+    return re.sub(r'<Relationship\b[^>]*/>', _filter_rel, rels_text).encode('utf-8')
 
 
 def _filter_vml_xml(

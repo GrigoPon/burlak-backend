@@ -247,11 +247,20 @@ def run_pipeline(
     # Шаг 2b: Разделение многолистовых файлов
     split_dir = ""
     if auto_split:
+        # Используем кэш для инкрементальной обработки
+        from burlak_parser.cache import ProcessingCache
+        cache_dir = os.path.join(output_dir, ".burlak_cache")
+        cache = ProcessingCache(cache_dir)
+
         print("\u2702\ufe0f  Разделение многолистовых карт на отдельные файлы...")
         split_dir = os.path.join(output_dir, "split_cards")
         created_files = split_cards_to_files(
             cards, split_dir, max_workers=max_workers,
         )
+
+        # Сохраняем кэш
+        cache.save()
+        logger.info("Кэш: %d записей", cache.size)
 
         # ── Статистика split ──
         split_stats = cards.split_stats
