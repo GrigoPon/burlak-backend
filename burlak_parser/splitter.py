@@ -2381,26 +2381,33 @@ def _vertical_split_worker(
 
     safe_label_prefix = _safe_filename(card_label)[:50] if card_label else ""
 
-    # ── Предвычисляем rId → media_path маппинг для drawing .rels ──
-    drawing_rels_map: Dict[str, str] = {}  # rId -> resolved media path
-    drawing_rels_path: Optional[str] = None
-    if drawing_path:
-        drawing_dir = os.path.dirname(drawing_path)
-        drawing_base = os.path.basename(drawing_path)
-        drawing_rels_path = f"{drawing_dir}/_rels/{drawing_base}.rels"
-        if drawing_rels_path in all_entries:
-            try:
-                dr_root = ET.fromstring(all_entries[drawing_rels_path])
-                for dr_el in dr_root:
-                    rid = dr_el.get('Id', '')
-                    target = dr_el.get('Target', '')
-                    if rid and target:
-                        resolved = os.path.normpath(
-                            os.path.join(drawing_dir, target)
-                        ).replace(os.sep, '/')
-                        drawing_rels_map[rid] = resolved
-            except Exception as e:
-                logger.debug("Failed to parse drawing rels: %s", e)
+    # ── Находим ВСЕ drawing файлы и их rels (WPS может привязывать image к не тому sheet) ──
+    all_drawings: Dict[str, bytes] = {}        # drawing_path -> raw bytes
+    all_drawing_rels: Dict[str, str] = {}      # drawing_rels_path -> drawing_path
+    all_drawing_rels_map: Dict[str, Dict[str, str]] = {}  # drawing_rels_path -> {rId -> media_path}
+
+    for entry_name in list(all_entries.keys()):
+        if (entry_name.startswith('xl/drawings/drawing')
+                and entry_name.endswith('.xml')
+                and '_rels' not in entry_name):
+            all_drawings[entry_name] = all_entries[entry_name]
+            dr_path = f"{os.path.dirname(entry_name)}/_rels/{os.path.basename(entry_name)}.rels"
+            all_drawing_rels[dr_path] = entry_name
+            if dr_path in all_entries:
+                rid_map: Dict[str, str] = {}
+                try:
+                    dr_root = ET.fromstring(all_entries[dr_path])
+                    for dr_el in dr_root:
+                        rid = dr_el.get('Id', '')
+                        target = dr_el.get('Target', '')
+                        if rid and target:
+                            resolved = os.path.normpath(
+                                os.path.join(os.path.dirname(entry_name), target)
+                            ).replace(os.sep, '/')
+                            rid_map[rid] = resolved
+                except Exception as e:
+                    logger.debug("Failed to parse drawing rels %s: %s", dr_path, e)
+                all_drawing_rels_map[dr_path] = rid_map
 
     for i, boundary in enumerate(boundaries):
         op_label = boundary.card_label or f"Op{i + 1:03d}"
@@ -2419,9 +2426,8 @@ def _vertical_split_worker(
                 i + 1, os.path.basename(source_path))
             continue
 
-        # ── Фильтруем drawing XML и собираем retained rIds ──
-        # Regex-based: bytes immutable → no deep copy needed.
-        filtered_drawing_bytes: Optional[bytes] = None
+        # ── Фильтруем ВСЕ drawing XML и собираем retained rIds ──
+        filtered_drawings: Dict[str, Optional[bytes]] = {}  # drawing_path -> filtered bytes (None = skip)
         retained_image_paths: Set[str] = set()
         current_retained_rids: Set[str] = set()
         comments_fully_removed = False  # True если все комментарии вне диапазона
@@ -2430,15 +2436,28 @@ def _vertical_split_worker(
                 all_entries[comments_path], boundary.header_row, boundary.data_end)
             if test_filtered is None:
                 comments_fully_removed = True
-        if drawing_path and drawing_xml_bytes is not None:
-            filtered_drawing_bytes, current_retained_rids = _filter_drawing_xml_with_rids(
-                drawing_xml_bytes, boundary.header_row, boundary.data_end,
-            )
-            # Маппим retained rIds → media paths
-            for rid in current_retained_rids:
-                media_path = drawing_rels_map.get(rid, '')
-                if media_path:
-                    retained_image_paths.add(media_path)
+
+        for dr_path, dr_bytes in all_drawings.items():
+            # Drawing XML uses 0-indexed rows (row 0 = Excel row 1)
+            # Boundary header_row/data_end are 1-indexed (Excel rows)
+            # Convert: subtract 1 for drawing filter
+            filtered, rids = _filter_drawing_xml_with_rids(
+                dr_bytes, boundary.header_row - 1, boundary.data_end - 1)
+            filtered_drawings[dr_path] = filtered
+            if filtered is not None:
+                current_retained_rids.update(rids)
+                # Map retained rIds → media paths
+                # all_drawing_rels_map is keyed by rels path, not drawing path
+                dr_rels_path = f"{os.path.dirname(dr_path)}/_rels/{os.path.basename(dr_path)}.rels"
+                rid_map = all_drawing_rels_map.get(dr_rels_path, {})
+                for rid in rids:
+                    media_path = rid_map.get(rid, '')
+                    if media_path:
+                        retained_image_paths.add(media_path)
+                logger.debug("Drawing %s: filtered %d bytes -> %d bytes, rids=%s",
+                    dr_path, len(dr_bytes), len(filtered), rids)
+            else:
+                logger.debug("Drawing %s: fully outside range, skipping", dr_path)
 
         try:
             # Apply workbook/docProps cleanup in-place before writing
@@ -2465,25 +2484,23 @@ def _vertical_split_worker(
                             and name.endswith('.xml')
                             and name != comments_path):
                         continue
-                    # Skip unrelated drawing files (only keep the target sheet's drawing)
-                    if (name.startswith('xl/drawings/drawing')
-                            and name.endswith('.xml')
-                            and '_rels' not in name
-                            and name != drawing_path):
-                        continue
-                    # Skip unrelated drawing rels
-                    if (name.startswith('xl/drawings/_rels/drawing')
-                            and name.endswith('.rels')
-                            and name != drawing_rels_path):
-                        continue
                     if name == sheet_target:
                         data = _filter_sheet_xml(
                             data, boundary.header_row, boundary.data_end)
-                    elif name == drawing_path and filtered_drawing_bytes is not None:
-                        data = filtered_drawing_bytes
-                    elif (drawing_rels_path and name == drawing_rels_path
-                          and filtered_drawing_bytes is not None):
-                        data = _filter_drawing_rels(data, current_retained_rids)
+                    elif name in filtered_drawings and filtered_drawings[name] is not None:
+                        data = filtered_drawings[name]
+                    elif name in filtered_drawings and filtered_drawings[name] is None:
+                        continue  # Drawing fully outside keep range — skip
+                    elif (name in all_drawing_rels and filtered_drawings.get(all_drawing_rels[name]) is not None):
+                        parent_drawing = all_drawing_rels[name]
+                        rids_for_dr = set()
+                        # all_drawing_rels_map is keyed by rels path (name), not drawing path
+                        for r, p in all_drawing_rels_map.get(name, {}).items():
+                            if p in retained_image_paths:
+                                rids_for_dr.add(r)
+                        data = _filter_drawing_rels(data, rids_for_dr)
+                    elif (name in all_drawing_rels and filtered_drawings.get(all_drawing_rels[name]) is None):
+                        continue  # Parent drawing fully outside — skip rels too
                     elif name == vml_path and vml_path is not None:
                         data = _filter_vml_xml(
                             data, boundary.header_row,
@@ -2534,15 +2551,16 @@ def _vertical_split_worker(
                     # ── Фильтрация медиа: пропускаем неиспользуемые изображения ──
                     # БЕЗОПАСНАЯ СТРАТЕГИЯ: копируем все медиа по умолчанию.
                     # Фильтруем ТОЛЬКО если:
-                    #   1. drawing_rels_map непустой (успешно распарсили .rels)
+                    #   1. all_drawing_rels_map непустой (успешно распарсили .rels)
                     #   2. retained_image_paths непустой (есть anchors в диапазоне)
-                    #   3. карта drawing_rels полная (все media файлы сопоставлены)
                     # Если хотя бы одно условие не выполнено — копируем все медиа.
                     # Это предотвращает потерю изображений при неполных данных.
+                    any_rels_parsed = any(
+                        rid_map for rid_map in all_drawing_rels_map.values()
+                    )
                     should_filter_media = (
-                        drawing_rels_map
+                        any_rels_parsed
                         and retained_image_paths
-                        and len(drawing_rels_map) >= len(retained_image_paths)
                     )
                     if name.startswith('xl/media/'):
                         if should_filter_media:
@@ -3098,7 +3116,7 @@ def _filter_drawing_xml_lxml(
             if from_elem is not None:
                 row_elem = from_elem.find(f'{{{ns_xdr}}}row')
                 if row_elem is not None:
-                    row_elem.text = str(clamped_from - keep_from_row + 1)
+                    row_elem.text = str(clamped_from - keep_from_row)
                 # Reset rowOff to 0 when clamping from_row
                 if from_row < keep_from_row:
                     row_off = from_elem.find(f'{{{ns_xdr}}}rowOff')
@@ -3108,7 +3126,7 @@ def _filter_drawing_xml_lxml(
             if to_elem is not None:
                 row_elem = to_elem.find(f'{{{ns_xdr}}}row')
                 if row_elem is not None:
-                    row_elem.text = str(clamped_to - keep_from_row + 1)
+                    row_elem.text = str(clamped_to - keep_from_row)
 
             # Collect rIds from <a:blip r:embed="..."> elements
             for blip in anchor.iter(f'{{{ns_a}}}blip'):
@@ -3193,7 +3211,7 @@ def _filter_drawing_xml_regex(
             tag_open = row_m_inner.group(1)
             val = int(row_m_inner.group(2))
             tag_close = row_m_inner.group(3)
-            new_val = max(1, val - keep_from_row + 1)
+            new_val = max(0, val - keep_from_row)
             return f'{tag_open}{new_val}{tag_close}'
 
         anchor_xml = re.sub(
