@@ -566,16 +566,12 @@ class TestSplitCardsToFiles:
             _rmtree(tmpdir)
 
     def test_split_all_non_empty_false(self, monkeypatch, tmp_path):
-        """split_all_non_empty=False → проверяет is_valid (lines 954-955)."""
+        """split_all_non_empty=False → проверяет is_valid."""
         from burlak_parser import splitter as splitter_mod
 
-        class MockSplitter:
-            def split_file(self, src, out, sheets, label):
-                return [os.path.join(out, f"{label}_Sheet1.xlsx")]
-
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
-            lambda **kw: MockSplitter(),
+            splitter_mod, "_extract_to_path_worker",
+            _mock_extract_success,
         )
 
         result = CardParseResult(
@@ -615,13 +611,9 @@ class TestSplitCardsToFiles:
         """workers > 1 и tasks > 1 → parallel path."""
         from burlak_parser import splitter as splitter_mod
 
-        class MockSplitter:
-            def split_many_parallel(self, tasks):
-                return (["out1.xlsx", "out2.xlsx"], [], 0, [], {})
-
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
-            lambda **kw: MockSplitter(),
+            splitter_mod, "_extract_to_path_worker",
+            _mock_extract_success,
         )
 
         # Создаём 2 задачи
@@ -1646,9 +1638,10 @@ class TestCollectAllTables:
             rows.append(["序号", "零部件代号"])  # next header
         es = _make_excel_sheet(rows)
         parts, table_count = _collect_all_tables(es, len(rows), 2, "test.xlsx")
-        # Should not crash, should find all 12 data tables + 1 trailing empty header
+        # Should not crash, should find all 12 data tables
+        # (trailing empty header not counted — tables_found only increments for non-empty tables)
         assert len(parts) == 12, f"Expected exactly 12 parts, got {len(parts)}"
-        assert table_count == 13, f"Expected 13 tables (12 data + 1 empty trailing header), got {table_count}"
+        assert table_count == 12, f"Expected 12 tables (only data tables counted), got {table_count}"
         pns = [p[0] for p in parts]
         assert "P000" in pns
         assert "P011" in pns
@@ -1666,7 +1659,8 @@ class TestCollectAllTables:
         ])
         parts, table_count = _collect_all_tables(es, 7, 2, "test.xlsx")
         assert parts == [], f"Expected empty list (no valid parts), got {len(parts)}"
-        assert table_count == 2
+        # table_count is 0 because no tables had valid parts (only counted when merged_parts non-empty)
+        assert table_count == 0
 
     def test_tables_staggered_positions(self):
         """Tables at different row positions with staggered headers."""
@@ -2233,6 +2227,34 @@ def _touch_excel(path: str) -> None:
     wb = Workbook()
     wb.active.cell(row=1, column=1, value="test")
     wb.save(path)
+
+
+# --- Mock-helper for split_cards_to_files tests ---
+
+
+def _mock_extract_success(source_path, output_path, sheet_name):
+    """Mock _extract_to_path_worker: successful extraction."""
+    return {
+        "path": output_path,
+        "error": None,
+        "used_fallback": False,
+        "source_basename": os.path.basename(source_path),
+        "source_path": source_path,
+        "sheet_name": sheet_name,
+    }
+
+
+def _mock_extract_error(source_path, output_path, sheet_name):
+    """Mock _extract_to_path_worker: extraction error."""
+    return {
+        "path": None,
+        "error": "Mock error during split",
+        "used_fallback": False,
+        "source_basename": os.path.basename(source_path),
+        "source_path": source_path,
+        "sheet_name": sheet_name,
+    }
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2955,13 +2977,9 @@ class TestSplitStatistics:
         """.xlsx файлы правильно считаются в статистике (total_xlsx)."""
         from burlak_parser import splitter as splitter_mod
 
-        class MockSplitter:
-            def split_file(self, src, out, sheets, label):
-                return [os.path.join(out, f"{label}_{s}.xlsx") for s in sheets]
-
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
-            lambda **kw: MockSplitter(),
+            splitter_mod, "_extract_to_path_worker",
+            _mock_extract_success,
         )
 
         result = CardParseResult(
@@ -3179,13 +3197,19 @@ class TestSplitStatistics:
         """Ошибки при split_file отмечаются в file_stats."""
         from burlak_parser import splitter as splitter_mod
 
-        class MockSplitter:
-            def split_file(self, src, out, sheets, label):
-                raise ValueError("Mock error during split")
+        def mock_extract_to_path(source_path, output_path, sheet_name):
+            return {
+                "path": None,
+                "error": "Mock error during split",
+                "used_fallback": False,
+                "source_basename": os.path.basename(source_path),
+                "source_path": source_path,
+                "sheet_name": sheet_name,
+            }
 
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
-            lambda **kw: MockSplitter(),
+            splitter_mod, "_extract_to_path_worker",
+            mock_extract_to_path,
         )
 
         result = CardParseResult(
@@ -3211,13 +3235,9 @@ class TestSplitStatistics:
         """CP7/CP8 файлы включаются в статистику (не пропускаются)."""
         from burlak_parser import splitter as splitter_mod
 
-        class MockSplitter:
-            def split_file(self, src, out, sheets, label):
-                return [os.path.join(out, f"{label}_S1.xlsx")]
-
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
-            lambda **kw: MockSplitter(),
+            splitter_mod, "_extract_to_path_worker",
+            _mock_extract_success,
         )
 
         result = CardParseResult(

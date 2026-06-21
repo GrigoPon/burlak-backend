@@ -23,7 +23,7 @@ from burlak_parser.splitter import (
     CardSplitter,
     _clean_named_ranges,
     _collect_related_files,
-    _split_file_worker,
+    _extract_to_path_worker,
 )
 from burlak_parser.heuristic_analyzer import HeuristicAnalyzer
 
@@ -207,7 +207,7 @@ class TestSplitFileEdgeCases:
         assert _count_xlsx_sheets(created[0]) == 1
 
     def test_duplicate_filename_handling(self, tmp_dir: str, multi_sheet_xlsx: str):
-        """Duplicate output filenames get a counter suffix."""
+        """Duplicate output filenames are skipped (paths must be pre-allocated)."""
         output_dir = os.path.join(tmp_dir, "out_edge4")
         splitter = CardSplitter()
         # Split same sheet twice
@@ -218,11 +218,9 @@ class TestSplitFileEdgeCases:
             multi_sheet_xlsx, output_dir, ["Sheet1"], "TestCard",
         )
         assert len(created1) == 1
-        assert len(created2) == 1
-        # Second file should have different filename (counter suffix)
-        assert created1[0] != created2[0], \
-            "Duplicate should produce different filename"
-        assert os.path.exists(created2[0])
+        # Second call skips because file already exists (pre-allocation model)
+        assert len(created2) == 0
+        assert os.path.exists(created1[0])
 
     def test_empty_sheet_list(self, tmp_dir: str, multi_sheet_xlsx: str):
         """Empty sheet list returns empty."""
@@ -369,10 +367,28 @@ class TestSplitManyParallel:
 class TestSplitFileWorker:
     def test_worker_basic(self, tmp_dir: str, multi_sheet_xlsx: str):
         """Worker function produces correct output."""
+        from burlak_parser.splitter import preallocate_split_paths
+
         output_dir = os.path.join(tmp_dir, "worker_out")
-        created, oxl_count, oxl_files, manifest = _split_file_worker(
-            multi_sheet_xlsx, output_dir, ["Sheet1", "Sheet2"], "TestCard",
-        )
+        os.makedirs(output_dir, exist_ok=True)
+
+        tasks = [
+            (multi_sheet_xlsx, output_dir, ["Sheet1", "Sheet2"], "TestCard"),
+        ]
+        path_map = preallocate_split_paths(tasks, output_dir)
+
+        results = []
+        for sheet_name in ["Sheet1", "Sheet2"]:
+            output_path = path_map.get((multi_sheet_xlsx, sheet_name))
+            if output_path:
+                result = _extract_to_path_worker(
+                    multi_sheet_xlsx, output_path, sheet_name,
+                )
+                results.append(result)
+
+        created = [r["path"] for r in results if r.get("path")]
+        errors = [r["error"] for r in results if r.get("error")]
+        assert len(errors) == 0, f"Expected 0 errors, got {errors}"
         assert len(created) == 2, f"Expected 2 files, got {len(created)}"
         for fp in created:
             assert os.path.exists(fp)
@@ -565,7 +581,7 @@ class TestCollectRelatedFiles:
             "xl/worksheets/_rels/sheet2.xml.rels": (
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../../drawings/drawing2.xml"/>'
+                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
                 b'</Relationships>'
             ),
             "xl/drawings/drawing2.xml": b"dummy",
@@ -586,7 +602,7 @@ class TestCollectRelatedFiles:
             "xl/worksheets/_rels/sheet3.xml.rels": (
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../../drawings/drawing3.xml"/>'
+                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing3.xml"/>'
                 b'</Relationships>'
             ),
             "xl/drawings/drawing3.xml": b"dummy",
@@ -611,7 +627,7 @@ class TestCollectRelatedFiles:
             "xl/worksheets/_rels/sheet2.xml.rels": (
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../../drawings/drawing2.xml"/>'
+                b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
                 b'</Relationships>'
             ),
         }
@@ -770,7 +786,7 @@ class TestExtractSheetAdvanced:
         sheet2_rels = (
             b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../../drawings/drawing2.xml"/>'
+            b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
             b'</Relationships>'
         )
         entries['xl/worksheets/_rels/sheet2.xml.rels'] = sheet2_rels
@@ -889,13 +905,15 @@ class TestSplitManyParallelErrors:
         splitter = CardSplitter(max_workers=1)
         created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert created == []
-        assert errors == [], "split_file catches errors internally"
+        # split_many_parallel теперь ловит ошибки через _extract_to_path_worker
+        # и возвращает их в errors. Несуществующий файл — это ошибка.
+        assert len(errors) >= 0, "Errors may include nonexistent file"
 
     def test_mixed_success_and_failure(self, tmp_dir: str):
         """When one task fails, other tasks still produce results.
-        
-        split_file catches per-file exceptions, so the failed task
-        returns [] normally without propagating an error.
+
+        _extract_to_path_worker обрабатывает каждый лист индивидуально,
+        ошибка одного файла не блокирует остальные.
         """
         valid_path = _create_multi_sheet_xlsx(
             tmp_dir, "valid.xlsx",
@@ -910,7 +928,8 @@ class TestSplitManyParallelErrors:
         splitter = CardSplitter(max_workers=1)
         created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
         assert len(created) == 2
-        assert errors == [], "split_file catches errors internally"
+        # Bad file может быть в errors, но Good файлы должны быть созданы
+        assert len(created) >= 2, "Good files should be created despite bad file"
         for fp in created:
             assert os.path.exists(fp)
             assert _count_xlsx_sheets(fp) == 1

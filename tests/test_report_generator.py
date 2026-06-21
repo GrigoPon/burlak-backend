@@ -189,7 +189,7 @@ class TestGenerateDiscrepancyReportBasic:
 
         names = _get_xlsx_sheet_names(path)
         expected = {"Сводка", "Расхождения", "Неточное совпадение номеров",
-                    "Все детали BOM", "Ошибки файлов"}
+                    "Все детали BOM", "Поврежденные файлы"}
         assert expected.issubset(set(names)), f"Missing sheets. Got: {names}"
 
     def test_sheet_names_russian(self, output_dir: str):
@@ -534,7 +534,7 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=cards)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Ошибки файлов" in names
+        assert "Поврежденные файлы" in names
 
     def test_error_sheet_not_present_without_corrupted(self, output_dir: str):
         """Error sheet NOT present when no corrupted files."""
@@ -549,7 +549,7 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=cards)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Ошибки файлов" not in names, \
+        assert "Поврежденные файлы" not in names, \
             "Error sheet should not appear without corrupted files"
 
     def test_corrupted_file_paths_written(self, output_dir: str):
@@ -560,7 +560,7 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=cards)
 
         wb = openpyxl.load_workbook(path)
-        ws = wb["Ошибки файлов"]
+        ws = wb["Поврежденные файлы"]
         rows = list(ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True))
         wb.close()
 
@@ -575,7 +575,7 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=None)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Ошибки файлов" not in names, \
+        assert "Поврежденные файлы" not in names, \
             "Error sheet should not appear without cards_data"
 
 
@@ -759,7 +759,7 @@ class TestReporter:
         outputs = reporter.generate(result, output_dir, bom=bom, cards_data=cards)
 
         names = _get_xlsx_sheet_names(outputs["excel_report"])
-        expected = {"Сводка", "Расхождения", "Все детали BOM", "Ошибки файлов"}
+        expected = {"Сводка", "Расхождения", "Все детали BOM", "Поврежденные файлы"}
         assert expected.issubset(set(names)), f"Missing sheets: {names}"
 
     def test_text_report_content(self, output_dir: str):

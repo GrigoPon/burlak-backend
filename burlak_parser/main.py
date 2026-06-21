@@ -62,9 +62,14 @@ logger = logging.getLogger(__name__)
 AUTO_CLEAN_DIRS = ["output", "split_cards", "_extracted_cards"]
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
     """Настроить логирование."""
-    level = logging.DEBUG if verbose else logging.INFO
+    if quiet:
+        level = logging.WARNING
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -472,17 +477,33 @@ def main() -> None:
         action="store_true",
         help="Режим диагностики: вывод промежуточных данных в JSON (BOM_dump, OC_dump, schema)",
     )
+    parser.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Тихий режим (только ошибки и предупреждения)",
+    )
 
     args = parser.parse_args()
 
-    setup_logging(args.verbose)
+    # ── Input validation ──
+    if args.workers is not None and not (1 <= args.workers <= 32):
+        print(f"\u274c --workers must be between 1 and 32, got {args.workers}")
+        sys.exit(1)
+
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
     if not os.path.exists(args.bom):
-        print(f"\u274c BOM-файл не найден: {args.bom}")
+        logger.error("BOM-файл не найден: %s", args.bom)
         sys.exit(1)
     if not os.path.exists(args.cards):
-        print(f"\u274c Путь к картам не найден: {args.cards}")
+        logger.error("Путь к картам не найден: %s", args.cards)
         sys.exit(1)
+
+    # File size validation
+    bom_size_mb = os.path.getsize(args.bom) / (1024 * 1024)
+    if bom_size_mb > 200:
+        logger.warning("BOM file is very large (%.1f MB) — may use significant memory", bom_size_mb)
+    logger.info("BOM file size: %.1f MB", bom_size_mb)
 
     try:
         run_pipeline(
@@ -498,14 +519,14 @@ def main() -> None:
             diagnostic=args.diagnostic,
         )
     except KeyboardInterrupt:
-        print("\n\n\u26a0\ufe0f  Прервано пользователем.")
+        logger.warning("Прервано пользователем.")
         sys.exit(1)
     except Exception as e:
-        print(f"\n\u274c Критическая ошибка: {e}")
+        logger.error("Критическая ошибка: %s", e)
         logger.exception("Pipeline завершился с ошибкой")
-        print("\n\U0001f4a1 Подсказка: проверьте пути к файлам и их формат.")
-        print("   Операционные карты: .xlsx или .xls")
-        print("   BOM-файл: .xlsx")
+        logger.info("Подсказка: проверьте пути к файлам и их формат.")
+        logger.info("  Операционные карты: .xlsx или .xls")
+        logger.info("  BOM-файл: .xlsx")
         sys.exit(1)
 
 

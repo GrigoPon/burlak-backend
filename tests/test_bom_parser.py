@@ -1642,3 +1642,68 @@ class TestParseBomNormalPathEdgeCases:
         assert bom.config_quantities[cn1].get("P002", 0) == 0.0, \
             "P002 should have qty=0 in Config1 (None qty)"
         assert len(bom.parts) == 3, "All 3 parts should be present"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  25. parse_bom — Strikethrough (зачеркнутый шрифт) игнорирование
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestParseBomStrikethrough:
+    """Проверка игнорирования зачеркнутого текста (strikethrough) в BOM-файлах."""
+
+    def test_strikethrough_ignored_in_bom(self):
+        from openpyxl.styles import Font
+        # Создаем тестовый BOM-файл вручную, чтобы применить форматирование
+        fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="bom_strike_test_")
+        os.close(fd)
+
+        try:
+            wb = Workbook()
+            ws = wb.create_sheet(title="BOM_Strike", index=0)
+            ws.cell(row=1, column=1, value="序号")
+            ws.cell(row=1, column=2, value="零部件件号")
+            ws.cell(row=1, column=3, value="零件名称")
+            ws.cell(row=1, column=4, value="Config1")
+            ws.cell(row=1, column=5, value="Config2")
+
+            # Строка 2: нормальная
+            ws.cell(row=2, column=1, value="1")
+            ws.cell(row=2, column=2, value="P001")
+            ws.cell(row=2, column=3, value="Part1")
+            ws.cell(row=2, column=4, value="5")
+            ws.cell(row=2, column=5, value="2")
+
+            # Строка 3: зачеркнутый парт-номер
+            ws.cell(row=3, column=1, value="2")
+            c_pn = ws.cell(row=3, column=2, value="P002")
+            c_pn.font = Font(strike=True)
+            ws.cell(row=3, column=3, value="Part2")
+            ws.cell(row=3, column=4, value="3")
+            ws.cell(row=3, column=5, value="1")
+
+            # Строка 4: зачеркнутое количество
+            ws.cell(row=4, column=1, value="3")
+            ws.cell(row=4, column=2, value="P003")
+            ws.cell(row=4, column=3, value="Part3")
+            c_qty = ws.cell(row=4, column=4, value="4")
+            c_qty.font = Font(strike=True)
+            ws.cell(row=4, column=5, value="1")
+
+            wb.save(path)
+
+            bom = parse_bom(path)
+            # P001: должно быть спарсено
+            assert "P001" in bom.parts
+            assert bom.config_quantities["Config1"]["P001"] == 5.0
+            assert bom.config_quantities["Config2"]["P001"] == 2.0
+
+            # P002: зачеркнутый парт-номер -> должно быть пропущено
+            assert "P002" not in bom.parts
+
+            # P003: зачеркнутое количество -> должно быть пропущено для этой конфигурации
+            # (так как количество 0, оно не должно попадать в config_quantities)
+            assert bom.config_quantities["Config1"].get("P003", 0.0) == 0.0
+
+        finally:
+            _safe_remove(path)
+

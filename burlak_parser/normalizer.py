@@ -52,6 +52,9 @@ PART_NUMBER_LENIENT_RE = re.compile(
     r"|^\d{3,}$"
 )
 
+# Артефакты кодировки Excel XML
+XML_ARTIFACTS_RE = re.compile(r"(_x[0-9a-fA-F]{4}_|\r\n|[\r\n])", re.IGNORECASE)
+
 
 class QuantityNormalizer:
     """Нормализатор значений количества.
@@ -92,6 +95,17 @@ class QuantityNormalizer:
         if value is None:
             return default
 
+        # Reject non-numeric types that could be misinterpreted
+        # bool is subclass of int, so check before int
+        if isinstance(value, bool):
+            logger.debug("bool value detected: %s → 0.0", value)
+            return default
+        # datetime/timedelta from Excel date columns
+        from datetime import datetime, date, timedelta
+        if isinstance(value, (datetime, date, timedelta)):
+            logger.debug("datetime value detected: %s → 0.0", value)
+            return default
+
         # Числа (int/float) — возвращаем как есть
         if isinstance(value, (int, float)):
             return float(value)
@@ -99,11 +113,9 @@ class QuantityNormalizer:
         # Строки
         s = str(value).strip()
         # Удаляем артефакты кодировки Excel XML
-        for artifact in ("_x000d_", "_x000A_", "\r\n", "\r", "\n"):
-            idx = s.find(artifact)
-            if idx >= 0:
-                s = s[:idx]
-                break
+        match = XML_ARTIFACTS_RE.search(s)
+        if match:
+            s = s[:match.start()]
         s = s.strip()
         if not s:
             return default
@@ -160,11 +172,9 @@ class PartNumberNormalizer:
         s = part_no.strip()
         # Удаляем артефакты кодировки Excel XML (carriage return / newline)
         # Берём ТОЛЬКО ПЕРВУЮ часть до артефакта (двойные значения: китайский + английский)
-        for artifact in ("_x000d_", "_x000A_", "\r\n", "\r", "\n"):
-            idx = s.find(artifact)
-            if idx >= 0:
-                s = s[:idx]
-                break
+        match = XML_ARTIFACTS_RE.search(s)
+        if match:
+            s = s[:match.start()]
         cleaned = CLEAN_PN_CHARS.sub("", s)
         return cleaned.upper()
 

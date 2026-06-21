@@ -331,20 +331,46 @@ def generate_discrepancy_report(
                 ws_bom.write(ri, ci, qty if qty > 0 else "", cell_num_fmt)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Лист 5: ОШИБКИ ФАЙЛОВ
+    # Лист 5: ОШИБКИ ФАЙЛОВ / ПОВРЕЖДЁННЫЕ ФАЙЛЫ
     # ══════════════════════════════════════════════════════════════════════════
-    if cards_data and cards_data.corrupted_files:
-        corrupted = cards_data.corrupted_files
-        ws_corrupt = workbook.add_worksheet('Ошибки файлов')
+    # Объединяем все повреждённые файлы (из парсинга + из разделения)
+    all_corrupted_detailed: list = []
+    if cards_data:
+        # Parse-phase errors (detailed)
+        parse_corrupted = getattr(cards_data, 'corrupted_files_detailed', None)
+        if parse_corrupted:
+            all_corrupted_detailed.extend(parse_corrupted)
+        # Legacy corrupted_files (simple list of paths, no details)
+        if cards_data.corrupted_files:
+            known_files = {e.get('file', '') for e in all_corrupted_detailed}
+            for fpath in cards_data.corrupted_files:
+                fname = os.path.basename(fpath)
+                if fname not in known_files:
+                    all_corrupted_detailed.append({
+                        'file': fname,
+                        'folder': os.path.dirname(fpath),
+                        'error': '',
+                        'phase': 'split',
+                    })
+
+    if all_corrupted_detailed:
+        ws_corrupt = workbook.add_worksheet('Поврежденные файлы')
         ws_corrupt.set_tab_color('#C00000')
         ws_corrupt.freeze_panes(1, 0)
-        ws_corrupt.set_column(0, 0, 90)
-        ws_corrupt.write(0, 0, 'Путь к повреждённому файлу', header_fmt)
+        ws_corrupt.set_column(0, 0, 50)
+        ws_corrupt.set_column(1, 1, 50)
+        ws_corrupt.set_column(2, 2, 70)
+        ws_corrupt.set_column(3, 3, 12)
+        headers_corrupt = ['Имя файла', 'Расположение', 'Описание ошибки', 'Фаза']
+        for ci, h in enumerate(headers_corrupt):
+            ws_corrupt.write(0, ci, h, header_fmt)
         ws_corrupt.set_row(0, 30)
-        if corrupted:
-            ws_corrupt.autofilter(0, 0, len(corrupted), 0)
-        for ri, fpath in enumerate(corrupted, 1):
-            ws_corrupt.write(ri, 0, fpath, cell_fmt)
+        ws_corrupt.autofilter(0, 0, len(all_corrupted_detailed), 3)
+        for ri, entry in enumerate(all_corrupted_detailed, 1):
+            ws_corrupt.write(ri, 0, entry.get('file', entry.get('file_name', '')), cell_fmt)
+            ws_corrupt.write(ri, 1, entry.get('folder', ''), cell_fmt)
+            ws_corrupt.write(ri, 2, entry.get('error', ''), cell_fmt)
+            ws_corrupt.write(ri, 3, entry.get('phase', ''), cell_fmt)
 
     workbook.close()
     logger.info("Отчёт сохранён: %s", output_path)

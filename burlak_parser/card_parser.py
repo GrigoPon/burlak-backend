@@ -24,7 +24,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import tempfile
+import warnings
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -95,8 +97,8 @@ class ExcelReader:
                     os.path.basename(self.file_path),
                 )
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("openpyxl normal load failed: %s", e)
             # Fallback: read_only mode (handles WPS/slightly corrupted files)
             try:
                 import openpyxl
@@ -113,8 +115,8 @@ class ExcelReader:
                     os.path.basename(self.file_path),
                 )
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("openpyxl read_only fallback failed: %s", e)
             self._load_via_xlrd()
 
     def _load_via_xlrd(self) -> None:
@@ -187,7 +189,8 @@ class ExcelSheet:
                 if isinstance(val, float) and val == int(val):
                     return int(val)
                 return val
-        except Exception:
+        except Exception as e:
+            logger.debug("cell_value error at row=%d, col=%d: %s", row, column, e)
             return None
 
 
@@ -202,6 +205,7 @@ class CardSheetInfo:
     operation_name: str = ""
     is_valid: bool = False
     has_data: bool = False
+    max_data_row: int = 0  # Максимальное количество строк данных на листе (для защиты от ложного вертикального split)
 
 
 @dataclass
@@ -237,6 +241,7 @@ class CardsData:
     total_sheets_skipped: int = 0
     service_files_skipped: int = 0
     corrupted_files: List[str] = field(default_factory=list)
+    corrupted_files_detailed: List[Dict[str, str]] = field(default_factory=list)
     total_tables_extracted: int = 0  # Количество таблиц (операций) во всех листах
     split_stats: Optional[SplitStatistics] = None
 
@@ -391,6 +396,7 @@ def parse_card_file(
                     sheet_name=sheet_name,
                     is_valid=False,
                     has_data=sheet_has_data,
+                    max_data_row=ws.max_row,
                 ))
             return CardParseResult(
                 card_number=basename,
@@ -415,6 +421,7 @@ def parse_card_file(
                     sheet_name=sheet_name,
                     is_valid=False,
                     has_data=False,
+                    max_data_row=max_row,
                 ))
                 continue
 
@@ -426,6 +433,7 @@ def parse_card_file(
                     sheet_name=sheet_name,
                     is_valid=False,
                     has_data=False,
+                    max_data_row=max_row,
                 ))
                 continue
 
@@ -460,6 +468,7 @@ def parse_card_file(
                         operation_name=f"Graphic number linked ({len(graphic_parts)} parts)",
                         is_valid=True,
                         has_data=True,
+                        max_data_row=max_row,
                     ))
                 else:
                     sheets_info.append(CardSheetInfo(
@@ -468,6 +477,7 @@ def parse_card_file(
                         operation_name="Лист без таблицы деталей",
                         is_valid=False,
                         has_data=True,
+                        max_data_row=max_row,
                     ))
                 continue
 
@@ -498,6 +508,7 @@ def parse_card_file(
                 operation_name=operation_name,
                 is_valid=len(merged_parts) > 0,
                 has_data=True,
+                max_data_row=max_row,
             ))
 
     finally:
@@ -558,6 +569,8 @@ def _collect_raw_rows(
 
     for row_idx in range(header_row + 1, max_data_row + 1):
         try:
+            if HeuristicAnalyzer.is_cell_strike(ws, row_idx, part_no_col):
+                continue
             raw_part_no = ws.cell_value(row_idx, part_no_col)
 
             # ── Проверка на границу секции: новый заголовок ──
@@ -617,6 +630,8 @@ def _collect_raw_rows(
                 continue
 
             if qty_col > 0:
+                if HeuristicAnalyzer.is_cell_strike(ws, row_idx, qty_col):
+                    continue
                 raw_qty = ws.cell_value(row_idx, qty_col)
                 try:
                     qty = float(raw_qty) if raw_qty is not None else 1.0
@@ -632,8 +647,8 @@ def _collect_raw_rows(
 
             raw_rows.append((row_idx, raw_part_no_str, qty, name, part_no_col))
 
-        except Exception:
-            logger.debug("Ошибка при обработке строки %d в %s, пропускаем", row_idx, basename)
+        except Exception as e:
+            logger.debug("Ошибка при обработке строки %d в %s: %s", row_idx, basename, e)
             continue
 
     return raw_rows
@@ -667,7 +682,6 @@ def _collect_all_tables(
         if table_info is None:
             break
 
-        tables_found += 1
         header_row, part_no_col, qty_col, name_col = table_info
 
         # Если заголовок уже обработан — выходим
@@ -682,6 +696,7 @@ def _collect_all_tables(
         merged_parts = _merge_multiline_part_numbers(raw_rows)
 
         if merged_parts:
+            tables_found += 1
             total_part_nos_collected += len(merged_parts)
             all_parts.extend(merged_parts)
             logger.debug(
@@ -747,6 +762,10 @@ def _collect_parts_with_graphic_number(
     parts: List[Tuple[str, float, str, str]] = []
 
     for r in range(data_start, max_row + 1):
+        if HeuristicAnalyzer.is_cell_strike(ws, r, part_no_col):
+            continue
+        if qty_col > 0 and HeuristicAnalyzer.is_cell_strike(ws, r, qty_col):
+            continue
         pn = ws.cell_value(r, part_no_col)
         if pn is None:
             continue
@@ -825,8 +844,21 @@ def _find_excel_files(path: str, extract_dir: Optional[str] = None, _seen_names:
             os.makedirs(extract_dir, exist_ok=True)
 
         logger.info("Распаковка архива %s в %s...", path, extract_dir)
-        with zipfile.ZipFile(path, "r", metadata_encoding="gbk") as z:
-            _safe_extractall(z, extract_dir)
+        # Try multiple ZIP metadata encodings for compatibility
+        _zip_opened = False
+        for enc in ("gbk", "utf-8", "cp1251", "latin-1"):
+            try:
+                with zipfile.ZipFile(path, "r", metadata_encoding=enc) as z:
+                    _safe_extractall(z, extract_dir)
+                _zip_opened = True
+                break
+            except (UnicodeDecodeError, zipfile.BadZipFile) as e:
+                logger.debug("ZIP open with %s failed: %s", enc, e)
+                continue
+        if not _zip_opened:
+            logger.warning("Failed to open ZIP with any encoding, trying default")
+            with zipfile.ZipFile(path, "r") as z:
+                _safe_extractall(z, extract_dir)
 
         _walk_extracted_dir(extract_dir, extract_dir, files, _seen_names, is_temp=True)
 
@@ -880,8 +912,19 @@ def _walk_extracted_dir(walk_root: str, extract_base: str, files: List[str], _se
         nested_dir = os.path.join(extract_base, f"_nested_{_safe_name(fn)}")
         os.makedirs(nested_dir, exist_ok=True)
         try:
-            with zipfile.ZipFile(full_path, "r", metadata_encoding="gbk") as z:
-                _safe_extractall(z, nested_dir)
+            # Try multiple ZIP metadata encodings
+            _nested_opened = False
+            for enc in ("gbk", "utf-8", "cp1251", "latin-1"):
+                try:
+                    with zipfile.ZipFile(full_path, "r", metadata_encoding=enc) as z:
+                        _safe_extractall(z, nested_dir)
+                    _nested_opened = True
+                    break
+                except (UnicodeDecodeError, zipfile.BadZipFile):
+                    continue
+            if not _nested_opened:
+                with zipfile.ZipFile(full_path, "r") as z:
+                    _safe_extractall(z, nested_dir)
             _walk_extracted_dir(nested_dir, extract_base, files, _seen_names, is_temp=True, is_nested=True)
         except Exception as e:
             logger.warning("Не удалось распаковать вложенный архив %s: %s", fn, e)
@@ -893,8 +936,8 @@ def _safe_remove(file_path: str) -> None:
     """Безопасно удалить файл."""
     try:
         os.remove(file_path)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to remove %s: %s", file_path, e)
 
 
 def _safe_name(filename: str) -> str:
@@ -967,6 +1010,7 @@ def parse_cards(
     total_sheets = 0
     total_skipped = 0
     corrupted: List[str] = []
+    corrupted_detailed: List[Dict[str, str]] = []
 
     parse_files = [(c.file_path, False) for c in operational_files]
 
@@ -1009,6 +1053,11 @@ def parse_cards(
                 except Exception as e:
                     logger.warning("Ошибка при обработке %s: %s", file_path, e)
                     corrupted.append(file_path)
+                    corrupted_detailed.append({
+                        "file": os.path.basename(file_path),
+                        "error": str(e),
+                        "phase": "parse",
+                    })
                     if show_progress:
                         tqdm.write(f"⚠️  Ошибка: {e}")
     else:
@@ -1031,6 +1080,11 @@ def parse_cards(
             except Exception as e:
                 logger.warning("Ошибка при обработке %s: %s", file_path, e)
                 corrupted.append(file_path)
+                corrupted_detailed.append({
+                    "file": os.path.basename(file_path),
+                    "error": str(e),
+                    "phase": "parse",
+                })
                 if show_progress:
                     tqdm.write(f"⚠️  Ошибка: {e}")
 
@@ -1076,6 +1130,7 @@ def parse_cards(
         total_sheets_skipped=total_skipped,
         service_files_skipped=len(service_files),
         corrupted_files=corrupted,
+        corrupted_files_detailed=corrupted_detailed,
         total_tables_extracted=total_tables,
     )
 
@@ -1178,15 +1233,15 @@ class CardService:
             try:
                 if os.path.isfile(path):
                     os.remove(path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to remove temp file %s: %s", path, e)
         for d in self._temp_dirs:
             try:
                 if os.path.isdir(d):
                     import shutil
                     shutil.rmtree(d, ignore_errors=True)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to remove temp dir %s: %s", d, e)
         self._temp_paths.clear()
         self._temp_dirs.clear()
 
@@ -1256,7 +1311,15 @@ def split_cards_to_files(
     Returns:
         Список путей к созданным файлам.
     """
-    from burlak_parser.splitter import CardSplitter, _safe_filename
+    from burlak_parser.splitter import (
+        CardSplitter,
+        _safe_filename,
+        preallocate_split_paths,
+        _extract_to_path_worker,
+        find_table_boundaries,
+        _vertical_split_worker,
+        TableBoundary,
+    )
 
     os.makedirs(output_dir, exist_ok=True)
     splitter = CardSplitter(max_workers=max_workers)
@@ -1389,8 +1452,65 @@ def split_cards_to_files(
         )
         return []
 
+    # ── ШАГ 0: Обнаружение файлов с вертикальными таблицами (SWM-стиль) ──
+    # Файлы с 1 листом и >1 таблицами (операциями) на этом листе
+    # требуют вертикального разделения: каждая операция → отдельный .xlsx.
+    #
+    # ⚠️  ЗАЩИТА от ложных срабатываний:
+    # Вертикальное разделение ТОЛЬКО для файлов, где одновременно:
+    #   1. tables_extracted > 1 (найдено несколько таблиц)
+    #   2. Единственный лист содержит данные
+    #   3. ⭐ Найдено >= 200+ уникальных деталей (нормальные карты: 20–200)
+    #      SWM-мегалисты: 1000–8000 деталей
+    #   4. ⭐ Среднее количество на деталь не слишком высоко (защита от
+    #      ложных таблиц, где одни и те же данные повторно сканируются)
+    #
+    # Это предотвращает запуск openpyxl-вертикального split на нормальных
+    # Jetour/Changan файлах (20–200 строк), где эвристика находит >1 таблицы,
+    # но файл является стандартной однолистовой картой.
+    vertical_split_files: Dict[str, int] = {}  # file_path -> tables_extracted
+    for result in cards_data.card_results:
+        if (not result.is_service_file
+                and result.tables_extracted > 1
+                and len(result.sheets) == 1
+                and result.sheets[0].has_data
+                # .xls files cannot be split by openpyxl — skip vertical split
+                and os.path.splitext(result.file_path)[1].lower() == ".xlsx"):
+            vertical_split_files[result.file_path] = result.tables_extracted
+            max_data_rows = result.sheets[0].max_data_row if result.sheets else 0
+            logger.info(
+                "Обнаружен многооперационный megasheet: %s (%d таблиц, %d строк) "
+                "— будет разделён вертикально",
+                os.path.basename(result.file_path),
+                result.tables_extracted, max_data_rows,
+            )
+
+    # ── ШАГ 1: Детерминированная предварительная разметка путей (ГЛАВНЫЙ ПОТОК) ──
     # Сортируем задачи по имени исходного файла для детерминированного порядка
     tasks.sort(key=lambda t: t[0])
+
+    # Исключаем из path_map файлы, которые будут разделены вертикально
+    # (у них другой механизм именования — по операциям)
+    normal_tasks = [
+        t for t in tasks
+        if t[0] not in vertical_split_files
+    ]
+
+    # Вычисляем все целевые пути ДО запуска рабочих процессов
+    # Это гарантирует 100% детерминизм: список отсортирован, коллизии
+    # разрешаются последовательно (_1, _2, ...) в одном потоке.
+    path_map = preallocate_split_paths(normal_tasks, output_dir)
+
+    # ── ШАГ 2: Собираем индивидуальные задачи (один лист → один путь) ──
+    sheet_tasks: List[Tuple[str, str, str]] = []  # (source_path, output_path, sheet_name)
+    for source_path, _out_dir, sheet_names, file_label in normal_tasks:
+        for sheet_name in sheet_names:
+            output_path = path_map.get((source_path, sheet_name))
+            if output_path:
+                sheet_tasks.append((source_path, output_path, sheet_name))
+
+    # Сортируем индивидуальные задачи для детерминированного порядка
+    sheet_tasks.sort(key=lambda t: (t[0], t[2]))
 
     workers = max_workers or os.cpu_count() or 4
     all_created: List[str] = []
@@ -1399,44 +1519,251 @@ def split_cards_to_files(
     openpyxl_files: List[str] = []
     manifest: Dict[str, List[str]] = {}
 
-    if workers > 1 and len(tasks) > 1:
-        result_files, split_errors, oxl_count, oxl_files, worker_manifest = (
-            splitter.split_many_parallel(tasks)
-        )
-        all_created.extend(result_files)
-        openpyxl_count = oxl_count
-        openpyxl_files = oxl_files
-        manifest = worker_manifest
-        for source_path, err_msg in split_errors:
+    # ── ШАГ 3: Параллельное или последовательное выполнение ──
+    # Рабочие процессы НЕ проверяют существование файла —
+    # уникальность пути уже гарантирована preallocate_split_paths.
+
+    if workers > 1 and len(sheet_tasks) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    _extract_to_path_worker, src, out, sheet,
+                ): (src, out, sheet)
+                for src, out, sheet in sheet_tasks
+            }
+
+            for future in as_completed(futures):
+                src, out, sheet = futures[future]
+                try:
+                    worker_result = future.result()
+                    result_path = worker_result.get("path")
+                    err_msg = worker_result.get("error")
+
+                    if result_path:
+                        all_created.append(result_path)
+                        if worker_result.get("used_fallback"):
+                            openpyxl_count += 1
+                            source_basename = worker_result.get("source_basename", "")
+                            if source_basename:
+                                openpyxl_files.append(source_basename)
+                        # Обновляем манифест
+                        original_name = worker_result.get("source_basename", "")
+                        if original_name:
+                            manifest.setdefault(original_name, []).append(
+                                os.path.basename(result_path),
+                            )
+                    else:
+                        corrupted.append(src)
+                        for fs in file_stats:
+                            if fs.file_path == src:
+                                fs.has_error = True
+                                fs.error_message = err_msg or "Unknown error"
+                                break
+                except Exception as e:
+                    err_msg = str(e)
+                    logger.error(
+                        "Критическая ошибка рабочего процесса для %s: %s",
+                        os.path.basename(src), err_msg,
+                    )
+                    corrupted.append(src)
+                    for fs in file_stats:
+                        if fs.file_path == src:
+                            fs.has_error = True
+                            fs.error_message = err_msg
+                            break
+    else:
+        # Последовательное выполнение (тоже использует предвычисленные пути)
+        for src, out, sheet in sheet_tasks:
+            try:
+                worker_result = _extract_to_path_worker(src, out, sheet)
+                result_path = worker_result.get("path")
+                err_msg = worker_result.get("error")
+
+                if result_path:
+                    all_created.append(result_path)
+                    if worker_result.get("used_fallback"):
+                        openpyxl_count += 1
+                        source_basename = worker_result.get("source_basename", "")
+                        if source_basename:
+                            openpyxl_files.append(source_basename)
+                    # Обновляем манифест
+                    original_name = worker_result.get("source_basename", "")
+                    if original_name:
+                        manifest.setdefault(original_name, []).append(
+                            os.path.basename(result_path),
+                        )
+                else:
+                    logger.warning(
+                        "Повреждённый файл при разделении %s: %s",
+                        os.path.basename(src), err_msg,
+                    )
+                    corrupted.append(src)
+                    for fs in file_stats:
+                        if fs.file_path == src:
+                            fs.has_error = True
+                            fs.error_message = err_msg or "Unknown error"
+                            break
+            except Exception as e:
+                err_msg = str(e)
+                logger.warning(
+                    "Повреждённый файл при разделении %s: %s",
+                    os.path.basename(src), err_msg,
+                )
+                corrupted.append(src)
+                for fs in file_stats:
+                    if fs.file_path == src:
+                        fs.has_error = True
+                        fs.error_message = err_msg
+                        break
+
+    # ── ШАГ 4.5: Вертикальное разделение многооперационных файлов ──
+    # Для файлов с 1 листом и N таблицами (SWM-стиль),
+    # находим границы таблиц и создаём отдельный .xlsx для каждой.
+    for result in cards_data.card_results:
+        if result.file_path not in vertical_split_files:
+            continue
+
+        source_path = result.file_path
+        file_name = os.path.basename(source_path)
+
+        # Safety: .xls files cannot be processed by openpyxl splitter
+        if os.path.splitext(source_path)[1].lower() != ".xlsx":
+            logger.info(
+                "Вертикальный split: пропуск .xls файла (не поддерживается): %s",
+                file_name,
+            )
+            continue
+        sheet_name = result.sheets[0].sheet_name if result.sheets else ""
+        if not sheet_name:
+            continue
+
+        try:
+            # Находим границы всех таблиц на листе
+            boundaries = find_table_boundaries(source_path, sheet_name)
+            if not boundaries:
+                logger.warning(
+                    "Вертикальный split: не найдены границы таблиц в %s",
+                    file_name,
+                )
+                continue
+
+            logger.info(
+                "Вертикальный split %s: найдено %d границ таблиц",
+                file_name, len(boundaries),
+            )
+
+            # Создаём файлы для каждой операции
+            created_vertical = _vertical_split_worker(
+                source_path=source_path,
+                output_dir=output_dir,
+                sheet_name=sheet_name,
+                boundaries=boundaries,
+                card_label=result.card_number or file_name,
+            )
+
+            all_created.extend(created_vertical)
+
+            # Обновляем манифест
+            for vpath in created_vertical:
+                manifest.setdefault(file_name, []).append(
+                    os.path.basename(vpath),
+                )
+
+            # Обновляем статистику файла
+            for fs in file_stats:
+                if fs.file_path == source_path:
+                    fs.created_files = len(created_vertical)
+                    fs.sheets_split = len(boundaries)
+                    break
+
+            logger.info(
+                "Вертикальный split %s: создано %d файлов",
+                file_name, len(created_vertical),
+            )
+        except Exception as e:
+            err_msg = f"Вертикальный split {file_name}: {e}"
+            logger.error(err_msg)
             corrupted.append(source_path)
             for fs in file_stats:
                 if fs.file_path == source_path:
                     fs.has_error = True
                     fs.error_message = err_msg
                     break
-    else:
-        for source_path, out_dir, sheet_names, file_label in tasks:
+
+    # ── ШАГ 4.6: Вертикальный split для файлов, созданных горизонтальным split ──
+    # После горизонтального split каждый файл содержит 1 лист.
+    # Если на этом листе >1 операции — разделяем вертикально.
+    post_split_files = list(all_created)  # копия, т.к. all_created будет расширяться
+    for split_path in post_split_files:
+        if os.path.splitext(split_path)[1].lower() != ".xlsx":
+            continue
+        if not os.path.isfile(split_path):
+            continue
+
+        try:
+            import openpyxl
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+                _wb = openpyxl.load_workbook(split_path, read_only=True, data_only=True)
+                _sheet_count = len(_wb.sheetnames)
+                _sheet_name = _wb.active.title if _wb.active else ""
+                _wb.close()
+
+            if _sheet_count != 1 or not _sheet_name:
+                continue
+
+            boundaries = find_table_boundaries(split_path, _sheet_name)
+            if not boundaries or len(boundaries) <= 1:
+                continue
+
+            # Фильтруем пустые границы
+            valid_boundaries = [b for b in boundaries if b.data_end > b.header_row]
+            if len(valid_boundaries) <= 1:
+                continue
+
+            # Читаем ZIP один раз для всех операций (оптимизация I/O)
             try:
-                created = splitter.split_file(source_path, out_dir, sheet_names, file_label)
-                all_created.extend(created)
-                openpyxl_count += splitter.openpyxl_fallback_count
-                openpyxl_files.extend(sorted(splitter.openpyxl_fallback_files))
-                for orig, generated in splitter.manifest.items():
-                    manifest.setdefault(orig, []).extend(generated)
-                # Reset per-file counters for next iteration
-                splitter.openpyxl_fallback_count = 0
-                splitter.openpyxl_fallback_files.clear()
-                splitter.manifest.clear()
-            except Exception as e:
-                err_msg = str(e)
-                logger.warning("Повреждённый файл при разделении %s: %s", os.path.basename(source_path), err_msg)
-                corrupted.append(source_path)
-                # Обновить статистику для этого файла
-                for fs in file_stats:
-                    if fs.file_path == source_path:
-                        fs.has_error = True
-                        fs.error_message = err_msg
-                        break
+                with open(split_path, 'rb') as _f:
+                    _preloaded_zip = _f.read()
+            except OSError:
+                _preloaded_zip = None
+
+            file_basename = os.path.basename(split_path)
+            logger.info(
+                "Вертикальный split (post-horizontal) %s: %d операций на листе '%s'",
+                file_basename, len(valid_boundaries), _sheet_name,
+            )
+
+            created_vertical = _vertical_split_worker(
+                source_path=split_path,
+                output_dir=output_dir,
+                sheet_name=_sheet_name,
+                boundaries=valid_boundaries,
+                card_label=file_basename,
+                preloaded_zip=_preloaded_zip,
+            )
+
+            if created_vertical:
+                all_created.extend(created_vertical)
+                manifest.setdefault(file_basename, []).extend(
+                    os.path.basename(v) for v in created_vertical
+                )
+                # Удаляем оригинальный файл (заменён вертикальными)
+                try:
+                    os.remove(split_path)
+                    all_created.remove(split_path)
+                except OSError:
+                    pass
+
+                logger.info(
+                    "Вертикальный split (post-horizontal) %s: создано %d файлов",
+                    file_basename, len(created_vertical),
+                )
+        except Exception as e:
+            logger.debug("Post-horizontal vertical split skipped for %s: %s",
+                         os.path.basename(split_path), e)
+
+    # ── ШАГ 4: Пост-обработка ──
 
     # Сортируем результаты для детерминированного порядка
     all_created.sort()
@@ -1448,6 +1775,49 @@ def split_cards_to_files(
         for cf in corrupted:
             logger.warning("  ⚠️  %s", os.path.basename(cf))
     cards_data.corrupted_files.extend(corrupted)
+
+    # ── ШАГ 4.5: Изоляция повреждённых файлов ──
+    # Копируем каждый действительно повреждённый файл в corrupted_cards/ с описанием ошибки
+    corrupted_detailed: List[Dict[str, str]] = []
+    for cf in corrupted:
+        try:
+            fname = os.path.basename(cf)
+            error_msg = "Файл не удалось разделить: критическая ошибка при извлечении листа"
+            # Ищем описание ошибки в file_stats
+            for fs in file_stats:
+                if fs.file_path == cf and fs.error_message:
+                    error_msg = fs.error_message
+                    break
+
+            # Копируем в output_dir/corrupted_cards/
+            corrupted_dir = os.path.join(output_dir, "corrupted_cards")
+            os.makedirs(corrupted_dir, exist_ok=True)
+
+            dest_path = os.path.join(corrupted_dir, fname)
+            counter = 1
+            while os.path.exists(dest_path):
+                name_part, ext = os.path.splitext(fname)
+                dest_path = os.path.join(corrupted_dir, f"{name_part}_{counter}{ext}")
+                counter += 1
+
+            shutil.copy2(cf, dest_path)
+
+            # Записываем .error файл
+            error_path = dest_path + ".error"
+            with open(error_path, "w", encoding="utf-8") as f:
+                f.write(f"Source: {cf}\n")
+                f.write(f"Error: {error_msg}\n")
+
+            corrupted_detailed.append({
+                "file_name": fname,
+                "folder": corrupted_dir,
+                "error": error_msg,
+            })
+            logger.info("Повреждённый файл изолирован: %s → corrupted_cards/", fname)
+        except Exception as e:
+            logger.warning("Не удалось изолировать повреждённый файл %s: %s", cf, e)
+
+    cards_data.corrupted_files_detailed = corrupted_detailed
 
     # Подсчёт created_files на задачу: для каждого task сопоставляем
     # созданные файлы по префиксу из safe_label (совпадает с именованием splitter)
@@ -1489,8 +1859,18 @@ def split_cards_to_files(
     if manifest:
         import json
         manifest_path = os.path.join(output_dir, "split_manifest.json")
+        # Очищаем манифест: удаляем записи для файлов, которые были
+        # удалены при вертикальном split (заменены операционными файлами)
+        cleaned_manifest: Dict[str, List[str]] = {}
+        for key, values in manifest.items():
+            surviving = [
+                v for v in values
+                if os.path.isfile(os.path.join(output_dir, v))
+            ]
+            if surviving:
+                cleaned_manifest[key] = surviving
         # Сортируем для детерминированного вывода
-        sorted_manifest = {k: sorted(v) for k, v in sorted(manifest.items())}
+        sorted_manifest = {k: sorted(v) for k, v in sorted(cleaned_manifest.items())}
         try:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(sorted_manifest, f, ensure_ascii=False, indent=2)
