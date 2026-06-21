@@ -68,12 +68,14 @@ class ValidationResult:
 class ValidationPipeline:
     """Многоуровневый pipeline валидации .xlsx файлов.
 
-    Использование:
-        pipeline = ValidationPipeline()
-        result = pipeline.validate("output.xlsx")
-        if not result.is_valid:
-            for issue in result.errors:
-                print(f"ERROR: {issue.message}")
+    Уровни:
+      1. Structural: ZIP целостность, XML well-formed, обязательные файлы present
+      2. Schema: sheetData существует, колонки обнаружены, строки данных > 0
+      3. Content: изображения загружаемые, формулы парсибельные
+      4. Semantic: part numbers валидны, количества числовые, нет дубликатов
+      5. Split-quality: проверка качества после split (изображения, строки)
+
+    Используется после каждого split для гарантии корректности выходных файлов.
     """
 
     def __init__(
@@ -82,12 +84,20 @@ class ValidationPipeline:
         check_schema: bool = True,
         check_content: bool = True,
         check_semantic: bool = False,
+        check_split_quality: bool = False,
+        expected_min_rows: int = 0,
+        expected_max_rows: int = 0,
+        has_images_in_original: bool = False,
         max_file_size_mb: float = 50.0,
     ):
         self.check_structural = check_structural
         self.check_schema = check_schema
         self.check_content = check_content
         self.check_semantic = check_semantic
+        self.check_split_quality = check_split_quality
+        self.expected_min_rows = expected_min_rows
+        self.expected_max_rows = expected_max_rows
+        self.has_images_in_original = has_images_in_original
         self.max_file_size_mb = max_file_size_mb
 
     def validate(self, file_path: str) -> ValidationResult:
@@ -123,6 +133,9 @@ class ValidationPipeline:
 
         if self.check_semantic:
             self._check_semantic(file_path, result)
+
+        if self.check_split_quality:
+            self._check_split_quality(file_path, result)
 
         return result
 
@@ -351,17 +364,98 @@ class ValidationPipeline:
         except Exception as e:
             result.add_warning("semantic", f"Не удалось проверить семантику: {e}")
 
+    def _check_split_quality(self, file_path: str, result: ValidationResult) -> None:
+        """Уровень 5: Проверка качества после split.
 
-def validate_split_file(file_path: str) -> ValidationResult:
-    """Быстрая валидация одного split-файла (structural + schema).
+        Проверяет:
+          - Наличие изображений (если в оригинале были)
+          - Количество строк в разрезанном файле
+          - Размер файла не слишком мал (признак пустого/битого файла)
+        """
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zf:
+                names = set(zf.namelist())
+
+                # Проверка 1: изображения (если в оригинале были)
+                if self.has_images_in_original:
+                    media_files = [n for n in names if n.startswith('xl/media/')]
+                    if not media_files:
+                        result.add_warning(
+                            "split-quality",
+                            "Нет изображений в split-файле (в оригинале были)",
+                        )
+
+                # Проверка 2: количество строк
+                if self.expected_min_rows > 0 or self.expected_max_rows > 0:
+                    for name in names:
+                        if (name.endswith('.xml')
+                                and 'sheet' in name.lower()
+                                and '_rels' not in name):
+                            try:
+                                data = zf.read(name)
+                                root = ET.fromstring(data)
+                                ns = f'{{{NS_MAIN}}}sheetData'
+                                sheet_data = root.find(ns)
+                                if sheet_data is not None:
+                                    row_count = len(
+                                        sheet_data.findall(f'{{{NS_MAIN}}}row')
+                                    )
+                                    if (self.expected_min_rows > 0
+                                            and row_count < self.expected_min_rows):
+                                        result.add_warning(
+                                            "split-quality",
+                                            f"Мало строк: {row_count} < {self.expected_min_rows}",
+                                        )
+                                    if (self.expected_max_rows > 0
+                                            and row_count > self.expected_max_rows * 1.5):
+                                        result.add_warning(
+                                            "split-quality",
+                                            f"Много строк: {row_count} > {self.expected_max_rows * 1.5:.0f}",
+                                        )
+                            except ET.ParseError:
+                                pass
+                            break  # Проверяем только первый sheet XML
+
+                # Проверка 3: размер файла
+                try:
+                    size_bytes = os.path.getsize(file_path)
+                    if size_bytes < 1024:  # < 1 KB — подозрительно мало
+                        result.add_warning(
+                            "split-quality",
+                            f"Файл очень маленький: {size_bytes} байт",
+                        )
+                except OSError:
+                    pass
+
+        except zipfile.BadZipFile:
+            pass  # Уже обработано на уровне structural
+
+
+def validate_split_file(
+    file_path: str,
+    has_images_in_original: bool = False,
+    expected_min_rows: int = 0,
+    expected_max_rows: int = 0,
+) -> ValidationResult:
+    """Быстрая валидация одного split-файла (structural + schema + split-quality).
 
     Удобная функция-обёртка для использования в splitter.
+
+    Args:
+        file_path: Путь к .xlsx файлу.
+        has_images_in_original: True если в исходном файле были изображения.
+        expected_min_rows: Минимальное ожидаемое количество строк (0 = без проверки).
+        expected_max_rows: Максимальное ожидаемое количество строк (0 = без проверки).
     """
     pipeline = ValidationPipeline(
         check_structural=True,
         check_schema=True,
         check_content=False,
         check_semantic=False,
+        check_split_quality=True,
+        has_images_in_original=has_images_in_original,
+        expected_min_rows=expected_min_rows,
+        expected_max_rows=expected_max_rows,
     )
     return pipeline.validate(file_path)
 

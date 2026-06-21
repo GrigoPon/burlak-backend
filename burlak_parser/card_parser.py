@@ -43,6 +43,10 @@ from burlak_parser.normalizer import (
     clean_part_number,
     is_valid_part_number,
 )
+from burlak_parser.xls_converter import (
+    is_libreoffice_available,
+    convert_xls_files_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1064,6 +1068,41 @@ def parse_cards(
     if not all_files:
         raise FileNotFoundError(f"Не найдено .xlsx/.xls файлов в '{input_path}'")
 
+    # ── Конвертация .xls → .xlsx через LibreOffice ──
+    xls_files = [f for f in all_files if os.path.splitext(f)[1].lower() == ".xls"]
+    if xls_files:
+        if is_libreoffice_available():
+            convert_dir = os.path.join(
+                extract_dir or tempfile.mkdtemp(prefix="burlak_xls_"),
+                "_converted_xlsx",
+            )
+            converted_map = convert_xls_files_batch(xls_files, convert_dir)
+            if converted_map:
+                logger.info(
+                    "Конвертировано %d/%d .xls файлов в .xlsx",
+                    len(converted_map), len(xls_files),
+                )
+                # Заменяем .xls пути на сконвертированные .xlsx
+                new_files = []
+                for f in all_files:
+                    if f in converted_map:
+                        new_files.append(converted_map[f])
+                    else:
+                        new_files.append(f)
+                all_files = sorted(new_files)
+            else:
+                logger.warning(
+                    "Не удалось сконвертировать ни одного .xls файла. "
+                    "Они будут обработаны через xlrd (без изображений)."
+                )
+        else:
+            logger.warning(
+                "LibreOffice не установлен. %d .xls файлов будут "
+                "обработаны через xlrd (без изображений). "
+                "Для конвертации установите LibreOffice.",
+                len(xls_files),
+            )
+
     # Классифицируем все файлы
     classifications = filter_operational_cards(all_files)
 
@@ -1362,6 +1401,83 @@ class CardService:
 
 TEMPLATE_SHEET_KEYWORDS = ["空表", "填写范本", "范本"]
 
+# Ключевые слова для определения "инспекционного" формата файлов
+# (检验作业指导书 — инструкция по проверке качества)
+_INSPECTION_FILE_KEYWORDS = ["检验作业指导书", "检验指导书", "检验项目"]
+# Ключевые слова для определения "主要内容" листов в инспекционных файлах
+_INSPECTION_DATA_SHEET_KEYWORDS = ["内容", "内容页", "数据"]
+# Ключевые слова для "мусорных" листов в инспекционных файлах
+_INSPECTION_SERVICE_SHEET_KEYWORDS = ["封面", "目录", "Macro", "Sheet2", "Sheet3", "更改"]
+
+
+def _is_inspection_format_file(file_path: str, sheets_info: List[CardSheetInfo]) -> bool:
+    """Определить, является ли файл инспекционным (检验作业指导书).
+
+    Инспекционные файлы содержат:
+      - Заголовок "检验项目" в ячейках листов
+      - Много операций проверки на одном листе
+      - Мало данных в каждой операции (1-3 строки на операцию)
+
+    Returns:
+        True если файл инспекционного формата.
+    """
+    basename = os.path.basename(file_path).lower()
+    # Проверяем имя файла на ключевые слова
+    for kw in _INSPECTION_FILE_KEYWORDS:
+        if kw in basename:
+            return True
+    # Фоллбэк: проверяем содержимое листов — если хотя бы один лист
+    # содержит >10 inspection операций, файл инспекционный
+    for s in sheets_info:
+        if s.operation_name and s.operation_name.startswith("Inspection ("):
+            try:
+                ops_str = s.operation_name.split("(")[1].split(")")[0].split()[0]
+                if int(ops_str) >= 10:
+                    return True
+            except (IndexError, ValueError):
+                pass
+    return False
+
+
+def _select_best_data_sheet(
+    sheets_info: List[CardSheetInfo],
+) -> Optional[CardSheetInfo]:
+    """Выбрать лучший лист с данными из списка листов.
+
+    Приоритет:
+      1. Лист с именем из _INSPECTION_DATA_SHEET_KEYWORDS (для инспекционных файлов)
+      2. Лист с наибольшим количеством строк данных
+      3. Первый валидный лист
+    """
+    if not sheets_info:
+        return None
+
+    # Приоритет 1: Имя листа совпадает с ключевыми словами данных
+    for s in sheets_info:
+        if not s.has_data:
+            continue
+        for kw in _INSPECTION_DATA_SHEET_KEYWORDS:
+            if kw in s.sheet_name:
+                return s
+
+    # Приоритет 2: Наибольшее количество строк данных
+    best = None
+    for s in sheets_info:
+        if not s.has_data:
+            continue
+        # Пропускаем листы-мусор
+        is_service = False
+        for kw in _INSPECTION_SERVICE_SHEET_KEYWORDS:
+            if kw in s.sheet_name:
+                is_service = True
+                break
+        if is_service and len(sheets_info) > 1:
+            continue
+        if best is None or s.max_data_row > best.max_data_row:
+            best = s
+
+    return best
+
 
 def _find_main_data_sheet(
     sheets: List[CardSheetInfo],
@@ -1372,14 +1488,25 @@ def _find_main_data_sheet(
 
     Used to find the primary operational sheet in files that may have
     service sheets (封面, 目录) alongside real data sheets.
+
+    УЛУЧШЕНИЕ: фильтрует листы с очень малым количеством данных (< 5 строк)
+    и листы с типичными именами мусора (Macro, Sheet2, Sheet3).
     """
     best = None
     for s in sheets:
         if not s.has_data:
             continue
+        # Пропускаем листы с очень малым количеством данных
+        if s.max_data_row < 5 and len(sheets) > 1:
+            continue
         is_svc = any(kw in s.sheet_name for kw in service_keywords)
         if is_svc and len(sheets) > 1:
             continue
+        # Пропускаем типичные мусорные листы
+        sheet_lower = s.sheet_name.lower()
+        if any(kw in sheet_lower for kw in ["macro", "sheet2", "sheet3", "module"]):
+            if len(sheets) > 1:
+                continue
         if best is None or s.max_data_row > best.max_data_row:
             best = s
     return best
@@ -1565,13 +1692,11 @@ def split_cards_to_files(
     # Файлы с 1 листом и >1 таблицами (операциями) на этом листе
     # требуют вертикального разделения: каждая операция → отдельный .xlsx.
     #
-    # Универсальный детектор: вертикальный split для ЛЮБОГО файла
-    # с >1 таблицей на одном листе ИЛИ с очень большим количеством строк
-    # на одном листе (SWM мегалисты с 1000+ строк содержат много операций,
-    # даже если эвристика нашла только 1 таблицу).
-    #
-    # Confidence scoring в find_table_boundaries отсеивает false positives
-    # на маленьких файлах.
+    # УЛУЧШЕННАЯ логика: строгие пороги для предотвращения false positives.
+    # Каждое условие требует ДОПОЛНИТЕЛЬНЫХ подтверждений:
+    #   - Наличие маркерных паттернов (鑫源汽车, 检验项目)
+    #   - Стабильные интервалы между операциями
+    #   - Достаточное количество данных в каждой операции
     vertical_split_files: Dict[str, int] = {}  # file_path -> tables_extracted
     for result in cards_data.card_results:
         is_xlsx = os.path.splitext(result.file_path)[1].lower() == ".xlsx"
@@ -1582,46 +1707,60 @@ def split_cards_to_files(
             continue
 
         # Find the MAIN data sheet (the one with the most rows)
-        main_sheet = _find_main_data_sheet(
-            result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
-        )
+        main_sheet = _select_best_data_sheet(result.sheets)
+        if main_sheet is None:
+            main_sheet = _find_main_data_sheet(
+                result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
+            )
         if main_sheet is None:
             continue
 
         max_data_rows = main_sheet.max_data_row
+        is_inspection = _is_inspection_format_file(result.file_path, result.sheets)
 
-        # Условие 1: Несколько таблиц на одном листе
+        # Условие 1: Много таблиц на одном листе (базовый детектор)
+        # Требуем минимум 2 таблицы с данными, и чтобы файл был ОДНОЛИСТОВЫМ
         multi_table = (
-            result.tables_extracted > 1
+            result.tables_extracted >= 2
             and len(result.sheets) == 1
         )
 
-        # Условие 2: Очень большой лист (SWM мегалист: 500+ строк на одном листе
-        # с большой вероятностью содержит несколько операционных карт)
+        # Условие 2: Мегалист — ОЧЕНЬ строгие пороги
+        # Только для SWM-формата с 鑫源汽车 маркерами
         mega_sheet = (
             len(result.sheets) == 1
-            and max_data_rows > 500
-            and len(result.parts) > 100
+            and max_data_rows > 800
+            and len(result.parts) > 200
+            and result.tables_extracted > 1
         )
 
-        # Условие 3: Инспекционный формат с множеством операций
-        # (JC-031 style: 300+ rows, many inspection ops detected by heuristic)
-        # NOTE: len(result.sheets) == 1 guard prevents data loss on multi-sheet
-        # inspection files — non-main sheets would be filtered from normal_tasks
-        # otherwise. Multi-sheet files go through horizontal split first,
-        # then step 4.6 handles vertical split on each sheet independently.
+        # Условие 3: Инспекционный формат — пороги повышены
+        # Требуем минимум 8 таблиц (было 5) и 200+ строк (было 100)
         inspection_mega = (
-            result.tables_extracted > 5
-            and max_data_rows > 100
+            is_inspection
+            and result.tables_extracted >= 8
+            and max_data_rows > 200
             and len(result.sheets) == 1
         )
 
-        if multi_table or mega_sheet or inspection_mega:
+        # Условие 4: Инспекционный формат с 15+ операциями на листе
+        # (检验作业指导书 с проверкой качества: 15 станций × ~20 строк = 300 строк)
+        # Допускаем файлы с любым количеством листов — вертикальный split
+        # работает только с основным листом данных (内容).
+        inspection_large = (
+            is_inspection
+            and result.tables_extracted >= 12
+            and max_data_rows > 150
+        )
+
+        if multi_table or mega_sheet or inspection_mega or inspection_large:
             vertical_split_files[result.file_path] = max(result.tables_extracted, 2)
             if multi_table:
                 reason = "много таблиц"
             elif mega_sheet:
                 reason = "мегалист (SWM)"
+            elif inspection_large:
+                reason = "инспекционный формат (большой)"
             else:
                 reason = "инспекционный формат"
             logger.info(
@@ -1785,9 +1924,13 @@ def split_cards_to_files(
             )
             continue
         # Find the MAIN data sheet for vertical split
-        main_sheet_v = _find_main_data_sheet(
-            result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
-        )
+        # Используем _select_best_data_sheet для инспекционных файлов
+        # (берёт лист "内容" вместо первого попавшегося)
+        main_sheet_v = _select_best_data_sheet(result.sheets)
+        if main_sheet_v is None:
+            main_sheet_v = _find_main_data_sheet(
+                result.sheets, _SPLITTER_SERVICE_SHEET_KEYWORDS,
+            )
         if main_sheet_v is None:
             continue
         sheet_name = main_sheet_v.sheet_name
