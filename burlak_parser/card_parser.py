@@ -528,16 +528,15 @@ def _check_sheet_has_data(ws: ExcelSheet) -> bool:
     """Проверить, есть ли данные на листе (проверка начала и сэмплирование)."""
     max_row = ws.max_row
     max_col = ws.max_column
-
     for r in range(1, min(max_row, 10) + 1):
-        for c in range(1, min(max_col, 10) + 1):
+        for c in range(1, min(max_col, 30) + 1):
             if ws.cell_value(r, c) is not None:
                 return True
 
     if max_row > 10:
         step = max(1, (max_row - 15) // 10)
         for r in range(15, max_row + 1, step):
-            for c in range(1, min(max_col, 10) + 1):
+            for c in range(1, min(max_col, 30) + 1):
                 if ws.cell_value(r, c) is not None:
                     return True
 
@@ -1470,14 +1469,15 @@ def split_cards_to_files(
     # но файл является стандартной однолистовой картой.
     vertical_split_files: Dict[str, int] = {}  # file_path -> tables_extracted
     for result in cards_data.card_results:
+        max_data_rows = result.sheets[0].max_data_row if result.sheets else 0
         if (not result.is_service_file
                 and result.tables_extracted > 1
                 and len(result.sheets) == 1
                 and result.sheets[0].has_data
+                and max_data_rows > 500  # GUARD: only megasheets with 500+ rows
                 # .xls files cannot be split by openpyxl — skip vertical split
                 and os.path.splitext(result.file_path)[1].lower() == ".xlsx"):
             vertical_split_files[result.file_path] = result.tables_extracted
-            max_data_rows = result.sheets[0].max_data_row if result.sheets else 0
             logger.info(
                 "Обнаружен многооперационный megasheet: %s (%d таблиц, %d строк) "
                 "— будет разделён вертикально",
@@ -1662,8 +1662,6 @@ def split_cards_to_files(
             )
 
             all_created.extend(created_vertical)
-
-            # Обновляем манифест
             for vpath in created_vertical:
                 manifest.setdefault(file_name, []).append(
                     os.path.basename(vpath),
@@ -1776,7 +1774,7 @@ def split_cards_to_files(
             logger.warning("  ⚠️  %s", os.path.basename(cf))
     cards_data.corrupted_files.extend(corrupted)
 
-    # ── ШАГ 4.5: Изоляция повреждённых файлов ──
+    # ── ШАГ 4.7: Изоляция повреждённых файлов ──
     # Копируем каждый действительно повреждённый файл в corrupted_cards/ с описанием ошибки
     corrupted_detailed: List[Dict[str, str]] = []
     for cf in corrupted:

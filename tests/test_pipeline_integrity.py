@@ -21,8 +21,8 @@ import pytest
 
 # ── Expected file counts (deterministic, measured from verified runs) ──
 EXPECTED_SPLIT_COUNTS = {
-    "jetour": 947,
-    "swm": 306,
+    "jetour": 823,
+    "swm": 320,
     "baic": 120,
     "changan": 628,
 }

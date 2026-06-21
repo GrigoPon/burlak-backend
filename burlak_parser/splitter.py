@@ -46,6 +46,9 @@ _DECORATIVE_CHARS_RE = re.compile(r'[☆★●○◆◇■□▲△▼▽♠♣�
 # Множественные подчёркивания/точки/пробелы → одинарные
 _MULTI_SEP_RE = re.compile(r'[_ .]{2,}')
 
+# Регулярка для cell reference: "A3390" → groups ("A", "3390")
+_CELL_REF_RE = re.compile(r'^([A-Z]+)(\d+)$')
+
 # Пространства имён Excel OOXML
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -56,11 +59,15 @@ NS_DRAWINGML = "http://schemas.openxmlformats.org/drawingml/2006/main"
 VML_NS = "urn:schemas-microsoft-com:vml"
 OFFICE_NS = "urn:schemas-microsoft-com:office:office"
 
-# Регистрируем пространства имён глобально (только для sheet XML)
+# Регистрируем пространства имён глобально
+# Нужно зарегистрировать ВСЕ namespace-ы, которые могут встречаться
+# в OOXML-файлах, чтобы избежать появления ns0:/ns1: префиксов.
+# _serialize_xml() динамически переключает default namespace при каждом вызове.
 ET.register_namespace('', NS_MAIN)
 ET.register_namespace('r', NS_R)
 ET.register_namespace('xdr', NS_DRAWING)
 ET.register_namespace('a', NS_DRAWINGML)
+ET.register_namespace('ct', NS_CT)
 
 
 def _serialize_xml(root: ET.Element, default_ns_uri: str,
@@ -72,25 +79,39 @@ def _serialize_xml(root: ET.Element, default_ns_uri: str,
       - sheet XML:  NS_MAIN as default
       - Content_Types:  NS_CT as default
       - rels files:  NS_PKG_RELS as default
+
+    CRITICAL: Uses custom XML declaration with standalone="yes", double quotes,
+    and Windows-style \r\n line endings. MS Excel requires these for compatibility.
+    Python 3.14: ET.tostring(standalone=True) raises TypeError, so we work around it.
     """
-    old_default = ET._namespace_map.get('')
+    old_default_uri = None
+    for uri_key, prefix_val in ET._namespace_map.items():
+        if prefix_val == '':
+            old_default_uri = uri_key
+            break
     old_extras: Dict[str, Optional[str]] = {}
     try:
         ET.register_namespace('', default_ns_uri)
         if extra_ns:
             for p, uri in extra_ns.items():
-                old_extras[p] = ET._namespace_map.get(p)
+                old_extras[p] = ET._namespace_map.get(uri)
                 ET.register_namespace(p, uri)
-        return ET.tostring(root, xml_declaration=True, encoding='UTF-8')
+        # Serialize without declaration, then prepend MS Excel-compatible declaration
+        body = ET.tostring(root, xml_declaration=False, encoding='UTF-8')
+        declaration = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+        return declaration + body
     finally:
-        ET.register_namespace('', old_default)
+        try:
+            ET.register_namespace('', old_default_uri)
+        except TypeError:
+            pass
         if extra_ns:
-            for p in old_extras:
-                v = old_extras[p]
-                if v is not None:
-                    ET.register_namespace(p, v)
+            for p, uri in extra_ns.items():
+                old_prefix = old_extras.get(p)
+                if old_prefix is not None:
+                    ET._namespace_map[uri] = old_prefix
                 else:
-                    ET._namespace_map.pop(p, None)
+                    ET._namespace_map.pop(uri, None)
 
 
 # ─── Типы для вертикального split ───────────────────────────────────
@@ -420,18 +441,27 @@ class CardSplitter:
     def _extract_sheet_via_zip(
         self, source_path: str, output_path: str, keep_sheet_name: str,
     ) -> None:
-        """Выделить один лист через прямую манипуляцию ZIP (без openpyxl save/load).
+        """Выделить один лист через чистую ZIP-манипуляцию.
 
-        Алгоритм «удаления лишнего»:
-          1. Копировать исходный .xlsx как бинарный файл (shutil.copy2).
-          2. Прочитать как ZIP-архив → получить все записи.
-          3. Найти в xl/workbook.xml целевой лист.
-          4. Удалить из workbook.xml все остальные <sheet>.
-          5. Удалить файлы ненужных листов (.xml, .rels, drawings, vml).
-          6. Очистить definedNames (named ranges), ссылающиеся на удалённые листы.
-          7. Обновить xl/_rels/workbook.xml.rels.
-          8. Обновить [Content_Types].xml.
-          9. Записать изменённый ZIP.
+        АЛГОРИТМ (КЛЮЧЕВОЙ):
+        Стратегия «сохраняем только нужное»:
+          1. Читаем оригинальный ZIP в память.
+          2. Находим rId и путь к сохранённому листу.
+          3. Рекурсивно трассируем все .rels от листа → находим все нужные файлы
+             (drawing XML, VML, OLE, изображения, printerSettings, их .rels).
+          4. Добавляем обязательные: workbook, styles, theme, sharedStrings, docProps.
+          5. Создаём НОВЫЙ workbook.xml: только 1 лист + очищенные definedNames.
+             ВАЖНО: все остальные элементы (fileVersion, workbookPr, bookViews,
+             calcPr, AlternateContent) копируются из оригинала AS-IS.
+          6. Создаём НОВЫЙ workbook.xml.rels: только лист + shared items.
+          7. Фильтруем Content_Types.xml: только Override для существующих файлов.
+          8. Записываем новый ZIP.
+
+        ВАЖНО: НИКАКОГО openpyxl, НИКАКОГО переименования файлов!
+        Все оригинальные XML-файлы и бинарные данные копируются AS-IS
+        с их оригинальными именами (sheet8.xml остаётся sheet8.xml).
+        Это гарантирует 100% сохранение всех ссылок внутри drawing,
+        VML, OLE и других файлов.
 
         Args:
             source_path: Путь к исходному .xlsx файлу.
@@ -441,150 +471,383 @@ class CardSplitter:
         Raises:
             ValueError: Если целевой лист не найден в файле.
         """
-        # Копируем исходный файл побайтово (shutil.copy2 сохраняет метаданные)
-        shutil.copy2(source_path, output_path)
-
-        # File size guard — warn for large files
-        file_size_mb = os.path.getsize(source_path) / (1024 * 1024)
-        if file_size_mb > 100:
-            logger.warning(
-                "Large file (%.1f MB): %s — ZIP extraction may use significant memory",
-                file_size_mb, os.path.basename(source_path),
-            )
-
-        # Читаем ZIP-архив в память
-        with open(output_path, 'rb') as f:
+        # ── ФАЗА 1: Прочитать оригинальный ZIP ──
+        with open(source_path, 'rb') as f:
             zip_data = f.read()
 
-        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-            zip_entries: Dict[str, bytes] = {}
-            for name in zf.namelist():
-                try:
-                    zip_entries[name] = zf.read(name)
-                except zipfile.BadZipFile as e:
-                    logger.warning("Skipping corrupt ZIP entry %s: %s", name, e)
+        orig_entries: Dict[str, bytes] = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+                for name in zf.namelist():
+                    try:
+                        orig_entries[name] = zf.read(name)
+                    except (zipfile.BadZipFile, Exception):
+                        pass
+        except zipfile.BadZipFile as e:
+            raise ValueError(f"Cannot read source ZIP: {e}")
 
-        # ── 1. Найти целевой лист ──
-        wb_xml = zip_entries.get('xl/workbook.xml')
+        # ── ФАЗА 2: Найти лист в workbook.xml ──
+        wb_xml = orig_entries.get('xl/workbook.xml')
         if wb_xml is None:
-            raise ValueError("Не найден xl/workbook.xml в архиве")
+            raise ValueError("xl/workbook.xml not found")
 
         wb_root = ET.fromstring(wb_xml)
         sheets_elem = wb_root.find(f'{{{NS_MAIN}}}sheets')
         if sheets_elem is None:
-            raise ValueError("Не найдена секция <sheets> в workbook.xml")
+            raise ValueError("<sheets> not found in original workbook.xml")
 
+        # Находим rId сохранённого листа
         target_r_id: Optional[str] = None
-        sheets_to_delete: List[Tuple[str, str, ET.Element]] = []
-
         for sheet_el in sheets_elem.findall(f'{{{NS_MAIN}}}sheet'):
-            name = sheet_el.get('name', '')
-            r_id = sheet_el.get(f'{{{NS_R}}}id') or sheet_el.get('r:id')
-            if name == keep_sheet_name:
-                target_r_id = r_id
-            else:
-                sheets_to_delete.append((name, r_id, sheet_el))
+            if sheet_el.get('name') == keep_sheet_name:
+                target_r_id = sheet_el.get(f'{{{NS_R}}}id') or sheet_el.get('r:id')
+                break
 
         if target_r_id is None:
-            raise ValueError(f"Лист '{keep_sheet_name}' не найден в файле")
+            raise ValueError(f"Sheet '{keep_sheet_name}' not found")
 
-        # Если лист единственный — файл уже готов
-        if not sheets_to_delete:
-            return
-
-        # ── 2. Получить rId→Target маппинг из .rels ──
-        rels_xml = zip_entries.get('xl/_rels/workbook.xml.rels')
+        # ── ФАЗА 3a: Найти путь к листу из workbook.xml.rels ──
+        rels_xml = orig_entries.get('xl/_rels/workbook.xml.rels')
         if rels_xml is None:
-            raise ValueError("Не найден xl/_rels/workbook.xml.rels")
+            raise ValueError("xl/_rels/workbook.xml.rels not found")
 
         rels_root = ET.fromstring(rels_xml)
-        WORKSHEET_TYPE = f"{NS_R}/worksheet"
-
-        r_id_to_target: Dict[str, str] = {}
+        orig_sheet_path = ''
         for rel_el in rels_root:
-            rid = rel_el.get('Id', '')
-            target = rel_el.get('Target', '')
-            r_id_to_target[rid] = target
+            if rel_el.get('Id') == target_r_id:
+                orig_sheet_path = rel_el.get('Target', '')
+                break
 
-        # Собираем имена удаляемых листов для фильтрации definedNames
-        deleted_sheet_names: Set[str] = {name for name, _, _ in sheets_to_delete}
+        if not orig_sheet_path:
+            raise ValueError(f"No target for rId {target_r_id}")
 
-        # ── 3. Удалить ненужные <sheet> из workbook.xml ──
-        for _, _, sheet_el in sheets_to_delete:
-            sheets_elem.remove(sheet_el)
+        # Нормализуем путь
+        orig_sheet_path = orig_sheet_path.lstrip('/')
+        if not orig_sheet_path.startswith('xl/'):
+            orig_sheet_path = 'xl/' + orig_sheet_path
 
-        # ── 4. Удалить relationship'ы для ненужных листов ──
-        keep_r_ids: Set[str] = {target_r_id}
-        for rel_el in list(rels_root):
-            rid = rel_el.get('Id', '')
-            r_type = rel_el.get('Type', '')
-            if r_type == WORKSHEET_TYPE and rid not in keep_r_ids:
-                rels_root.remove(rel_el)
+        # ── ФАЗА 3b: Рекурсивно трассировать все .rels ──
+        needed: Set[str] = set()
 
-        # ── 5. Собрать список файлов для удаления ──
-        files_to_remove: Set[str] = set()
+        def _trace_rels(rels_path: str, base_dir: str) -> None:
+            """Рекурсивно трассировать .rels, добавляя все найденные файлы."""
+            if rels_path not in orig_entries:
+                return
+            try:
+                tr_root = ET.fromstring(orig_entries[rels_path])
+                for tr_el in tr_root:
+                    target = tr_el.get('Target', '')
+                    if not target:
+                        continue
+                    # Ресолвим относительный путь от base_dir
+                    resolved = os.path.normpath(
+                        os.path.join(base_dir, target)
+                    ).replace(os.sep, '/')
+                    if resolved in orig_entries and resolved not in needed:
+                        needed.add(resolved)
+                        # Ищем под-rels (drawing.rels, vml.rels)
+                        res_dir = os.path.dirname(resolved)
+                        res_base = os.path.basename(resolved)
+                        sub_rels = f"{res_dir}/_rels/{res_base}.rels"
+                        if sub_rels in orig_entries:
+                            needed.add(sub_rels)
+                            _trace_rels(sub_rels, res_dir)
+            except Exception as e:
+                logger.debug("Trace rels failed for %s: %s", rels_path, e)
 
-        for name, r_id, _ in sheets_to_delete:
-            if r_id and r_id in r_id_to_target:
-                target = r_id_to_target[r_id]
-                # Нормализуем путь: убираем ведущий / и добавляем xl/ при необходимости
-                # openpyxl генерирует абсолютные пути (/xl/worksheets/sheet2.xml),
-                # другие генераторы — относительные (worksheets/sheet2.xml)
-                removed_sheet = target.lstrip('/')
-                if not removed_sheet.startswith('xl/'):
-                    removed_sheet = 'xl/' + removed_sheet
-                files_to_remove.add(removed_sheet)
-                _collect_related_files(zip_entries, removed_sheet, files_to_remove)
+        # Всегда нужны базовые файлы
+        needed.add('[Content_Types].xml')
+        needed.add('_rels/.rels')
+        needed.add('xl/workbook.xml')
+        needed.add('xl/_rels/workbook.xml.rels')
 
-        # Удаляем calcChain.xml (Excel перегенерирует)
-        zip_entries.pop('xl/calcChain.xml', None)
-        files_to_remove.add('xl/calcChain.xml')
+        # Сам лист
+        needed.add(orig_sheet_path)
 
-        # ── 6. Очистить definedNames (named ranges) ──
-        _clean_named_ranges(wb_root, deleted_sheet_names, keep_sheet_name)
+        # .rels файл листа и его рекурсивные зависимости
+        sheet_dir = os.path.dirname(orig_sheet_path)
+        sheet_base = os.path.basename(orig_sheet_path)
+        sheet_rels_path = f"{sheet_dir}/_rels/{sheet_base}.rels"
+        if sheet_rels_path in orig_entries:
+            needed.add(sheet_rels_path)
+            _trace_rels(sheet_rels_path, sheet_dir)
 
-        # ── 6.5 Очистить View-элементы (устраняет ошибку "Removed Records: View") ──
-        book_views = wb_root.find(f'{{{NS_MAIN}}}bookViews')
-        if book_views is not None:
-            for wv in book_views.findall(f'{{{NS_MAIN}}}workbookView'):
-                wv.attrib.pop('activeTab', None)
-                wv.attrib.pop('firstSheet', None)
+        # Добавляем shared items (styles, theme, sharedStrings) из workbook.xml.rels
+        for rel_el in rels_root:
+            rel_id = rel_el.get('Id', '')
+            rel_type = rel_el.get('Type', '')
+            rel_target = rel_el.get('Target', '')
+            if rel_id == target_r_id:
+                continue  # Пропускаем сам лист (уже добавлен)
+            # Добавляем styles, theme, sharedStrings
+            if ('styles' in rel_type.lower()
+                    or 'theme' in rel_type.lower()
+                    or 'sharedstrings' in rel_type.lower()):
+                resolved = os.path.normpath(
+                    os.path.join('xl', rel_target)
+                ).replace(os.sep, '/')
+                if resolved in orig_entries:
+                    needed.add(resolved)
 
-        custom_views = wb_root.find(f'{{{NS_MAIN}}}customWorkbookViews')
-        if custom_views is not None:
-            wb_root.remove(custom_views)
+        # Добавляем docProps (core, app, custom) — не влияют на загрузку листа
+        doc_props = [n for n in orig_entries if n.startswith('docProps/')]
+        needed.update(doc_props)
 
-        # ── 7. Обновить [Content_Types].xml ──
-        ct_xml = zip_entries.get('[Content_Types].xml')
-        if ct_xml is not None:
-            ct_root = ET.fromstring(ct_xml)
-            for override_el in list(ct_root.findall(f'{{{NS_CT}}}Override')):
-                part_name = override_el.get('PartName', '')
-                if part_name.startswith('/'):
-                    part_name = part_name[1:]
-                if part_name in files_to_remove:
-                    ct_root.remove(override_el)
-            zip_entries['[Content_Types].xml'] = _serialize_xml(
-                ct_root, NS_CT,
-            )
+        # Добавляем customXml (если есть)
+        custom_xml = [n for n in orig_entries if n.startswith('customXml/')]
+        needed.update(custom_xml)
 
-        # ── 8. Удалить файлы из архива ──
-        for fname in list(files_to_remove):
-            zip_entries.pop(fname, None)
+        # ── ФАЗА 4: Собрать имена удалённых листов ──
+        other_sheet_names: Set[str] = set()
+        for sheet_el in sheets_elem.findall(f'{{{NS_MAIN}}}sheet'):
+            sn = sheet_el.get('name', '')
+            if sn != keep_sheet_name:
+                other_sheet_names.add(sn)
 
-        # ── 9. Записать обновлённые XML ──
-        zip_entries['xl/workbook.xml'] = _serialize_xml(
-            wb_root, NS_MAIN,
+        # ── ФАЗА 5: Модифицировать workbook.xml через строковые операции ──
+        # ВАЖНО: используем строковые операции, а НЕ XML парсинг,
+        # чтобы сохранить оригинальные namespace declarations, XML declaration,
+        # line endings и все остальные детали исходного файла AS-IS.
+        new_wb_text = _modify_workbook_xml_text(
+            orig_entries['xl/workbook.xml'].decode('utf-8'),
+            keep_sheet_name,
+            target_r_id,
+            other_sheet_names,
         )
-        zip_entries['xl/_rels/workbook.xml.rels'] = _serialize_xml(
-            rels_root, NS_PKG_RELS,
+
+        # ── ФАЗА 6: Модифицировать workbook.xml.rels — удалить лишние Relationship ──
+        new_rels_text = _modify_workbook_rels_text(
+            orig_entries['xl/_rels/workbook.xml.rels'].decode('utf-8'),
+            target_r_id,
         )
 
-        # ── 10. Записать новый ZIP ──
-        os.remove(output_path)
+        # ── ФАЗА 7: Собрать выходной словарь ──
+        output_entries: Dict[str, bytes] = {}
+
+        for name in needed:
+            if name == 'xl/workbook.xml':
+                output_entries[name] = new_wb_text.encode('utf-8')
+            elif name == 'xl/_rels/workbook.xml.rels':
+                output_entries[name] = new_rels_text.encode('utf-8')
+            else:
+                output_entries[name] = orig_entries[name]
+
+        # ── ФАЗА 8: Фильтровать Content_Types.xml — удалить Override для отсутствующих файлов ──
+        if '[Content_Types].xml' in needed:
+            ct_text = orig_entries['[Content_Types].xml'].decode('utf-8')
+            new_ct_text = _filter_content_types_text(ct_text, set(output_entries.keys()))
+            output_entries['[Content_Types].xml'] = new_ct_text.encode('utf-8')
+
+        # ── ФАЗА 8: Записать новый ZIP с сохранением оригинального сжатия ──
+        # ВАЖНО: MS Excel требует, чтобы изображения (PNG, EMF, JPEG) были
+        # STORED (без сжатия), а XML/DATA файлы — DEFLATED.
+        # Используем оригинальный compression_type если известен.
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        def _get_compress_type(name: str) -> int:
+            """Определить метод сжатия: STORED для изображений, DEFLATED для всего остального.
+
+            MS Office хранит изображения в исходном виде (STORED), так как они
+            уже сжаты. XML и другие текстовые данные — DEFLATED.
+            """
+            name_lower = name.lower()
+            # Изображения — без сжатия (уже сжаты, DEFLATE не помогает)
+            if any(name_lower.endswith(ext) for ext in ['.png', '.emf', '.wmf', '.jpeg', '.jpg',
+                                                         '.gif', '.tiff', '.tif', '.bmp', '.svg']):
+                return zipfile.ZIP_STORED
+            return zipfile.ZIP_DEFLATED
+
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for name, data in zip_entries.items():
-                zout.writestr(name, data)
+            for name in sorted(output_entries.keys()):
+                compress_type = _get_compress_type(name)
+                zout.writestr(name, output_entries[name], compress_type=compress_type)
+
+
+_CT_CACHE: Dict[str, Optional[str]] = {}
+
+def _modify_workbook_xml_text(
+    xml_text: str,
+    keep_sheet_name: str,
+    target_r_id: str,
+    other_sheet_names: Set[str],
+) -> str:
+    """Модифицировать workbook.xml строковыми операциями.
+
+    1. Удалить лишние <sheet> из <sheets>.
+    2. Удалить <definedName>, ссылающиеся на удалённые листы.
+
+    ВСЁ остальное сохраняется AS-IS (XML declaration, namespace, line endings).
+    """
+    # ── 1. Замена <sheets> — оставляем только 1 лист ──
+    def _replace_sheets(m: re.Match) -> str:
+        """Callback для замены содержимого <sheets>."""
+        open_tag = m.group(1)
+        close_tag = m.group(3)
+        content = m.group(2)
+        # Ищем сохранённый лист по name или r:id
+        kept = None
+        for sh in re.finditer(r'<sheet[^>]*/>', content):
+            sh_tag = sh.group(0)
+            name_m = re.search(r'name="([^"]+)"', sh_tag)
+            if name_m and name_m.group(1) == keep_sheet_name:
+                kept = sh_tag
+                break
+        # Fallback: по r:id
+        if kept is None:
+            for sh in re.finditer(r'<sheet[^>]*/>', content):
+                sh_tag = sh.group(0)
+                rid_m = re.search(r'r:id="([^"]+)"', sh_tag)
+                if rid_m and rid_m.group(1) == target_r_id:
+                    kept = sh_tag
+                    break
+        if kept:
+            return f'{open_tag}\n{kept}\n{close_tag}'
+        return m.group(0)  # fallback: без изменений
+
+    xml_text = re.sub(r'(<sheets[^>]*>)(.*?)(</sheets>)', _replace_sheets, xml_text, count=1, flags=re.DOTALL)
+
+    # ── 2. Очистка definedNames ──
+    def _filter_defined_names(m: re.Match) -> str:
+        """Callback: удалить definedName, ссылающиеся на other_sheet_names."""
+        dn_block = m.group(0)
+        # Находим границы тега
+        dn_open_m = re.match(r'(<definedNames[^>]*>)', dn_block)
+        if not dn_open_m:
+            return dn_block
+        dn_open = dn_open_m.group(1)
+        # Находим закрывающий тег
+        close_idx = dn_block.rfind('</definedNames>')
+        if close_idx == -1:
+            return dn_block
+        content = dn_block[len(dn_open):close_idx]
+
+        kept_lines = []
+        for dn_match_inner in re.finditer(r'<definedName[^>]*>.*?</definedName>', content, re.DOTALL):
+            dn_xml = dn_match_inner.group(0)
+            dn_text = re.sub(r'<[^>]+>', '', dn_xml).strip()  # extract text content
+            formula = dn_text
+            should_remove = False
+            for deleted_name in other_sheet_names:
+                if f"'{deleted_name}'!" in formula or formula.startswith(f"{deleted_name}!"):
+                    should_remove = True
+                    break
+            if not should_remove:
+                # Обновляем localSheetId на 0 (сохранённый лист теперь единственный)
+                dn_xml = re.sub(r'localSheetId="[^"]+"', 'localSheetId="0"', dn_xml)
+                kept_lines.append(dn_xml)
+
+        if not kept_lines:
+            # definedNames пуст — удаляем весь блок
+            return ''
+        return dn_open + ''.join(kept_lines) + '</definedNames>'
+
+    xml_text = re.sub(r'<definedNames[^>]*>.*?</definedNames>', _filter_defined_names, xml_text, count=1, flags=re.DOTALL)
+
+    return xml_text
+
+
+def _modify_workbook_rels_text(
+    rels_text: str,
+    target_r_id: str,
+) -> str:
+    """Модифицировать workbook.xml.rels — удалить Relationship для других листов.
+
+    Оставляет ТОЛЬКО:
+      - worksheet (сохранённый лист)
+      - styles
+      - theme
+      - sharedStrings
+
+    ВСЁ остальное (XML declaration, форматирование) сохраняется AS-IS.
+    Используется re.sub для удаления отдельных <Relationship .../> строк.
+    """
+    def _keep_relevant_rels(m: re.Match) -> str:
+        """Callback: вернуть Relationship строку только если она нужна."""
+        rel = m.group(0)
+        rid_m = re.search(r'Id="([^"]+)"', rel)
+        rtype_m = re.search(r'Type="([^"]+)"', rel)
+        rid = rid_m.group(1) if rid_m else ''
+        rtype = rtype_m.group(1).lower() if rtype_m else ''
+
+        # Всегда оставляем сохранённый лист
+        if rid == target_r_id:
+            return rel
+        # Оставляем shared items
+        if any(st in rtype for st in ['styles', 'theme', 'sharedstrings']):
+            return rel
+        # Удаляем всё остальное
+        return ''
+
+    return re.sub(r'<Relationship[^>]*/>', _keep_relevant_rels, rels_text)
+
+
+def _filter_content_types_text(
+    ct_text: str,
+    existing_files: Set[str],
+) -> str:
+    """Фильтровать [Content_Types].xml — удалить Override для несуществующих файлов.
+
+    Args:
+        ct_text: Оригинальный текст [Content_Types].xml.
+        existing_files: Множество путей файлов в выходном ZIP.
+
+    Returns:
+        Отфильтрованный XML текст (ВСЁ остальное AS-IS).
+    """
+    def _filter_override(m: re.Match) -> str:
+        """Callback: вернуть Override только если файл существует."""
+        override_line = m.group(0)
+        pn_m = re.search(r'PartName="([^"]+)"', override_line)
+        if pn_m:
+            part_name = pn_m.group(1)
+            if part_name.startswith('/'):
+                clean_name = part_name[1:]
+            else:
+                clean_name = part_name
+            if clean_name not in existing_files:
+                return ''  # Удаляем
+        return override_line
+
+    return re.sub(r'<Override[^>]*/>', _filter_override, ct_text)
+
+
+def _infer_content_type(path: str) -> Optional[str]:
+    """Определить OOXML ContentType по пути файла."""
+    if path in _CT_CACHE:
+        return _CT_CACHE[path]
+
+    result: Optional[str] = None
+    path_lower = path.lower()
+
+    if path_lower.endswith('.xml'):
+        if 'drawing' in path_lower and 'rels' not in path_lower:
+            result = 'application/vnd.openxmlformats-officedocument.drawing+xml'
+        elif 'vml' in path_lower:
+            result = 'application/vnd.openxmlformats-officedocument.vmlDrawing'
+    elif path_lower.endswith('.bin'):
+        result = 'application/vnd.openxmlformats-officedocument.oleObject'
+    elif path_lower.endswith('.rels'):
+        result = 'application/vnd.openxmlformats-package.relationships+xml'
+    elif path_lower.endswith('.png'):
+        result = 'image/png'
+    elif path_lower.endswith('.jpeg') or path_lower.endswith('.jpg'):
+        result = 'image/jpeg'
+    elif path_lower.endswith('.emf'):
+        result = 'image/x-emf'
+    elif path_lower.endswith('.wmf'):
+        result = 'image/x-wmf'
+    elif path_lower.endswith('.gif'):
+        result = 'image/gif'
+    elif path_lower.endswith('.tiff') or path_lower.endswith('.tif'):
+        result = 'image/tiff'
+    elif path_lower.endswith('.bmp'):
+        result = 'image/bmp'
+    elif path_lower.endswith('.svg'):
+        result = 'image/svg+xml'
+
+    _CT_CACHE[path] = result
+    return result
 
 
 def _validate_split_file(path: str) -> bool:
@@ -937,6 +1200,14 @@ def find_table_boundaries(
         ws = reader.get_sheet(sheet_name)
         start_search = 1
         max_row = ws.max_row or 0
+
+        # ── GUARD: NEVER trigger vertical split on sheets with <= 500 rows ──
+        # Standard Jetour/Changan cards are small (20-200 rows), and vertical
+        # splitting them deletes the original single-sheet file, losing data.
+        # Only SWM megasheets (1000-8000 rows) should be vertically split.
+        if max_row <= 500:
+            return boundaries
+
         max_tables = 500
 
         for table_idx in range(max_tables):
@@ -986,6 +1257,102 @@ def find_table_boundaries(
             ))
 
             start_search = data_end + 1
+
+    finally:
+        reader.close()
+
+    # Fallback: обнаружение таблиц проверки качества (检验项目 pattern)
+    # Если стандартные таблицы деталей не найдены, ищем повторяющиеся
+    # блоки с заголовком "检验项目" в колонке B каждые ~20 строк.
+    if not boundaries:
+        boundaries = _detect_inspection_boundaries(source_path, sheet_name)
+
+    return boundaries
+
+
+# Ключевые слова для обнаружения таблиц проверки качества
+_INSPECTION_HEADER_KW = '检验项目'
+_INSPECTION_SUBHEADER_KW = '作业内容图示'
+
+
+def _detect_inspection_boundaries(
+    source_path: str,
+    sheet_name: str,
+) -> List[TableBoundary]:
+    """Обнаружить границы таблиц проверки качества (检验作业指导书).
+
+    Ищет повторяющиеся блоки с заголовком "检验项目" в колонке B.
+    Каждый блок содержит операцию проверки качества.
+
+    Args:
+        source_path: Путь к .xlsx файлу.
+        sheet_name: Имя листа.
+
+    Returns:
+        Список TableBoundary для каждой операции проверки.
+    """
+    from burlak_parser.card_parser import ExcelReader
+
+    boundaries: List[TableBoundary] = []
+    reader = ExcelReader(source_path)
+    try:
+        if sheet_name not in reader.sheet_names:
+            return boundaries
+
+        ws = reader.get_sheet(sheet_name)
+        max_row = ws.max_row or 0
+        if max_row < 3:
+            return boundaries
+
+        # Находим все строки с "检验项目" в колонке B (col 2)
+        header_rows: List[int] = []
+        for r in range(1, max_row + 1):
+            val = ws.cell_value(r, 2)
+            if val is not None and _INSPECTION_HEADER_KW in str(val):
+                header_rows.append(r)
+
+        if len(header_rows) < 2:
+            return boundaries
+
+        # Определяем шаг между заголовками (медиана интервалов)
+        spacings = [header_rows[i + 1] - header_rows[i]
+                    for i in range(len(header_rows) - 1)]
+        if not spacings:
+            return boundaries
+        step = sorted(spacings)[len(spacings) // 2]  # медиана
+
+        # Проверяем что шаг стабилен (>50% интервалов в пределах ±3 от медианы)
+        consistent = sum(1 for s in spacings if abs(s - step) <= 3)
+        if consistent < len(spacings) * 0.5:
+            return boundaries
+
+        # Группируем заголовки: каждый заголовок — отдельная операция,
+        # данные идут до следующего заголовка
+        for group_idx, header_row in enumerate(header_rows):
+            # Определяем границы: от текущего заголовка до следующего
+            if group_idx + 1 < len(header_rows):
+                data_end = header_rows[group_idx + 1] - 1
+            else:
+                data_end = max_row
+
+            # Извлекаем имя операции из колонки D той же строки
+            op_name = ""
+            op_val = ws.cell_value(header_row, 4)
+            if op_val is not None and str(op_val).strip():
+                op_name = str(op_val).strip()
+
+            boundaries.append(TableBoundary(
+                header_row=header_row,
+                data_start=header_row + 1,
+                data_end=data_end,
+                operation_name=op_name,
+                source_path=source_path,
+                sheet_name=sheet_name,
+                card_label=(
+                    f"{group_idx + 1:03d}_{_safe_filename(op_name)[:30]}"
+                    if op_name else f"Op{group_idx + 1:03d}"
+                ),
+            ))
 
     finally:
         reader.close()
@@ -1251,6 +1618,12 @@ def _filter_sheet_xml(
                 # Корректируем номер строки
                 new_r = r - keep_from_row + 1
                 row_el.set('r', str(new_r))
+                # Корректируем cell references (r="A3390" → r="A1")
+                for c_el in row_el.findall(f'{{{ns}}}c'):
+                    ref = c_el.get('r', '')
+                    m = _CELL_REF_RE.match(ref)
+                    if m:
+                        c_el.set('r', f'{m.group(1)}{new_r}')
                 # Корректируем row spans
                 spans = row_el.get('spans')
                 if spans:
@@ -1326,7 +1699,7 @@ def _filter_sheet_xml(
             for br in to_remove:
                 breaks.remove(br)
 
-    return ET.tostring(root, xml_declaration=True, encoding='UTF-8')
+    return _serialize_xml(root, NS_MAIN)
 
 
 def _filter_drawing_xml(
