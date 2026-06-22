@@ -5,6 +5,10 @@
 > **Связанные документы:**
 > - [`technical_specification.md`](technical_specification.md) — детальная спецификация реализации (стек, State Machine, API, файловая структура)
 > - [`celery_worker_arc.md`](celery_worker_arc.md) — внутренняя архитектура Celery Worker (C4 Level 3)
+> - [`fastapi_api_architecture.md`](fastapi_api_architecture.md) — архитектура FastAPI бэкенда (слои, компоненты, диаграммы)
+> - [`api_reference.md`](api_reference.md) — полная спецификация эндпоинтов с примерами запросов/ответов
+> - [`error_handling.md`](error_handling.md) — коды ошибок, иерархия исключений, примеры
+> - [`data_flow.md`](data_flow.md) — сквозной поток данных через все компоненты системы
 
 ---
 
