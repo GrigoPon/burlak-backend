@@ -1700,9 +1700,11 @@ class TestParseBomStrikethrough:
             # P002: зачеркнутый парт-номер -> должно быть пропущено
             assert "P002" not in bom.parts
 
-            # P003: зачеркнутое количество (qty_col strike) → строка пропущена
-            # (qty_col входит в strike cache, вся строка пропускается)
-            assert "P003" not in bom.parts
+            # P003: зачеркнутое количество Config1 -> P003 пропущен для Config1,
+            # но присутствует для Config2
+            assert "P003" in bom.parts
+            assert bom.config_quantities["Config1"].get("P003", 0.0) == 0.0
+            assert bom.config_quantities["Config2"]["P003"] == 1.0
 
         finally:
             _safe_remove(path)

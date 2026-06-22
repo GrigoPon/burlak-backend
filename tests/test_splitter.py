@@ -187,13 +187,14 @@ class TestSplitFileEdgeCases:
         assert created == [], "Non-xlsx should return empty list"
 
     def test_sheet_not_found(self, tmp_dir: str, multi_sheet_xlsx: str):
-        """Requesting a non-existent sheet returns empty (no crash)."""
+        """Requesting a non-existent sheet: fallback copies source file."""
         output_dir = os.path.join(tmp_dir, "out_edge2")
         splitter = CardSplitter()
         created = splitter.split_file(
             multi_sheet_xlsx, output_dir, ["NonExistentSheet"], "Test",
         )
-        assert created == [], "Non-existent sheet should return empty list"
+        assert len(created) == 1, "Fallback should copy source as last resort"
+        assert os.path.exists(created[0])
 
     def test_single_sheet_file(self, tmp_dir: str, single_sheet_xlsx: str):
         """Single-sheet file should be handled (no unnecessary copy)."""
@@ -988,10 +989,7 @@ class TestExtractSheetCorruptedFiles:
         assert created == [], "Should handle missing workbook.xml gracefully"
 
     def test_missing_sheets_section(self, tmp_dir: str):
-        """workbook.xml без <sheets> вызывает ValueError → строка 189.
-
-        Ошибка перехватывается в split_file → возвращается пустой список.
-        """
+        """workbook.xml без <sheets>: fallback copies source file."""
         import re
 
         base = _create_multi_sheet_xlsx(tmp_dir, "base.xlsx")
@@ -1007,7 +1005,7 @@ class TestExtractSheetCorruptedFiles:
         output_dir = os.path.join(tmp_dir, "out_no_sheets")
         splitter = CardSplitter()
         created = splitter.split_file(corrupted, output_dir, ["Sheet1"], "Test")
-        assert created == [], "Should handle missing <sheets> gracefully"
+        assert len(created) == 1, "Fallback should copy source as last resort"
 
     def test_missing_workbook_rels(self, tmp_dir: str):
         """Файл без xl/_rels/workbook.xml.rels вызывает ValueError → строка 212.
