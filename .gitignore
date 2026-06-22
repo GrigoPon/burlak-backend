@@ -16,3 +16,11 @@ venv/
 
 # Output directories
 output_*/
+
+# Environment variables
+.env
+
+# SQLite databases and transaction logs
+*.db
+*.db-wal
+*.db-shm
