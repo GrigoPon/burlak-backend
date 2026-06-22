@@ -1,5 +1,15 @@
 # ТЗ на разработку Бэкенда (BOM Verification System)
 
+> **Связанные документы:**
+> - [`fastapi_api_architecture.md`](fastapi_api_architecture.md) — архитектура FastAPI бэкенда (слои, компоненты, диаграммы)
+> - [`api_reference.md`](api_reference.md) — полная спецификация эндпоинтов с примерами запросов/ответов
+> - [`error_handling.md`](error_handling.md) — коды ошибок, иерархия исключений, примеры
+> - [`data_flow.md`](data_flow.md) — сквозной поток данных через все компоненты системы
+> - [`container_architecture.md`](container_architecture.md) — C4 Level 2 (контейнеры)
+> - [`celery_worker_arc.md`](celery_worker_arc.md) — C4 Level 3 (воркеры)
+
+---
+
 ## 1. Архитектурный стек и конфигурация
 
 * **Базовый язык:** Python 3.12
