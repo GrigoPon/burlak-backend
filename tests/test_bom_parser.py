@@ -715,8 +715,8 @@ class TestBOMService:
         bom = svc.load(path)
         assert svc.is_loaded
         assert bom is not None
-        # 4 data rows + enough configs = BOM candidate
-        assert len(bom.parts) == 4
+        # 4 data rows, but P003 has qty=0 in detected config → filtered out
+        assert len(bom.parts) == 3
 
     def test_get_config_names(self):
         data = {
@@ -1700,9 +1700,9 @@ class TestParseBomStrikethrough:
             # P002: зачеркнутый парт-номер -> должно быть пропущено
             assert "P002" not in bom.parts
 
-            # P003: зачеркнутое количество -> должно быть пропущено для этой конфигурации
-            # (так как количество 0, оно не должно попадать в config_quantities)
-            assert bom.config_quantities["Config1"].get("P003", 0.0) == 0.0
+            # P003: зачеркнутое количество (qty_col strike) → строка пропущена
+            # (qty_col входит в strike cache, вся строка пропускается)
+            assert "P003" not in bom.parts
 
         finally:
             _safe_remove(path)

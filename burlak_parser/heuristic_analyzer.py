@@ -944,6 +944,45 @@ class HeuristicAnalyzer:
             logger.debug("is_cell_strike error at row=%d, col=%d: %s", row, col, e)
             return False
 
+    @staticmethod
+    def get_strike_rows(ws: Any, rows: range, cols: list) -> set:
+        """Batch-detect rows with strikethrough in any of the given columns.
+
+        Returns a set of row numbers where at least one cell has strikethrough.
+        This is much faster than calling is_cell_strike() per cell.
+        """
+        strike_rows: set = set()
+        for row in rows:
+            for col in cols:
+                try:
+                    if hasattr(ws, "_ws") and hasattr(ws, "_engine"):
+                        if ws._engine != "openpyxl":
+                            break
+                        cell = ws._ws.cell(row=row, column=col)
+                    elif hasattr(ws, 'cell'):
+                        cell = ws.cell(row=row, column=col)
+                    else:
+                        break
+                    if cell is None:
+                        continue
+                    font = cell.font
+                    if font is None:
+                        continue
+                    strike_val = getattr(font, 'strike', None)
+                    if strike_val is None:
+                        continue
+                    is_strike = False
+                    if isinstance(strike_val, str):
+                        is_strike = strike_val.lower() in ("sngstrike", "dblstrike", "true")
+                    else:
+                        is_strike = bool(strike_val)
+                    if is_strike:
+                        strike_rows.add(row)
+                        break  # Already found for this row, no need to check other cols
+                except Exception:
+                    continue
+        return strike_rows
+
 
     @staticmethod
     def _find_part_no_by_content(
@@ -1381,7 +1420,10 @@ class HeuristicAnalyzer:
             for c in range(1, max_col + 1):
                 v = HeuristicAnalyzer.get_cell_value(ws, r, c)
                 if v is not None:
-                    text = str(v).strip()
+                    # Strip _x000d_ / _x000A_ / \r\n artifacts from WPS Office
+                    text = str(v)
+                    text = XML_HEX_RE.sub("", text)
+                    text = text.replace('\r', '').replace('\n', ' ').strip()
                     match = CARD_NUMBER_RE.search(text)
                     if match:
                         card_no = match.group(0).strip("- ")
@@ -1671,6 +1713,50 @@ class HeuristicAnalyzer:
         part_no_col = col_types.get('part_no', 0)
         if qty_col > 0 and part_no_col > 0:
             return True
+
+        return False
+
+    @staticmethod
+    def analyze_bom_sheet(
+        ws: Any,
+        min_configs: int = 2,
+        sheet_name: str = "",
+    ) -> Optional[Tuple[List[int], Dict[str, int], List[int]]]:
+        """Analyze a sheet and return (header_rows, col_types, config_cols) if it's a BOM candidate.
+
+        Returns None if the sheet is not a BOM candidate.
+        This avoids duplicate calls to find_header_rows/detect_column_types/detect_config_columns.
+        """
+        if sheet_name and HeuristicAnalyzer.is_service_sheet(sheet_name):
+            return None
+
+        header_rows = HeuristicAnalyzer.find_header_rows(ws, sheet_name=sheet_name)
+        if not header_rows:
+            return None
+
+        col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
+        if 'part_no' not in col_types:
+            return None
+
+        data_start = header_rows[-1] + 1
+        data_rows = (ws.max_row or 0) - data_start + 1
+        if data_rows < 3:
+            return None
+
+        config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
+        if len(config_cols) >= min_configs:
+            return (header_rows, col_types, config_cols)
+
+        qty_col = col_types.get('qty', 0)
+        has_name = 'name_cn' in col_types or 'name_en' in col_types
+        if qty_col > 0 and has_name:
+            return (header_rows, col_types, config_cols)
+
+        part_no_col = col_types.get('part_no', 0)
+        if qty_col > 0 and part_no_col > 0:
+            return (header_rows, col_types, config_cols)
+
+        return None
 
         return False
 

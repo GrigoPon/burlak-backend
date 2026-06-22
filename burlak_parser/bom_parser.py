@@ -235,23 +235,16 @@ def parse_bom(file_path: str) -> BOMData:
                     sheet_name, ws.max_row, ws.max_column,
                 )
 
-                # Проверяем, является ли лист BOM-кандидатом
+                # Анализируем лист одним вызовом (без дублирования)
                 # min_configs=1: поддержка SWM-стиля листов (总装/涂装/焊装) с 0-1 конфиг-колонками
-                is_bom = HeuristicAnalyzer.is_sheet_bom_candidate(
+                analysis = HeuristicAnalyzer.analyze_bom_sheet(
                     ws, min_configs=1, sheet_name=sheet_name,
                 )
-                if not is_bom:
+                if analysis is None:
                     logger.info("Лист не является BOM-кандидатом, пропуск: %s", sheet_name)
                     continue
 
-                # ── 1. Поиск строки заголовков ──
-                header_rows = HeuristicAnalyzer.find_header_rows(ws, sheet_name=sheet_name)
-                if not header_rows:
-                    logger.warning("Не найдена строка заголовков в листе: %s", sheet_name)
-                    continue
-
-                # ── 2. Определение типов колонок ──
-                col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
+                header_rows, col_types, config_cols = analysis
                 part_no_col = col_types.get("part_no", 0)
                 name_cn_col = col_types.get("name_cn", 0)
                 name_en_col = col_types.get("name_en", 0)
@@ -277,8 +270,7 @@ def parse_bom(file_path: str) -> BOMData:
                             existing_en = ne
                         all_global_names[pn] = (existing_cn, existing_en)
 
-                # ── 4. Определяем колонки комплектаций ──
-                config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
+                # ── 4. Определяем колонки комплектаций (уже из analysis) ──
                 qty_col = col_types.get("qty", 0)
 
                 # ── 5. Если есть отдельная qty-колонка (спец-листы 附件 или SWM multi-sheet) ──
@@ -421,8 +413,17 @@ def parse_bom(file_path: str) -> BOMData:
                     ws, header_row, part_no_col, name_cn_col, qty_col,
                 )
 
+                # Precompute strikethrough rows for part_no + qty columns
+                # (config columns not checked — too many cols × rows for font access)
+                strike_cols = [part_no_col]
+                if qty_col > 0:
+                    strike_cols.append(qty_col)
+                strike_rows_cache = HeuristicAnalyzer.get_strike_rows(
+                    ws, range(data_start, max_row + 1), strike_cols,
+                )
+
                 for row_idx in range(data_start, max_row + 1):
-                    if HeuristicAnalyzer.is_cell_strike(ws, row_idx, part_no_col):
+                    if row_idx in strike_rows_cache:
                         continue
                     pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
                     if pn is None:
@@ -441,13 +442,9 @@ def parse_bom(file_path: str) -> BOMData:
                     part = all_parts[pn_normalized]
 
                     for i, col_idx in enumerate(config_cols):
-                        if HeuristicAnalyzer.is_cell_strike(ws, row_idx, col_idx):
-                            continue
                         config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
 
                         if config_val.upper() == 'S' and qty_col > 0:
-                            if HeuristicAnalyzer.is_cell_strike(ws, row_idx, qty_col):
-                                continue
                             qty = normalize_quantity(HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col))
                         elif config_val in ('-', '–', '—', ''):
                             continue
@@ -482,8 +479,12 @@ def parse_bom(file_path: str) -> BOMData:
                 if len(multi_blocks) > 1:
                     for blk_pn, blk_name, blk_qty in multi_blocks[1:]:
                         blk_count = 0
+                        # Precompute strike rows for this block's column
+                        blk_strike_rows = HeuristicAnalyzer.get_strike_rows(
+                            ws, range(data_start, max_row + 1), [blk_pn],
+                        )
                         for row_idx in range(data_start, max_row + 1):
-                            if HeuristicAnalyzer.is_cell_strike(ws, row_idx, blk_pn):
+                            if row_idx in blk_strike_rows:
                                 continue
                             pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, blk_pn)
                             if pn is None:
@@ -530,14 +531,19 @@ def parse_bom(file_path: str) -> BOMData:
             len(all_config_quantities.get(_SWM_COMBINED_CONFIG, {})),
         )
 
-    # Подсчёт только тех деталей, у которых qty > 0 хотя бы в одной конфигурации
-    parts_with_qty = sum(
-        1 for pn in all_parts
-        if any(all_config_quantities.get(cn, {}).get(pn, 0) > 0 for cn in all_config_names)
-    )
+    # Удаляем из all_parts детали, у которых нет qty > 0 ни в одной конфигурации.
+    # Это детали, где ВСЕ колонки конфигураций содержат '-', пусто или 0.
+    # Они не используются ни в одной комплектации и не должны считаться.
+    qty_zero_pns = [
+        pn for pn in all_parts
+        if not any(all_config_quantities.get(cn, {}).get(pn, 0) > 0 for cn in all_config_names)
+    ]
+    for pn in qty_zero_pns:
+        del all_parts[pn]
+
     logger.info(
-        "Загружено деталей (уникальных всего): %d, с qty>0 хотя бы в одном конфиге: %d",
-        len(all_parts), parts_with_qty,
+        "Загружено деталей с qty>0: %d (отброшено %d деталей с qty=0)",
+        len(all_parts), len(qty_zero_pns),
     )
     logger.info("Найдено комплектаций: %d", len(all_config_names))
     logger.info("Глобальный словарь названий: %d записей", len(all_global_names))

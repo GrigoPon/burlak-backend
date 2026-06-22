@@ -16,7 +16,7 @@ import os
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List
 
 logger = logging.getLogger(__name__)
 

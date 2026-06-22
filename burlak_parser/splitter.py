@@ -35,7 +35,7 @@ except ImportError:
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from openpyxl.utils.cell import range_boundaries, get_column_letter
@@ -753,8 +753,26 @@ class CardSplitter:
                 output_entries[name] = new_wb_text.encode('utf-8')
             elif name == 'xl/_rels/workbook.xml.rels':
                 output_entries[name] = new_rels_text.encode('utf-8')
+            elif name.startswith('xl/printerSettings/'):
+                # Skip printerSettings — binary files that reference removed sheets
+                # cause "Removed Part" errors in Excel
+                continue
             else:
                 output_entries[name] = orig_entries[name]
+
+        # ── ФАЗА 7b: Очистить .rels файлы от ссылок на удалённые printerSettings ──
+        for rels_name in list(output_entries.keys()):
+            if rels_name.endswith('.rels') and 'printerSettings' not in rels_name:
+                try:
+                    rels_text = output_entries[rels_name].decode('utf-8')
+                    if 'printerSettings' in rels_text:
+                        # Remove Relationship entries pointing to printerSettings
+                        cleaned = re.sub(
+                            r'<Relationship[^>]*Target="[^"]*printerSettings[^"]*"[^>]*/>\s*',
+                            '', rels_text)
+                        output_entries[rels_name] = cleaned.encode('utf-8')
+                except Exception:
+                    pass
 
         # ── ФАЗА 8: Фильтровать Content_Types.xml — удалить Override для отсутствующих файлов ──
         if '[Content_Types].xml' in needed:
@@ -867,6 +885,15 @@ def _modify_workbook_xml_text(
         return dn_open + ''.join(kept_lines) + '</definedNames>'
 
     xml_text = re.sub(r'<definedNames[^>]*>.*?</definedNames>', _filter_defined_names, xml_text, count=1, flags=re.DOTALL)
+
+    # ── 3. Очистка bookViews/workbookView — сбросить activeTab/firstSheet ──
+    def _fix_workbook_view(m: re.Match) -> str:
+        tag = m.group(0)
+        tag = re.sub(r'activeTab="[^"]*"', 'activeTab="0"', tag)
+        tag = re.sub(r'firstSheet="[^"]*"', 'firstSheet="0"', tag)
+        return tag
+
+    xml_text = re.sub(r'<(?:[\w\-]+:)?workbookView\b[^>]*/>', _fix_workbook_view, xml_text)
 
     return xml_text
 
