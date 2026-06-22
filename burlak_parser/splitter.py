@@ -895,6 +895,9 @@ def _modify_workbook_xml_text(
 
     xml_text = re.sub(r'<(?:[\w\-]+:)?workbookView\b[^>]*/>', _fix_workbook_view, xml_text)
 
+    # ── 4. Удалить customWorkbookViews ──
+    xml_text = re.sub(r'<customWorkbookViews[^>]*>.*?</customWorkbookViews>', '', xml_text, flags=re.DOTALL)
+
     return xml_text
 
 
@@ -2154,6 +2157,11 @@ def _cleanup_workbook_for_single_sheet(
         if defined_names is not None:
             wb_root.remove(defined_names)
 
+        # Remove customWorkbookViews (can cause openpyxl parse errors)
+        custom_views = wb_root.find(f'{{{ns}}}customWorkbookViews')
+        if custom_views is not None:
+            wb_root.remove(custom_views)
+
         all_entries['xl/workbook.xml'] = _lxml_etree.tostring(
             wb_root, xml_declaration=True, encoding='UTF-8', standalone=True)
     else:
@@ -2176,6 +2184,8 @@ def _cleanup_workbook_for_single_sheet(
             r'(<sheets[^>]*>)(.*?)(</sheets>)', _replace_sheets, wb_text,
             count=1, flags=re.DOTALL)
         wb_text = re.sub(r'<definedNames[^>]*>.*?</definedNames>', '', wb_text,
+                         flags=re.DOTALL)
+        wb_text = re.sub(r'<customWorkbookViews[^>]*>.*?</customWorkbookViews>', '', wb_text,
                          flags=re.DOTALL)
         all_entries['xl/workbook.xml'] = wb_text.encode('utf-8')
 

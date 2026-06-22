@@ -442,6 +442,8 @@ def parse_bom(file_path: str) -> BOMData:
                     part = all_parts[pn_normalized]
 
                     for i, col_idx in enumerate(config_cols):
+                        if HeuristicAnalyzer.is_cell_strike(ws, row_idx, col_idx):
+                            continue
                         config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
 
                         if config_val.upper() == 'S' and qty_col > 0:
