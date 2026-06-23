@@ -2,8 +2,10 @@ from fastapi import APIRouter, Depends, status
 
 import aiosqlite
 
+from app.services.job_creation_service import JobCreationService
 from app.core.exceptions import JobNotFoundError, JobStateError
-from app.db.async_repository import create_job, get_job, update_job_status
+from app.services.job_processing_service import JobProcessingService
+from app.db.async_repository import get_job
 from app.db.database import get_async_db
 from app.schemas.job import JobCreateResponse, JobStatusResponse
 
@@ -16,10 +18,7 @@ async def create_new_job(db: aiosqlite.Connection = Depends(get_async_db)) -> Jo
 
     Returns the job ID, initial status, and creation timestamp.
     """
-    job_id = await create_job(db)
-    job = await get_job(db, job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job {job_id} not found after creation")
+    job = await JobCreationService.create(db)
 
     return JobCreateResponse(
         id=job["id"],
@@ -60,40 +59,11 @@ async def start_job_processing(
     job_id: int,
     db: aiosqlite.Connection = Depends(get_async_db),
 ) -> dict:
-    """Start processing a job.
-
-    Validates that:
-    - Job exists and is in 'awaiting_upload' status
-    - Both BOM and archive files have been uploaded
-
-    Transitions status to 'processing' with stage 'unpacking'
-    and triggers the Celery unpack task.
-    """
-    job = await get_job(db, job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job {job_id} not found")
-
-    if job["status"] != "awaiting_upload":
-        raise JobStateError(
-            f"Job {job_id} is in status '{job['status']}', expected 'awaiting_upload'"
-        )
-
-    if not job["bom_uploaded"]:
-        raise JobStateError(f"Job {job_id}: BOM file not uploaded yet")
-
-    if not job["archive_uploaded"]:
-        raise JobStateError(f"Job {job_id}: Archive file not uploaded yet")
-
-    # Update status to processing
-    await update_job_status(db, job_id, "processing", "unpacking")
-
-    # TODO: Trigger Celery task unpack.delay(job_id)
-    # from app.worker.tasks.unpack import unpack
-    # unpack.delay(job_id)
-
+    """Start processing a job."""
+    
+    result = await JobProcessingService.validate_and_start_processing(db, job_id)
     return {
         "message": "Job processing started",
         "job_id": job_id,
-        "status": "processing",
-        "stage": "unpacking",
+        **result,
     }

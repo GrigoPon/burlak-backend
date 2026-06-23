@@ -25,6 +25,11 @@ class ChunkCorruptedError(FileUploadError):
     status_code = 422
 
 
+class JobCreationError(BurlakError):
+    code = "JOB_CREATION_ERROR"
+    status_code = 500
+
+
 class ResultsNotReadyError(BurlakError):
     code = "RESULTS_NOT_READY"
     status_code = 409

@@ -3,9 +3,7 @@ from fastapi.responses import StreamingResponse
 
 import aiosqlite
 
-from app.core.exceptions import JobNotFoundError, ResultsNotReadyError
-from app.core.storage import get_results_path
-from app.db.async_repository import get_job
+from app.services.result_service import ResultService
 from app.db.database import get_async_db
 
 router = APIRouter(tags=["results"])
@@ -31,19 +29,7 @@ async def download_diff(
     Job must be in 'done' or 'error' status.
     Returns a streaming binary response.
     """
-    job = await get_job(db, job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job {job_id} not found")
-
-    if job["status"] not in ("done", "error"):
-        raise ResultsNotReadyError(
-            f"Job {job_id} is in status '{job['status']}', "
-            f"expected 'done' or 'error'"
-        )
-
-    diff_path = get_results_path(job_id, "diff")
-    if not diff_path.exists():
-        raise ResultsNotReadyError(f"Diff file not yet available for job {job_id}")
+    diff_path = await ResultService.validate_and_get_path(db, job_id, "diff")
 
     return StreamingResponse(
         _file_streamer(str(diff_path)),
@@ -65,19 +51,7 @@ async def download_cards(
     Job must be in 'done' or 'error' status.
     Returns a streaming binary response.
     """
-    job = await get_job(db, job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job {job_id} not found")
-
-    if job["status"] not in ("done", "error"):
-        raise ResultsNotReadyError(
-            f"Job {job_id} is in status '{job['status']}', "
-            f"expected 'done' or 'error'"
-        )
-
-    cards_path = get_results_path(job_id, "cards")
-    if not cards_path.exists():
-        raise ResultsNotReadyError(f"Translated cards file not yet available for job {job_id}")
+    cards_path = await ResultService.validate_and_get_path(db, job_id, "cards")
 
     return StreamingResponse(
         _file_streamer(str(cards_path)),
