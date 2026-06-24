@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.config import get_settings
 
@@ -21,7 +21,9 @@ def increment_progress(
     Uses BEGIN IMMEDIATE transaction on raw sqlite3 connection to prevent WAL deadlocks.
     """
     db_path = get_settings().db_url
-    now = datetime.utcnow().isoformat()
+    if db_path.startswith("sqlite:///"):
+        db_path = db_path[len("sqlite:///") :]
+    now = datetime.now(timezone.utc).isoformat()
 
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
@@ -89,7 +91,7 @@ def increment_progress(
         failed = job["failed"]
         total = job["total"]
 
-        is_complete = (processed + failed == total)
+        is_complete = processed + failed == total
 
         conn.commit()
         return ProgressResult(
