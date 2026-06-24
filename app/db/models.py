@@ -1,6 +1,7 @@
-from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import relationship
+from typing import Any
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime, timezone
+from sqlalchemy import ForeignKey, JSON
 
 from .database import Base
 
@@ -8,37 +9,55 @@ from .database import Base
 class Jobs(Base):
     __tablename__ = "jobs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    status = Column(String, nullable=False, default="awaiting_upload")
-    stage = Column(String, nullable=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(nullable=False, default="awaiting_upload")
+    stage: Mapped[str] = mapped_column(nullable=True)
 
-    total = Column(Integer, nullable=False, default=0)
-    processed = Column(Integer, nullable=False, default=0)
-    failed = Column(Integer, nullable=False, default=0)
+    total: Mapped[int] = mapped_column(nullable=False, default=0)
+    processed: Mapped[int] = mapped_column(nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(nullable=False, default=0)
 
-    mapping_config = Column(JSON, nullable=True)
+    mapping_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
-    bom_path = Column(String, nullable=True)
-    archive_path = Column(String, nullable=True)
-    bom_uploaded = Column(Boolean, nullable=False, default=False)
-    archive_uploaded = Column(Boolean, nullable=False, default=False)
+    bom_path: Mapped[str | None] = mapped_column(nullable=True)
+    archive_path: Mapped[str | None] = mapped_column(nullable=True)
+    bom_uploaded: Mapped[bool] = mapped_column(nullable=False, default=False)
+    archive_uploaded: Mapped[bool] = mapped_column(nullable=False, default=False)
 
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
-    cards = relationship("Cards", back_populates="job", cascade="all, delete-orphan")
+    cards: Mapped[list["Cards"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class Cards(Base):
     __tablename__ = "cards"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
-    card_path = Column(String, nullable=False)
-    status = Column(String, nullable=False, default="pending")  # pending, success, failed
-    error_message = Column(String, nullable=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    card_path: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(
+        nullable=False, default="pending"
+    )  # pending, success, failed
+    error_message: Mapped[str | None] = mapped_column(nullable=True)
 
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
-    job = relationship("Jobs", back_populates="cards")
+    job: Mapped["Jobs"] = relationship(back_populates="cards")
