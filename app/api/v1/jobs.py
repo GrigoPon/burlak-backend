@@ -62,9 +62,8 @@ async def start_job_processing(
 ) -> JobStartResponse:
     """Start processing a job.
 
-    Validates preconditions, transitions state, and dispatches async work.
+    Atomically transitions state and dispatches async work
     """
-    await JobProcessingService.validate_can_start(db, job_id)
     state = await JobProcessingService.transition_to_processing(db, job_id)
     JobProcessingService.dispatch_processing(job_id)
 
