@@ -18,12 +18,12 @@
 from __future__ import annotations
 
 import logging
-import re
-from typing import Dict, List, Optional, Set
 
 from burlak_parser.normalizer import (
-    normalize_part_number,
     is_valid_part_number as _is_valid_part_number_strict,
+)
+from burlak_parser.normalizer import (
+    normalize_part_number,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,14 +74,14 @@ class FuzzyMatcher:
     Строит индекс нормализованных номеров для быстрого поиска.
     """
 
-    def __init__(self, bom_part_numbers: Set[str]):
+    def __init__(self, bom_part_numbers: set[str]):
         """Инициализировать матчер.
 
         Args:
             bom_part_numbers: Множество парт-номеров из BOM.
         """
         # Индекс: normalized -> список оригинальных номеров
-        self._normalized_index: Dict[str, List[str]] = {}
+        self._normalized_index: dict[str, list[str]] = {}
 
         for pn in bom_part_numbers:
             norm = normalize_part_number(pn)
@@ -89,7 +89,7 @@ class FuzzyMatcher:
                 self._normalized_index[norm] = []
             self._normalized_index[norm].append(pn)
 
-    def find_fuzzy_match(self, cards_part_no: str) -> Optional[str]:
+    def find_fuzzy_match(self, cards_part_no: str) -> str | None:
         """Найти нечеткое совпадение для номера из карт в BOM.
 
         Args:

@@ -7,15 +7,14 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BAIC_SPLIT_DIR = PROJECT_ROOT / "output_baic" / "split_cards"
@@ -32,10 +31,10 @@ NS_PKG_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
 NS0_PATTERN = re.compile(r'xmlns:ns0="|</?ns0:')
 
 
-def _check_single_file(path: str) -> Dict[str, Any]:
+def _check_single_file(path: str) -> dict[str, Any]:
     """Run all checks on a single .xlsx file (designed for parallelism)."""
     basename = os.path.basename(path)
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "file": basename,
         "ok": True,
         "errors": [],
@@ -54,7 +53,9 @@ def _check_single_file(path: str) -> Dict[str, Any]:
 
     # ── Check 1: Has sheet file ──
     has_sheet = any(
-        n.startswith("xl/worksheets/sheet") and n.endswith(".xml") and "/_rels/" not in n
+        n.startswith("xl/worksheets/sheet")
+        and n.endswith(".xml")
+        and "/_rels/" not in n
         for n in names
     )
     if not has_sheet:
@@ -93,7 +94,9 @@ def _check_single_file(path: str) -> Dict[str, Any]:
                 target = rel_el.get("Target", "")
                 if not target:
                     continue
-                resolved = os.path.normpath(os.path.join("xl", target)).replace(os.sep, "/")
+                resolved = os.path.normpath(os.path.join("xl", target)).replace(
+                    os.sep, "/"
+                )
                 if resolved not in names:
                     orphaned.append(f"{rel_el.get('Id', '?')} -> {target}")
             if orphaned:
@@ -135,9 +138,15 @@ def _check_single_file(path: str) -> Dict[str, Any]:
                     target = rel_el.get("Target", "")
                     if not target:
                         continue
-                    resolved = os.path.normpath(os.path.join(rels_dir, target)).replace(os.sep, "/")
+                    resolved = os.path.normpath(os.path.join(rels_dir, target)).replace(
+                        os.sep, "/"
+                    )
                     if resolved not in names:
-                        if "/drawings/" in resolved or "/charts/" in resolved or "/vml" in resolved:
+                        if (
+                            "/drawings/" in resolved
+                            or "/charts/" in resolved
+                            or "/vml" in resolved
+                        ):
                             result["ok"] = False
                             result["errors"].append(
                                 f"Orphaned {resolved} referenced from {name}"
@@ -149,10 +158,14 @@ def _check_single_file(path: str) -> Dict[str, Any]:
     # We hash the path to pseudo-randomly sample ~10% of files
     if hash(path) % 10 == 0:
         try:
-            import openpyxl
             import warnings
+
+            import openpyxl
+
             with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+                warnings.filterwarnings(
+                    "ignore", category=UserWarning, module="openpyxl"
+                )
                 wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
                 _ = wb.sheetnames
                 wb.close()
@@ -163,7 +176,7 @@ def _check_single_file(path: str) -> Dict[str, Any]:
     return result
 
 
-def validate_all() -> Dict[str, Any]:
+def validate_all() -> dict[str, Any]:
     """Run all checks on all BAIC split files in parallel."""
     if not BAIC_SPLIT_DIR.is_dir():
         return {"ok": False, "error": f"Directory not found: {BAIC_SPLIT_DIR}"}
@@ -172,7 +185,7 @@ def validate_all() -> Dict[str, Any]:
     total = len(xlsx_files)
     passed = 0
     failed = 0
-    all_errors: List[str] = []
+    all_errors: list[str] = []
     openpyxl_checked = 0
 
     # Run in parallel
@@ -197,7 +210,7 @@ def validate_all() -> Dict[str, Any]:
     }
 
 
-def print_summary(summary: Dict[str, Any]) -> None:
+def print_summary(summary: dict[str, Any]) -> None:
     """Pretty-print validation summary."""
     print("=" * 60)
     print("BAIC Split File — MS Excel Compatibility Check")
@@ -209,8 +222,8 @@ def print_summary(summary: Dict[str, Any]) -> None:
 
     if summary["failed"] == 0:
         print(f"\n  ✅ ALL {summary['passed']} FILES PASSED")
-        print(f"     No ns0: prefixes, no orphaned references,")
-        print(f"     all relationship targets valid.")
+        print("     No ns0: prefixes, no orphaned references,")
+        print("     all relationship targets valid.")
     else:
         print(f"\n  ❌ {summary['failed']} FILES FAILED:")
         for err in summary["errors"]:

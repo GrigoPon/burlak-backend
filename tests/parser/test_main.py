@@ -26,17 +26,14 @@ from unittest.mock import patch
 import openpyxl
 import pytest
 
+from burlak_parser.bom_parser import BOMData
 from burlak_parser.main import (
-    AUTO_CLEAN_DIRS,
     clean_output_dirs,
+    main,
     run_pipeline,
     select_config_interactive,
     setup_logging,
-    main,
 )
-
-from burlak_parser.bom_parser import BOMData
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  HELPERS: создание тестовых .xlsx файлов
@@ -242,6 +239,7 @@ def output_dir(tmp_path: Path) -> str:
 #  1. setup_logging
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSetupLogging:
     def test_setup_logging_default(self):
         """Default logging does not crash (root logger level not changed by pytest)."""
@@ -260,6 +258,7 @@ class TestSetupLogging:
 # ═══════════════════════════════════════════════════════════════════════
 #  2. clean_output_dirs
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCleanOutputDirs:
     def test_cleans_existing_dir(self, tmp_path: Path):
@@ -294,6 +293,7 @@ class TestCleanOutputDirs:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. run_pipeline — all configs (multi-config)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestRunPipelineAllConfigs:
     def test_full_pipeline_creates_outputs(self, bom_path, card_path, output_dir):
@@ -392,7 +392,9 @@ class TestRunPipelineAllConfigs:
         txt = os.path.join(output_dir, "report.txt")
         assert os.path.isfile(txt)
 
-    def test_pipeline_with_multi_sheet_card(self, bom_path, multi_card_path, output_dir):
+    def test_pipeline_with_multi_sheet_card(
+        self, bom_path, multi_card_path, output_dir
+    ):
         """Pipeline with multi-sheet card creates split files."""
         run_pipeline(
             bom_path=bom_path,
@@ -410,13 +412,15 @@ class TestRunPipelineAllConfigs:
         # Check split cards were created
         split_dir = os.path.join(output_dir, "split_cards")
         zip_path = os.path.join(output_dir, "split_cards.zip")
-        assert os.path.isdir(split_dir) or os.path.isfile(zip_path), \
+        assert os.path.isdir(split_dir) or os.path.isfile(zip_path), (
             "Neither split dir nor zip found"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  4. run_pipeline — single config
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestRunPipelineSingleConfig:
     def test_single_config_creates_outputs(self, bom_path, card_path, output_dir):
@@ -490,11 +494,13 @@ class TestRunPipelineSingleConfig:
 #  5. run_pipeline — default output dir
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestRunPipelineDefaultOutput:
     def test_default_output_dir_created(self, bom_path, card_path, monkeypatch):
         """Default output dir (./output) is created when not specified."""
         # Change to a tmp dir so we don't pollute real project
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.chdir(tmp)
             run_pipeline(
@@ -514,14 +520,23 @@ class TestRunPipelineDefaultOutput:
 #  6. Error handling
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestErrorHandling:
     def test_missing_bom_exits(self, card_path, output_dir):
         """Missing BOM file causes sys.exit(1) from main()."""
         with pytest.raises(SystemExit) as exc:
             bad_path = "/nonexistent/bom.xlsx"
-            with patch.object(sys, "argv", [
-                "main.py", "--bom", bad_path, "--cards", card_path,
-            ]):
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "main.py",
+                    "--bom",
+                    bad_path,
+                    "--cards",
+                    card_path,
+                ],
+            ):
                 main()
         assert exc.value.code == 1
 
@@ -529,9 +544,17 @@ class TestErrorHandling:
         """Missing cards path causes sys.exit(1) from main()."""
         with pytest.raises(SystemExit) as exc:
             bad_path = "/nonexistent/cards"
-            with patch.object(sys, "argv", [
-                "main.py", "--bom", bom_path, "--cards", bad_path,
-            ]):
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "main.py",
+                    "--bom",
+                    bom_path,
+                    "--cards",
+                    bad_path,
+                ],
+            ):
                 main()
         assert exc.value.code == 1
 
@@ -540,65 +563,139 @@ class TestErrorHandling:
 #  7. CLI arg parsing (main function)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCLIArguments:
     def test_minimal_args(self, bom_path, card_path, output_dir):
         """Minimal required args run successfully."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path, "-o", output_dir,
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_single_config_arg(self, bom_path, card_path, output_dir):
         """--single-config flag works."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-            "-o", output_dir, "--single-config", "--config", "舒享版",
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+                "--single-config",
+                "--config",
+                "舒享版",
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_no_fuzzy_arg(self, bom_path, card_path, output_dir):
         """--no-fuzzy flag works."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-            "-o", output_dir, "--no-fuzzy",
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+                "--no-fuzzy",
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_no_split_arg(self, bom_path, card_path, output_dir):
         """--no-split flag works."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-            "-o", output_dir, "--no-split",
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+                "--no-split",
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_verbose_arg(self, bom_path, card_path, output_dir):
         """--verbose flag works."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-            "-o", output_dir, "--verbose",
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+                "--verbose",
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_workers_arg(self, bom_path, card_path, output_dir):
         """--workers flag works."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-            "-o", output_dir, "--workers", "2",
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
+                "--workers",
+                "2",
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
     def test_short_args(self, bom_path, card_path, output_dir):
         """Short flags (-b, -c, -o) work."""
-        with patch.object(sys, "argv", [
-            "main.py", "-b", bom_path, "-c", card_path, "-o", output_dir,
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "-b",
+                bom_path,
+                "-c",
+                card_path,
+                "-o",
+                output_dir,
+            ],
+        ):
             main()
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
@@ -606,6 +703,7 @@ class TestCLIArguments:
 # ═══════════════════════════════════════════════════════════════════════
 #  8. Excel report validation
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExcelReport:
     def test_excel_has_expected_sheets(self, bom_path, card_path, output_dir):
@@ -620,7 +718,11 @@ class TestExcelReport:
             max_workers=1,
         )
 
-        excel_files = [f for f in os.listdir(output_dir) if f.endswith(".xlsx") and "split" not in f]
+        excel_files = [
+            f
+            for f in os.listdir(output_dir)
+            if f.endswith(".xlsx") and "split" not in f
+        ]
         assert excel_files, "No excel report found"
 
         excel_path = os.path.join(output_dir, excel_files[0])
@@ -628,8 +730,9 @@ class TestExcelReport:
         sheet_names = wb.sheetnames
 
         # Should have at least Сводка sheet
-        assert any("Сводка" in s or "свод" in s.lower() for s in sheet_names), \
+        assert any("Сводка" in s or "свод" in s.lower() for s in sheet_names), (
             f"No summary sheet found in {sheet_names}"
+        )
 
         wb.close()
 
@@ -645,7 +748,11 @@ class TestExcelReport:
             max_workers=1,
         )
 
-        excel_files = [f for f in os.listdir(output_dir) if f.endswith(".xlsx") and "split" not in f]
+        excel_files = [
+            f
+            for f in os.listdir(output_dir)
+            if f.endswith(".xlsx") and "split" not in f
+        ]
         assert excel_files
 
         wb = openpyxl.load_workbook(os.path.join(output_dir, excel_files[0]))
@@ -665,6 +772,7 @@ class TestExcelReport:
 # ═══════════════════════════════════════════════════════════════════════
 #  9. Report content edge cases
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestReportContent:
     def test_report_has_all_sections(self, bom_path, card_path, output_dir):
@@ -700,7 +808,10 @@ class TestReportContent:
         assert _count_lines(os.path.join(output_dir, "report.txt")) > 5
 
     def test_pipeline_without_fuzzy_still_finds_discrepancies(
-        self, bom_path, card_path, output_dir,
+        self,
+        bom_path,
+        card_path,
+        output_dir,
     ):
         """Without fuzzy, basic discrepancies are still found."""
         run_pipeline(
@@ -714,12 +825,15 @@ class TestReportContent:
         )
 
         content = open(os.path.join(output_dir, "report.txt")).read()
-        assert "несоответствий" in content or "расхождени" in content or "ОТЧЁТ" in content
+        assert (
+            "несоответствий" in content or "расхождени" in content or "ОТЧЁТ" in content
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  10. Split cards integration
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitCardsIntegration:
     def test_split_cards_zip_created(self, bom_path, multi_card_path, output_dir):
@@ -766,6 +880,7 @@ class TestSplitCardsIntegration:
 #  11. select_config_interactive
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSelectConfigInteractive:
     """select_config_interactive — интерактивный выбор комплектации.
 
@@ -797,8 +912,9 @@ class TestSelectConfigInteractive:
     def test_valid_choice(self, monkeypatch):
         """Valid config index returns correct name."""
         configs = ["Config A", "Config B", "Config C"]
-        bom = BOMData(parts={}, config_names=configs,
-                      config_quantities={c: {} for c in configs})
+        bom = BOMData(
+            parts={}, config_names=configs, config_quantities={c: {} for c in configs}
+        )
         monkeypatch.setattr("builtins.input", lambda _: "2")
         result = select_config_interactive(bom)
         assert result == "Config B"
@@ -808,8 +924,9 @@ class TestSelectConfigInteractive:
         inputs = iter(["abc", "3"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         configs = ["Config A", "Config B", "Config C"]
-        bom = BOMData(parts={}, config_names=configs,
-                      config_quantities={c: {} for c in configs})
+        bom = BOMData(
+            parts={}, config_names=configs, config_quantities={c: {} for c in configs}
+        )
         result = select_config_interactive(bom)
         assert result == "Config C"
 
@@ -818,8 +935,9 @@ class TestSelectConfigInteractive:
         inputs = iter(["0", "1"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         configs = ["Config A", "Config B"]
-        bom = BOMData(parts={}, config_names=configs,
-                      config_quantities={c: {} for c in configs})
+        bom = BOMData(
+            parts={}, config_names=configs, config_quantities={c: {} for c in configs}
+        )
         result = select_config_interactive(bom)
         assert result == "Config A"
 
@@ -827,6 +945,7 @@ class TestSelectConfigInteractive:
 # ═══════════════════════════════════════════════════════════════════════
 #  12. clean_output_dirs — расширенные кейсы
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCleanOutputDirsExtended:
     """Расширенные тесты clean_output_dirs.
@@ -854,10 +973,12 @@ class TestCleanOutputDirsExtended:
         clean_output_dirs(output_dir)
 
         # Auto-clean dirs in CWD should be removed
-        assert not os.path.isdir(os.path.join(tmp_path, "split_cards")), \
+        assert not os.path.isdir(os.path.join(tmp_path, "split_cards")), (
             "split_cards should be cleaned"
-        assert not os.path.isdir(os.path.join(tmp_path, "_extracted_cards")), \
+        )
+        assert not os.path.isdir(os.path.join(tmp_path, "_extracted_cards")), (
             "_extracted_cards should be cleaned"
+        )
         # output_dir should also be cleaned (it was added first)
         assert not os.path.isdir(output_dir), "output_dir should be cleaned"
 
@@ -897,6 +1018,7 @@ class TestCleanOutputDirsExtended:
 #  13. run_pipeline — интерактивный выбор (single_config + no config_name)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestRunPipelineInteractiveConfig:
     """run_pipeline с single_config=True и config_name=None →
     должен вызвать select_config_interactive.
@@ -932,6 +1054,7 @@ class TestRunPipelineInteractiveConfig:
 #  14. main() — обработка ошибок
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestMainErrorHandling:
     """Обработка ошибок в main(): KeyboardInterrupt и Exception.
 
@@ -940,9 +1063,17 @@ class TestMainErrorHandling:
 
     def test_keyboard_interrupt(self, bom_path, card_path):
         """KeyboardInterrupt в run_pipeline → sys.exit(1)."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+            ],
+        ):
             with patch(
                 "burlak_parser.main.run_pipeline",
                 side_effect=KeyboardInterrupt(),
@@ -953,9 +1084,17 @@ class TestMainErrorHandling:
 
     def test_generic_exception(self, bom_path, card_path):
         """Generic exception в run_pipeline → sys.exit(1)."""
-        with patch.object(sys, "argv", [
-            "main.py", "--bom", bom_path, "--cards", card_path,
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+            ],
+        ):
             with patch(
                 "burlak_parser.main.run_pipeline",
                 side_effect=ValueError("test error"),
@@ -968,6 +1107,7 @@ class TestMainErrorHandling:
 # ═══════════════════════════════════════════════════════════════════════
 #  15. report — крайние случаи вывода
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def _create_perfect_card(path: str) -> str:
     """Создать карту, идеально совпадающую с 舒享版.
@@ -1026,6 +1166,7 @@ class TestReportEdgeCases:
 #  16. Many configs — строка 290: '... и ещё N комплектаций'
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestManyConfigs:
     """Тест для >5 комплектаций → вывод '... и ещё N комплектаций'
 
@@ -1054,12 +1195,15 @@ class TestManyConfigs:
         )
 
         captured = capsys.readouterr()
-        assert "... и ещё 1 комплектаций" in captured.out or "... и ещё 1" in captured.out
+        assert (
+            "... и ещё 1 комплектаций" in captured.out or "... и ещё 1" in captured.out
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  17. Many discrepancies — строка 353: '... и ещё N'
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestManyDiscrepancies:
     """Тест для >10 расхождений → вывод '... и ещё N'
@@ -1090,6 +1234,7 @@ class TestManyDiscrepancies:
 # ═══════════════════════════════════════════════════════════════════════
 #  18. Corrupted files — строка 211
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCorruptedFiles:
     """Тест для повреждённых файлов.
@@ -1131,6 +1276,7 @@ class TestCorruptedFiles:
 #  19. if __name__ == "__main__" — строка 466
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestMainEntryPoint:
     """Тест для точки входа if __name__ == '__main__'.
 
@@ -1141,18 +1287,22 @@ class TestMainEntryPoint:
         """Запуск main.py как `__main__` через subprocess."""
         result = subprocess.run(
             [
-                sys.executable, "-m", "burlak_parser.main",
-                "--bom", bom_path,
-                "--cards", card_path,
-                "-o", output_dir,
+                sys.executable,
+                "-m",
+                "burlak_parser.main",
+                "--bom",
+                bom_path,
+                "--cards",
+                card_path,
+                "-o",
+                output_dir,
             ],
             capture_output=True,
             text=True,
             timeout=30,
         )
         assert result.returncode == 0, (
-            f"main.py exit code {result.returncode}\n"
-            f"stderr: {result.stderr[:500]}"
+            f"main.py exit code {result.returncode}\nstderr: {result.stderr[:500]}"
         )
         assert os.path.isfile(os.path.join(output_dir, "report.txt"))
 
@@ -1160,6 +1310,7 @@ class TestMainEntryPoint:
 # ═══════════════════════════════════════════════════════════════════════
 #  20. Integrity checks — строки 314-318, 329-330, 336
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestIntegrityChecks:
     """Тесты для проверок целостности в main.py.
@@ -1174,7 +1325,9 @@ class TestIntegrityChecks:
       - Строка 336: integrity_ok = False → warning на stdout
     """
 
-    def test_integrity_mismatch_logged(self, bom_path, card_path, output_dir, caplog, capsys):
+    def test_integrity_mismatch_logged(
+        self, bom_path, card_path, output_dir, caplog, capsys
+    ):
         """Mock компаратора с несовпадающими счётчиками → integrity warning.
 
         Создаём fake MultiConfigComparisonResult, где:
@@ -1182,16 +1335,19 @@ class TestIntegrityChecks:
           - В all_discrepancies есть расхождение с неизвестным типом (не входит ни в один из 4)
         """
         from burlak_parser.comparator import (
-            MultiConfigComparisonResult, ConfigComparisonResult,
+            ConfigComparisonResult,
             Discrepancy,
+            MultiConfigComparisonResult,
         )
 
         # Создаём fake discrepancy с неизвестным типом — он будет учтён в
         # total_discrepancies, но не попадёт ни в один из 4 type-sum counters
         fake_disc = Discrepancy(
             part_number="P999",
-            name_cn="", name_en="",
-            qty_bom=0.0, qty_cards=1.0,
+            name_cn="",
+            name_en="",
+            qty_bom=0.0,
+            qty_cards=1.0,
             card_numbers=["card1"],
             discrepancy_type="__UNKNOWN_TYPE__",  # не входит в 4 известных типа
             config_name="舒享版",
@@ -1202,13 +1358,15 @@ class TestIntegrityChecks:
                 ConfigComparisonResult(
                     config_name="舒享版",
                     discrepancies=[fake_disc],
-                    total_bom_parts=5,   # matched=2 + only_bom=0 + qty=0 + fuzzy=0 = 2 != 5
+                    total_bom_parts=5,  # matched=2 + only_bom=0 + qty=0 + fuzzy=0 = 2 != 5
                     total_cards_parts=3,
-                    matched_parts=2,     # не совпадает с total_bom_parts
+                    matched_parts=2,  # не совпадает с total_bom_parts
                     fuzzy_matched=0,
                 ),
             ],
-            all_discrepancies=[fake_disc],  # 1 discrepancy unknown type → sum_check=0 != total=1
+            all_discrepancies=[
+                fake_disc
+            ],  # 1 discrepancy unknown type → sum_check=0 != total=1
             total_configs=1,
         )
 
@@ -1228,24 +1386,29 @@ class TestIntegrityChecks:
                 )
 
         # Строка 314-318: accounted_bom != expected → logger.warning
-        assert "Нарушение целостности" in caplog.text, \
+        assert "Нарушение целостности" in caplog.text, (
             "Expected integrity violation warning in logs"
-        assert "учтено 2, ожидалось 5" in caplog.text, \
+        )
+        assert "учтено 2, ожидалось 5" in caplog.text, (
             "Expected diff message in log: учтено 2, ожидалось 5"
+        )
 
         # Строка 329-330: sum_check != total_discrepancies → logger.warning
-        assert "сумма типов" in caplog.text.lower(), \
+        assert "сумма типов" in caplog.text.lower(), (
             "Expected type sum mismatch warning in logs"
+        )
 
         # Строка 336: integrity_ok = False → print warning
         captured = capsys.readouterr()
-        assert "нарушения целостности" in captured.out, \
+        assert "нарушения целостности" in captured.out, (
             "Expected integrity warning in stdout"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  21. --help output — проверка всех CLI флагов и примеров
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestHelpOutput:
     """Автоматическая проверка `--help` — все флаги и примеры."""
@@ -1263,9 +1426,16 @@ class TestHelpOutput:
 
         # Проверяем все long флаги
         long_flags = [
-            "--bom", "--cards", "--config", "--output",
-            "--single-config", "--no-split", "--no-fuzzy",
-            "--workers", "--verbose", "--split-stats",
+            "--bom",
+            "--cards",
+            "--config",
+            "--output",
+            "--single-config",
+            "--no-split",
+            "--no-fuzzy",
+            "--workers",
+            "--verbose",
+            "--split-stats",
         ]
         for flag in long_flags:
             assert flag in output, f"Flag {flag} not found in --help output"

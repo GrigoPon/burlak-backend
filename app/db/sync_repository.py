@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.config import get_settings
 
@@ -23,7 +23,7 @@ def increment_progress(
     db_path = get_settings().db_url
     if db_path.startswith("sqlite:///"):
         db_path = db_path[len("sqlite:///") :]
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row

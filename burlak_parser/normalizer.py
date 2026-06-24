@@ -18,15 +18,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 # Паттерн для определения числа (целое или дробное, с запятой или точкой)
-NUMERIC_RE = re.compile(
-    r"^\s*[-+]?\d+(?:[\.,]\d+)?\s*$"
-)
+NUMERIC_RE = re.compile(r"^\s*[-+]?\d+(?:[\.,]\d+)?\s*$")
 
 # Паттерн для "S"-подобных маркеров (BAIC: "S" = есть деталь)
 S_MARKER_RE = re.compile(r"^\s*[sS]\s*$")
@@ -101,7 +99,8 @@ class QuantityNormalizer:
             logger.debug("bool value detected: %s → 0.0", value)
             return default
         # datetime/timedelta from Excel date columns
-        from datetime import datetime, date, timedelta
+        from datetime import date, datetime, timedelta
+
         if isinstance(value, (datetime, date, timedelta)):
             logger.debug("datetime value detected: %s → 0.0", value)
             return default
@@ -115,7 +114,7 @@ class QuantityNormalizer:
         # Удаляем артефакты кодировки Excel XML
         match = XML_ARTIFACTS_RE.search(s)
         if match:
-            s = s[:match.start()]
+            s = s[: match.start()]
         s = s.strip()
         if not s:
             return default
@@ -137,7 +136,9 @@ class QuantityNormalizer:
         # Нераспознанный формат (включая "S") — логируем и возвращаем default
         logger.debug(
             "Unrecognized quantity format: '%s' (type=%s) → default=%.1f",
-            value, type(value).__name__, default,
+            value,
+            type(value).__name__,
+            default,
         )
         return default
 
@@ -174,7 +175,7 @@ class PartNumberNormalizer:
         # Берём ТОЛЬКО ПЕРВУЮ часть до артефакта (двойные значения: китайский + английский)
         match = XML_ARTIFACTS_RE.search(s)
         if match:
-            s = s[:match.start()]
+            s = s[: match.start()]
         cleaned = CLEAN_PN_CHARS.sub("", s)
         return cleaned.upper()
 

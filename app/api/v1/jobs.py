@@ -1,19 +1,20 @@
+import aiosqlite
 from fastapi import APIRouter, Depends, status
 
-import aiosqlite
-
-from app.services.job_creation_service import JobCreationService
-from app.core.exceptions import JobNotFoundError, JobStateError
-from app.services.job_processing_service import JobProcessingService
+from app.core.exceptions import JobNotFoundError
 from app.db.async_repository import get_job
 from app.db.database import get_async_db
 from app.schemas.job import JobCreateResponse, JobStatusResponse
+from app.services.job_creation_service import JobCreationService
+from app.services.job_processing_service import JobProcessingService
 
 router = APIRouter(tags=["jobs"])
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
-async def create_new_job(db: aiosqlite.Connection = Depends(get_async_db)) -> JobCreateResponse:
+async def create_new_job(
+    db: aiosqlite.Connection = Depends(get_async_db),
+) -> JobCreateResponse:
     """Create a new job in awaiting_upload status.
 
     Returns the job ID, initial status, and creation timestamp.

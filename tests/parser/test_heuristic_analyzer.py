@@ -17,12 +17,8 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-import openpyxl
-import pytest
 from openpyxl import Workbook
 
 from burlak_parser.heuristic_analyzer import (
@@ -37,12 +33,12 @@ from burlak_parser.heuristic_analyzer import (
     normalize_text,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ТЕСТОВ
 # ═══════════════════════════════════════════════════════════════════════
 
-def _make_ws(data: List[List[Optional[Any]]]) -> Any:
+
+def _make_ws(data: list[list[Any | None]]) -> Any:
     """Создать in-memory openpyxl worksheet с данными.
 
     data: список строк. Каждая строка — список значений ячеек (1-indexed).
@@ -56,7 +52,7 @@ def _make_ws(data: List[List[Optional[Any]]]) -> Any:
     return ws
 
 
-def _make_ws_from_dict(rows: Dict[int, Dict[int, Any]]) -> Any:
+def _make_ws_from_dict(rows: dict[int, dict[int, Any]]) -> Any:
     """Создать worksheet из словаря {row: {col: value}}."""
     wb = Workbook()
     ws = wb.active
@@ -69,6 +65,7 @@ def _make_ws_from_dict(rows: Dict[int, Dict[int, Any]]) -> Any:
 # ═══════════════════════════════════════════════════════════════════════
 #  1. normalize_text
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestNormalizeText:
     def test_lowercase_and_strip(self):
@@ -98,6 +95,7 @@ class TestNormalizeText:
 #  2. clean_part_number
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCleanPartNumber:
     def test_removes_special_chars(self):
         assert clean_part_number("5306200-ED001-AC00000") == "5306200ED001AC00000"
@@ -124,6 +122,7 @@ class TestCleanPartNumber:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. is_valid_part_number
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestIsValidPartNumber:
     def test_valid_alpha_numeric(self):
@@ -162,6 +161,7 @@ class TestIsValidPartNumber:
 # ═══════════════════════════════════════════════════════════════════════
 #  4. looks_like_part_number
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestLooksLikePartNumber:
     def test_none(self):
@@ -213,6 +213,7 @@ class TestLooksLikePartNumber:
 #  5. looks_like_name
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestLooksLikeName:
     def test_none(self):
         assert looks_like_name(None) == 0.0
@@ -251,6 +252,7 @@ class TestLooksLikeName:
 #  6. looks_like_quantity
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestLooksLikeQuantity:
     def test_none(self):
         assert looks_like_quantity(None) == 0.0
@@ -284,6 +286,7 @@ class TestLooksLikeQuantity:
 # ═══════════════════════════════════════════════════════════════════════
 #  7. extract_card_number_from_filepath
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExtractCardNumberFromFilepath:
     def test_sqrt_pattern(self):
@@ -341,15 +344,18 @@ class TestExtractCardNumberFromFilepath:
 #  8. extract_card_number (convenience wrapper)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractCardNumber:
     def test_without_ws(self):
         num = extract_card_number("SQRT1L-17-AS-04001.xlsx")
         assert num == "SQRT1L-17-AS-04001"
 
     def test_with_ws_contains_card(self):
-        ws = _make_ws([
-            ["Header", "SQRT1L-17-AS-04001", "extra"],
-        ])
+        ws = _make_ws(
+            [
+                ["Header", "SQRT1L-17-AS-04001", "extra"],
+            ]
+        )
         num = extract_card_number("unknown.xlsx", ws)
         assert num == "SQRT1L-17-AS-04001"
 
@@ -363,6 +369,7 @@ class TestExtractCardNumber:
 #  9. HeuristicAnalyzer._score_header_row
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestScoreHeaderRow:
     def test_empty_row(self):
         assert HeuristicAnalyzer._score_header_row([]) == 0.0
@@ -372,7 +379,16 @@ class TestScoreHeaderRow:
 
     def test_bom_header_row(self):
         # Типичный BOM: 序号, 零部件件号, 零部件名称, 系统, 装配层级, ...
-        row = ["序号", "零部件件号", "零部件名称", "系统", "装配层级", "设计状态", "供货状态", "用量"]
+        row = [
+            "序号",
+            "零部件件号",
+            "零部件名称",
+            "系统",
+            "装配层级",
+            "设计状态",
+            "供货状态",
+            "用量",
+        ]
         score = HeuristicAnalyzer._score_header_row(row)
         assert score > 0.2  # should be a decent score
 
@@ -404,6 +420,7 @@ class TestScoreHeaderRow:
 #  10. HeuristicAnalyzer.find_header_rows
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestFindHeaderRows:
     def test_bom_header_found(self):
         # T1L BOM: headers at row 3 with 零部件件号, 名称, etc
@@ -427,8 +444,13 @@ class TestFindHeaderRows:
     def test_g01_bom_header_found(self):
         # G01 Russian BOM: headers at row 1
         data = [
-            ["序号\nСерийный номер", "零部件件号\nКод детали",
-             "零部件名称\nНаименование", "系统\nСистема", "用量"],
+            [
+                "序号\nСерийный номер",
+                "零部件件号\nКод детали",
+                "零部件名称\nНаименование",
+                "系统\nСистема",
+                "用量",
+            ],
             ["1", "5306200-ED001", "仪表板横梁总成 / Поперечная балка", "A", "1"],
         ]
         ws = _make_ws(data)
@@ -438,8 +460,16 @@ class TestFindHeaderRows:
     def test_swm_header_not_found_in_content(self):
         # SWM card: R1 has company info (not BOM-like)
         data = [
-            ["鑫源汽车\nShineray Automobile", None, None, None,
-             None, None, None, "总装工艺卡片\nКарта процесса"],
+            [
+                "鑫源汽车\nShineray Automobile",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "总装工艺卡片\nКарта процесса",
+            ],
         ]
         ws = _make_ws(data)
         # R1 should NOT match as BOM header (no part_no keywords)
@@ -448,10 +478,12 @@ class TestFindHeaderRows:
         assert 1 not in headers, "R1 should not be found as header"
 
     def test_limited_max_rows(self):
-        ws = _make_ws([
-            ["序号", "零部件件号", "名称", "数量"],
-            ["1", "P001", "Part1", "1"],
-        ])
+        ws = _make_ws(
+            [
+                ["序号", "零部件件号", "名称", "数量"],
+                ["1", "P001", "Part1", "1"],
+            ]
+        )
         headers = HeuristicAnalyzer.find_header_rows(ws, max_rows=1)
         # Should find row 1
         assert 1 in headers
@@ -460,6 +492,7 @@ class TestFindHeaderRows:
 # ═══════════════════════════════════════════════════════════════════════
 #  11. HeuristicAnalyzer.detect_column_types
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestDetectColumnTypes:
     def test_t1l_bom_columns(self):
@@ -479,9 +512,11 @@ class TestDetectColumnTypes:
     def test_g01_bom_russian(self):
         """G01 Russian BOM: part_no=C2, name=C3 (with cyrillic)"""
         data = [
-            ["序号\nСерийный номер",
-             "零部件件号\nКод детали",
-             "零部件名称\nНаименование"],
+            [
+                "序号\nСерийный номер",
+                "零部件件号\nКод детали",
+                "零部件名称\nНаименование",
+            ],
             ["1", "5306200-ED001", "仪表板横梁总成 / Поперечная балка"],
         ]
         ws = _make_ws(data)
@@ -548,12 +583,21 @@ class TestDetectColumnTypes:
 #  12. HeuristicAnalyzer.detect_config_columns
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestDetectConfigColumns:
     def test_t1l_config_columns(self):
         """T1L has 4 config columns (用量 variants)"""
         data = [
-            ["序号", "零部件件号", "名称", "CPAC编码",
-             "舒享版-全黑", "舒享版-黑米", "奢享版-全黑", "奢享版-黑米"],
+            [
+                "序号",
+                "零部件件号",
+                "名称",
+                "CPAC编码",
+                "舒享版-全黑",
+                "舒享版-黑米",
+                "奢享版-全黑",
+                "奢享版-黑米",
+            ],
             ["1", "P001", "Part1", "CPAC001", "1", "1", "2", "2"],
             ["2", "P002", "Part2", "CPAC002", "1", "0", "1", "0"],
         ]
@@ -579,10 +623,11 @@ class TestDetectConfigColumns:
 #  13. HeuristicAnalyzer.find_part_table
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestFindPartTable:
     def test_swm_card_part_table(self):
         """SWM card: table at R5 (零部件代号 in C18) with ≥2 non-empty cells"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "鑫源汽车\nShineray Automobile", 8: "总装工艺卡片\nКарта процесса"},
             5: {17: "序号\nСерийный номер", 18: "零部件代号\nКод детали"},
             6: {18: "P001"},
@@ -597,7 +642,7 @@ class TestFindPartTable:
 
     def test_t1l_card_part_table(self):
         """T1L card: table with 物料编码, 零件名称, 数量"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Header info"},
             2: {1: "物料编码", 2: "零件名称", 3: "数量", 4: "单位"},
             3: {1: "P001", 2: "Part1", 3: "1", 4: "pcs"},
@@ -618,7 +663,7 @@ class TestFindPartTable:
 
     def test_skips_single_cell_row(self):
         """Row with operation text containing 'деталь' should be skipped"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Info"},
             2: {18: "拿取零部件1检查是否有破损；Возьмите деталь"},
             3: {17: "序号\nСерийный номер", 18: "零部件代号\nКод детали"},
@@ -635,7 +680,7 @@ class TestFindPartTable:
         # Длинный заголовок (>50 символов) с part_no-ключевым словом
         long_header = "零部件代号" + "X" * 55  # > 50 chars total
         assert len(long_header) > 50
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Info", 2: long_header},
             2: {1: "物料编码", 2: "零件名称", 3: "数量"},
         }
@@ -650,6 +695,7 @@ class TestFindPartTable:
 # ═══════════════════════════════════════════════════════════════════════
 #  14. HeuristicAnalyzer.is_service_sheet
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestIsServiceSheet:
     def test_cover_sheet(self):
@@ -684,6 +730,7 @@ class TestIsServiceSheet:
 #  15. HeuristicAnalyzer.is_sheet_bom_candidate
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestIsSheetBomCandidate:
     def test_valid_bom_sheet(self):
         """T1L main BOM sheet"""
@@ -694,11 +741,15 @@ class TestIsSheetBomCandidate:
             ["3", "P003", "Part3", "2", "0"],
         ]
         ws = _make_ws(data)
-        assert HeuristicAnalyzer.is_sheet_bom_candidate(ws, sheet_name="总装BOM") is True
+        assert (
+            HeuristicAnalyzer.is_sheet_bom_candidate(ws, sheet_name="总装BOM") is True
+        )
 
     def test_service_sheet_rejected(self):
         ws = _make_ws([["序号", "零件号", "名称", "用量"]])
-        assert HeuristicAnalyzer.is_sheet_bom_candidate(ws, sheet_name="变更记录") is False
+        assert (
+            HeuristicAnalyzer.is_sheet_bom_candidate(ws, sheet_name="变更记录") is False
+        )
 
     def test_empty_sheet_rejected(self):
         ws = _make_ws([])
@@ -722,6 +773,7 @@ class TestIsSheetBomCandidate:
 # ═══════════════════════════════════════════════════════════════════════
 #  16. HeuristicAnalyzer.build_global_name_dict
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestBuildGlobalNameDict:
     def test_simple_build(self):
@@ -762,9 +814,9 @@ class TestBuildGlobalNameDict:
     def test_preserves_first_non_empty_name(self):
         data = [
             ["#", "Part No", "Name"],
-            ["1", "ABC001", "First Name"],   # has name
-            ["2", "ABC001", ""],              # duplicate, empty name
-            ["3", "ABC001", "Override"],      # duplicate, would override
+            ["1", "ABC001", "First Name"],  # has name
+            ["2", "ABC001", ""],  # duplicate, empty name
+            ["3", "ABC001", "Override"],  # duplicate, would override
         ]
         ws = _make_ws(data)
         names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 0, 1)
@@ -777,9 +829,10 @@ class TestBuildGlobalNameDict:
 #  17. HeuristicAnalyzer.extract_operation_name
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractOperationName:
     def test_finds_operation_name(self):
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "作业指导书", 9: "文件编号: DOC001"},
             2: {4: "安装左前门线束"},
             5: {17: "序号", 18: "零部件代号"},
@@ -794,7 +847,7 @@ class TestExtractOperationName:
         assert name == ""
 
     def test_skips_service_keywords(self):
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "作业指导书"},
             2: {9: "文件编号: DOC001"},
             5: {17: "序号", 18: "零部件代号"},
@@ -808,12 +861,15 @@ class TestExtractOperationName:
 #  18. HeuristicAnalyzer.extract_card_number_from_sheet
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractCardNumberFromSheet:
     def test_finds_card_in_sheet_content(self):
-        ws = _make_ws([
-            ["Header", None, "SQRT1L-17-AS-04001"],
-            ["Info", None, None],
-        ])
+        ws = _make_ws(
+            [
+                ["Header", None, "SQRT1L-17-AS-04001"],
+                ["Info", None, None],
+            ]
+        )
         num = HeuristicAnalyzer.extract_card_number_from_sheet(ws, "unknown.xlsx")
         assert num == "SQRT1L-17-AS-04001"
 
@@ -823,11 +879,13 @@ class TestExtractCardNumberFromSheet:
         assert num == "G01-AS-05001"
 
     def test_scans_multiple_rows(self):
-        ws = _make_ws([
-            ["Row1", None],
-            ["Row2", None],
-            ["Row3", "A123-B456"],
-        ])
+        ws = _make_ws(
+            [
+                ["Row1", None],
+                ["Row2", None],
+                ["Row3", "A123-B456"],
+            ]
+        )
         num = HeuristicAnalyzer.extract_card_number_from_sheet(ws, "unknown.xlsx")
         assert num == "A123-B456"
 
@@ -835,6 +893,7 @@ class TestExtractCardNumberFromSheet:
 # ═══════════════════════════════════════════════════════════════════════
 #  19. HeuristicAnalyzer.get_cell_value (universal API)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGetCellValue:
     def test_openpyxl_worksheet(self):
@@ -845,6 +904,7 @@ class TestGetCellValue:
 
     def test_custom_excel_sheet(self):
         """Mock object with cell_value method (like card_parser.ExcelSheet)"""
+
         class MockExcelSheet:
             def cell_value(self, row, col):
                 return f"R{row}C{col}"
@@ -868,6 +928,7 @@ class TestGetCellValue:
 # ═══════════════════════════════════════════════════════════════════════
 #  20. HeuristicAnalyzer._find_part_no_by_content (indirect via detect)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindPartNoByContent:
     def test_fallback_when_no_header_match(self):
@@ -896,7 +957,10 @@ class TestFindPartNoByContent:
         ws = _make_ws(data)
         # header_texts for C1 = "序号" which is in META
         result = HeuristicAnalyzer._find_part_no_by_content(
-            ws, 2, 5, 3,
+            ws,
+            2,
+            5,
+            3,
             header_texts={1: "序号", 2: "other", 3: "data"},
         )
         # C1 should be excluded (meta keyword "序号")
@@ -906,6 +970,7 @@ class TestFindPartNoByContent:
 # ═══════════════════════════════════════════════════════════════════════
 #  21. HeuristicAnalyzer._find_name_by_content
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindNameByContent:
     def test_finds_name_by_content(self):
@@ -920,7 +985,9 @@ class TestFindNameByContent:
         ]
         ws = _make_ws(data)
         name_col = HeuristicAnalyzer._find_name_by_content(ws, 2, 5, 2)
-        assert name_col == 2, f"Name should be C2 (contains descriptions), got C{name_col}"
+        assert name_col == 2, (
+            f"Name should be C2 (contains descriptions), got C{name_col}"
+        )
 
     def test_skips_part_no_columns(self):
         """Columns with part_no-like content should be excluded from name"""
@@ -963,14 +1030,15 @@ class TestFindNameByContent:
 #  22. HeuristicAnalyzer.find_part_table — расширенные сценарии
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestFindPartTableExtended:
     def test_multi_row_below_finds_qty(self):
         """SWM-style: part_no at R5, qty found 3 rows below (multi-row header)"""
         # Header row needs ≥2 non-empty cells (C17 + C18 like real SWM data)
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "鑫源汽车\nShineray Automobile"},
             5: {17: "序号\nСерийный номер", 18: "零部件代号\nКод детали"},  # 2 cells
-            8: {30: "数量\nКоличество"},    # 3 rows below, has qty keyword
+            8: {30: "数量\nКоличество"},  # 3 rows below, has qty keyword
             9: {18: "P001", 30: "1.0"},
         }
         ws = _make_ws_from_dict(rows)
@@ -983,11 +1051,11 @@ class TestFindPartTableExtended:
 
     def test_multi_row_below_finds_name_and_qty(self):
         """Both name and qty found in rows below part_no header"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Header"},
-            4: {17: "序号", 18: "零部件代号"},          # 2 cells header
-            7: {20: "零件名称"},                         # 3 rows below
-            8: {30: "数量"},                             # 4 rows below
+            4: {17: "序号", 18: "零部件代号"},  # 2 cells header
+            7: {20: "零件名称"},  # 3 rows below
+            8: {30: "数量"},  # 4 rows below
             9: {18: "P001", 20: "Part1", 30: "1"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1000,10 +1068,14 @@ class TestFindPartTableExtended:
 
     def test_multi_row_below_stops_at_next_header(self):
         """Multi-row below scan stops when another part_no header is encountered"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Info"},
-            3: {17: "序号", 18: "零部件代号"},            # first header (2 cells)
-            5: {17: "序号", 18: "物料编码", 20: "数量"},  # second header appears before qty found
+            3: {17: "序号", 18: "零部件代号"},  # first header (2 cells)
+            5: {
+                17: "序号",
+                18: "物料编码",
+                20: "数量",
+            },  # second header appears before qty found
             6: {18: "P001", 20: "2"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1016,9 +1088,12 @@ class TestFindPartTableExtended:
 
     def test_row_above_finds_qty(self):
         """Row-above scan: qty found above part_no header"""
-        rows: Dict[int, Dict[int, str]] = {
-            1: {30: "数量\nКоличество"},                     # qty above
-            3: {17: "序号\nСерийный номер", 18: "零部件代号\nКод детали"},  # header (2 cells)
+        rows: dict[int, dict[int, str]] = {
+            1: {30: "数量\nКоличество"},  # qty above
+            3: {
+                17: "序号\nСерийный номер",
+                18: "零部件代号\nКод детали",
+            },  # header (2 cells)
             4: {18: "P001", 30: "1.0"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1035,10 +1110,12 @@ class TestFindPartTableExtended:
         But row-above scan sees it and skips because has_pn_above=True.
         R2 has qty keyword → taken by row-above scan (has_pn_above=False).
         """
-        rows: Dict[int, Dict[int, str]] = {
-            1: {18: "Номер детали"},            # 1 cell, part_no → skip in main scan, skip in row-above
-            2: {30: "数量"},                     # 1 cell, qty → taken by row-above
-            4: {17: "序号", 18: "零部件代号"},    # header (2 cells)
+        rows: dict[int, dict[int, str]] = {
+            1: {
+                18: "Номер детали"
+            },  # 1 cell, part_no → skip in main scan, skip in row-above
+            2: {30: "数量"},  # 1 cell, qty → taken by row-above
+            4: {17: "序号", 18: "零部件代号"},  # header (2 cells)
             5: {18: "P001", 30: "1"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1046,15 +1123,18 @@ class TestFindPartTableExtended:
         assert result is not None
         hr, pn, qty, name = result
         assert hr == 4, f"Header should be R4, got R{hr}"
-        assert qty == 30, f"qty should be C30 (found at R2 via row-above scan), got C{qty}"
+        assert qty == 30, (
+            f"qty should be C30 (found at R2 via row-above scan), got C{qty}"
+        )
 
     def test_wide_format_swm_c30(self):
         """SWM-wide: part_no at C18, qty at C30 — within MAX_COL_SCAN_WIDTH=40"""
+
         # Create wide enough data with 30 columns
-        def make_row(col_vals: Dict[int, str]) -> List[Optional[str]]:
+        def make_row(col_vals: dict[int, str]) -> list[str | None]:
             return [col_vals.get(c, "") for c in range(1, 35)]
 
-        data: List[List[Optional[str]]] = [
+        data: list[list[str | None]] = [
             make_row({1: "Header info", 8: "Карта процесса"}),
             make_row({}),
             make_row({}),
@@ -1072,11 +1152,11 @@ class TestFindPartTableExtended:
 
     def test_start_row_skip_initial_rows(self):
         """start_row parameter: skip first table, find second"""
-        rows: Dict[int, Dict[int, str]] = {
-            1: {1: "物料编码", 2: "零件名称", 3: "数量"},   # table 1
+        rows: dict[int, dict[int, str]] = {
+            1: {1: "物料编码", 2: "零件名称", 3: "数量"},  # table 1
             2: {1: "P001", 2: "Part1", 3: "1"},
             3: {1: "P002", 2: "Part2", 3: "2"},
-            5: {17: "序号", 18: "零部件代号"},               # table 2 (2 cells)
+            5: {17: "序号", 18: "零部件代号"},  # table 2 (2 cells)
             6: {18: "P003"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1089,7 +1169,7 @@ class TestFindPartTableExtended:
 
     def test_only_part_no_no_qty_name(self):
         """Header with only part_no column — qty and name return 0"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {17: "序号", 18: "零部件代号"},
             2: {18: "P001"},
             3: {18: "P002"},
@@ -1120,9 +1200,9 @@ class TestFindPartTableExtended:
 
     def test_multi_row_above_finds_name_and_qty(self):
         """Both name and qty found via row-above scan — triggers debug log (lines 1102-1106)."""
-        rows: Dict[int, Dict[int, str]] = {
-            1: {20: "零件名称", 30: "数量"},                  # name + qty above
-            3: {17: "序号", 18: "零部件代号"},               # header (2 cells)
+        rows: dict[int, dict[int, str]] = {
+            1: {20: "零件名称", 30: "数量"},  # name + qty above
+            3: {17: "序号", 18: "零部件代号"},  # header (2 cells)
             4: {18: "P001", 20: "Part1", 30: "1"},
         }
         ws = _make_ws_from_dict(rows)
@@ -1135,7 +1215,7 @@ class TestFindPartTableExtended:
 
     def test_single_non_empty_cell_skipped(self):
         """Row with single non-empty cell (even with part_no) skipped"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {18: "零部件代号"},  # only 1 non-empty cell
             2: {17: "序号", 18: "零部件代号"},  # 2 cells → taken
             3: {18: "P001"},
@@ -1148,7 +1228,7 @@ class TestFindPartTableExtended:
 
     def test_start_row_beyond_max(self):
         """start_row beyond max_row returns None"""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "Info"},
             2: {1: "Test"},
         }
@@ -1160,6 +1240,7 @@ class TestFindPartTableExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  23. HeuristicAnalyzer.detect_column_types — расширенные сценарии
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestDetectColumnTypesExtended:
     def test_no_header_rows_uses_row_1(self):
@@ -1218,9 +1299,12 @@ class TestDetectColumnTypesExtended:
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
         # C3 has "名称" which could be name_cn or name_en
         # Content is CJK → should be name_cn
-        assert col_types.get("name_cn") == 3, f"CJK content → name_cn=C3, got {col_types}"
-        assert "name_en" not in col_types or col_types.get("name_en", 0) != 3, \
+        assert col_types.get("name_cn") == 3, (
+            f"CJK content → name_cn=C3, got {col_types}"
+        )
+        assert "name_en" not in col_types or col_types.get("name_en", 0) != 3, (
             f"CJK content should NOT be name_en, got {col_types}"
+        )
 
     def test_name_en_kept_with_en_marker(self):
         """name_en with explicit english marker → stays as name_en"""
@@ -1232,7 +1316,9 @@ class TestDetectColumnTypesExtended:
         ]
         ws = _make_ws(data)
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
-        assert col_types.get("name_en") == 3, f"English marker → name_en=C3, got {col_types}"
+        assert col_types.get("name_en") == 3, (
+            f"English marker → name_en=C3, got {col_types}"
+        )
 
     def test_multiple_header_rows(self):
         """Two header rows: combined text used for classification.
@@ -1243,9 +1329,19 @@ class TestDetectColumnTypesExtended:
         But Phase 5 redirects name_en→name_cn because content has CJK.
         """
         data = [
-            ["序号\nСерийный номер", "零部件件号\nКод детали", "零部件名称\nНаименование", "用量"],
+            [
+                "序号\nСерийный номер",
+                "零部件件号\nКод детали",
+                "零部件名称\nНаименование",
+                "用量",
+            ],
             ["", "", "", "舒享版\nLuxury"],
-            ["1", "P001", "仪表板横梁总成", "1"],  # CJK content → Phase 5 redirects to name_cn
+            [
+                "1",
+                "P001",
+                "仪表板横梁总成",
+                "1",
+            ],  # CJK content → Phase 5 redirects to name_cn
         ]
         ws = _make_ws(data)
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1, 2])
@@ -1253,7 +1349,9 @@ class TestDetectColumnTypesExtended:
         # Should be detected as name_cn (either directly or via Phase 5 redirect)
         name_cn = col_types.get("name_cn", 0)
         name_en = col_types.get("name_en", 0)
-        assert name_cn == 3 or name_en == 3, f"C3 should be detected as name, got {col_types}"
+        assert name_cn == 3 or name_en == 3, (
+            f"C3 should be detected as name, got {col_types}"
+        )
 
     def test_pure_meta_columns_only(self):
         """Only meta columns → no part_no, name, or qty detected"""
@@ -1311,7 +1409,9 @@ class TestDetectColumnTypesExtended:
         ws = _make_ws(data)
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
         pn = col_types.get("part_no", 0)
-        assert pn == 3, f"part_no should be C3 (零部件件号), not C2 (Supplier), got C{pn}"
+        assert pn == 3, (
+            f"part_no should be C3 (零部件件号), not C2 (Supplier), got C{pn}"
+        )
 
     def test_qty_detection_in_non_standard_position(self):
         """QTY_KEYWORDS 'usage' in column header"""
@@ -1329,6 +1429,7 @@ class TestDetectColumnTypesExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  25. Edge cases для остальных непокрытых строк
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestEdgeCasesCoverage:
     """Целевые тесты для строк, не охваченных другими тестами.
@@ -1435,8 +1536,12 @@ class TestEdgeCasesCoverage:
         ws = _make_ws(data)
         col_types = HeuristicAnalyzer.detect_column_types(ws, [1])
         # Should find part_no at C2 and name_cn at C3
-        assert col_types.get("part_no", 0) == 2, f"Expected C2 for part_no, got {col_types}"
-        assert col_types.get("name_cn", 0) == 3, f"Expected C3 for name_cn, got {col_types}"
+        assert col_types.get("part_no", 0) == 2, (
+            f"Expected C2 for part_no, got {col_types}"
+        )
+        assert col_types.get("name_cn", 0) == 3, (
+            f"Expected C3 for name_cn, got {col_types}"
+        )
 
     # ── Line 770: _find_part_no_by_content skip None cells ──
     def test_find_part_no_by_content_skip_none(self):
@@ -1449,7 +1554,10 @@ class TestEdgeCasesCoverage:
         ]
         ws = _make_ws(data)
         result = HeuristicAnalyzer._find_part_no_by_content(
-            ws, 2, 5, 3,
+            ws,
+            2,
+            5,
+            3,
             header_texts={1: "h1", 2: "", 3: "h3"},
         )
         # C1 or C3 should be found
@@ -1481,7 +1589,9 @@ class TestEdgeCasesCoverage:
         configs = HeuristicAnalyzer.detect_config_columns(ws, [1], col_types)
         # C4 has empty header → should be skipped, C5 should be found
         assert 5 in configs, f"C5 (舒享版) should be in configs, got {configs}"
-        assert 4 not in configs, f"C4 (empty header) should NOT be in configs, got {configs}"
+        assert 4 not in configs, (
+            f"C4 (empty header) should NOT be in configs, got {configs}"
+        )
 
     # ── Line 1162: is_sheet_bom_candidate no part_no ──
     def test_is_sheet_bom_candidate_no_part_no(self):
@@ -1508,14 +1618,16 @@ class TestEdgeCasesCoverage:
             ["3", "P003", "Part3"],
         ]
         ws = _make_ws(data)
-        result = HeuristicAnalyzer.is_sheet_bom_candidate(ws, min_configs=2, sheet_name="test")
+        result = HeuristicAnalyzer.is_sheet_bom_candidate(
+            ws, min_configs=2, sheet_name="test"
+        )
         # No config columns, no qty column → should return False
         assert result is False, "Should return False with no config/qty columns"
 
     # ── Lines 1213-1216: extract_operation_name with 作业要素 ──
     def test_extract_operation_name_zuye_yaosu(self):
         """extract_operation_name: 作业要素 finds name in adjacent cell (lines 1213-1216)."""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "作业要素", 2: "安装左前门线束"},
             3: {17: "序号", 18: "零部件代号"},
         }
@@ -1525,7 +1637,7 @@ class TestEdgeCasesCoverage:
 
     def test_extract_operation_name_zuye_yaosu_skips_empty(self):
         """extract_operation_name: 作业要素 skips empty/nearby and continues (lines 1213-1216)."""
-        rows: Dict[int, Dict[int, str]] = {
+        rows: dict[int, dict[int, str]] = {
             1: {1: "作业要素", 2: "", 3: ""},  # adjacent cells empty
             3: {17: "序号", 18: "零部件代号"},
         }
@@ -1539,7 +1651,7 @@ class TestEdgeCasesCoverage:
         """build_global_name_dict: continue when part_no is None (line 1251)."""
         data = [
             ["序号", "零部件件号", "名称"],
-            ["1", None, "Part1"],    # None part_no → skip
+            ["1", None, "Part1"],  # None part_no → skip
             ["2", "P002", "Part2"],
         ]
         ws = _make_ws(data)
@@ -1552,8 +1664,8 @@ class TestEdgeCasesCoverage:
         """build_global_name_dict: skip when pn_clean is < 3 chars (line 1257)."""
         data = [
             ["#", "Part No", "Name"],
-            ["1", "AB", "Short"],       # len 2 after clean → skip
-            ["2", "ABC", "Valid"],       # len 3 → keep
+            ["1", "AB", "Short"],  # len 2 after clean → skip
+            ["2", "ABC", "Valid"],  # len 3 → keep
         ]
         ws = _make_ws(data)
         names = HeuristicAnalyzer.build_global_name_dict(ws, 2, 3, 0, 1)
@@ -1565,7 +1677,7 @@ class TestEdgeCasesCoverage:
         """build_global_name_dict: update existing entry with non-empty name_cn (line 1275)."""
         data = [
             ["#", "Part No", "Name"],
-            ["1", "ABC001", ""],          # empty name first
+            ["1", "ABC001", ""],  # empty name first
             ["2", "ABC001", "Real Name"],  # non-empty name second
         ]
         ws = _make_ws(data)
@@ -1577,7 +1689,7 @@ class TestEdgeCasesCoverage:
         """build_global_name_dict: update existing entry with non-empty name_en (line 1277)."""
         data = [
             ["#", "Part No", "", "Name En"],
-            ["1", "ABC001", "", ""],         # both empty
+            ["1", "ABC001", "", ""],  # both empty
             ["2", "ABC001", "", "English"],  # name_en filled second
         ]
         ws = _make_ws(data)
@@ -1589,6 +1701,7 @@ class TestEdgeCasesCoverage:
 # ═══════════════════════════════════════════════════════════════════════
 #  24. HeuristicAnalyzer.detect_config_columns — расширенные сценарии
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestDetectConfigColumnsExtended:
     def test_vin_boundary_detected(self):
@@ -1608,7 +1721,9 @@ class TestDetectConfigColumnsExtended:
         # Union: both numeric (C4, C5) and S/- (C6) columns are valid configs
         assert 4 in configs, f"C4 (舒享版) should be in configs, got {configs}"
         assert 5 in configs, f"C5 (奢享版) should be in configs, got {configs}"
-        assert 6 in configs, f"C6 (VIN S/-) should be in configs (union approach), got {configs}"
+        assert 6 in configs, (
+            f"C6 (VIN S/-) should be in configs (union approach), got {configs}"
+        )
 
     def test_no_numeric_values_in_candidates(self):
         """Candidate columns have no numeric data → fallback: all candidates returned"""
@@ -1623,7 +1738,9 @@ class TestDetectConfigColumnsExtended:
         # "配置A" and "配置B" are candidates but have no numeric values
         # Fallback: return all candidates
         assert len(configs) > 0, f"Should return candidates as fallback, got {configs}"
-        assert 4 in configs or 5 in configs, f"Should include config candidates, got {configs}"
+        assert 4 in configs or 5 in configs, (
+            f"Should include config candidates, got {configs}"
+        )
 
     def test_empty_candidates_all_meta(self):
         """All non-known columns are meta → empty configs"""
@@ -1637,8 +1754,9 @@ class TestDetectConfigColumnsExtended:
         configs = HeuristicAnalyzer.detect_config_columns(ws, [1], col_types)
         # No numeric non-meta columns → empty
         n_numeric = sum(1 for c in configs if c in (3, 4))
-        assert len(configs) == 0 or n_numeric == 0, \
+        assert len(configs) == 0 or n_numeric == 0, (
             f"Should not detect version/revision as configs, got {configs}"
+        )
 
     def test_config_with_zero_values(self):
         """Config columns with numeric values including 0"""
@@ -1651,4 +1769,6 @@ class TestDetectConfigColumnsExtended:
         col_types = {"part_no": 2, "name_cn": 3}
         configs = HeuristicAnalyzer.detect_config_columns(ws, [1], col_types)
         # "0" is excluded as non-positive, but other values > 0 should count
-        assert 4 in configs or 5 in configs, f"Should detect configs with positive values, got {configs}"
+        assert 4 in configs or 5 in configs, (
+            f"Should detect configs with positive values, got {configs}"
+        )

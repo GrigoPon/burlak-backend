@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from burlak_parser.fuzzy_matcher import (
     FuzzyMatcher,
     is_fuzzy_match,
@@ -18,10 +16,10 @@ from burlak_parser.fuzzy_matcher import (
     normalize_part_number,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 #  1. normalize_part_number
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestNormalizePartNumber:
     def test_removes_dashes(self):
@@ -89,6 +87,7 @@ class TestNormalizePartNumber:
 #  2. is_fuzzy_match
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestIsFuzzyMatch:
     def test_exact_match(self):
         """Exact same string is a match."""
@@ -142,6 +141,7 @@ class TestIsFuzzyMatch:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. is_valid_part_number
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestIsValidPartNumber:
     def test_letters_and_digits(self):
@@ -217,6 +217,7 @@ class TestIsValidPartNumber:
 #  4. FuzzyMatcher — basic
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestFuzzyMatcherBasic:
     def test_single_part(self):
         """Single part in BOM set."""
@@ -254,6 +255,7 @@ class TestFuzzyMatcherBasic:
 # ═══════════════════════════════════════════════════════════════════════
 #  5. FuzzyMatcher — edge cases
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFuzzyMatcherEdgeCases:
     def test_duplicate_normalized_forms(self):
@@ -300,6 +302,7 @@ class TestFuzzyMatcherEdgeCases:
 # ═══════════════════════════════════════════════════════════════════════
 #  6. FuzzyMatcher — integration with real-world scenarios
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFuzzyMatcherRealWorld:
     def test_t1l_part_number(self):

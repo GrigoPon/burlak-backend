@@ -1,15 +1,18 @@
 import os
 import sqlite3
 import threading
-from typing import Generator
+from collections.abc import Generator
 
 import aiosqlite
 import pytest
 from sqlalchemy import create_engine
 
 from app.core.config import get_settings
-from app.db import async_repository, sync_repository
-from app.db import models  # noqa: F401
+from app.db import (
+    async_repository,
+    models,  # noqa: F401
+    sync_repository,
+)
 from app.db.database import Base
 
 

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
@@ -7,7 +7,7 @@ import aiosqlite
 
 async def create_job(db: aiosqlite.Connection) -> int:
     """Creates a new job in the database and returns its ID."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     async with db.execute(
         """
         INSERT INTO jobs (status, total, processed, failed, bom_uploaded, archive_uploaded, created_at, updated_at)
@@ -41,7 +41,7 @@ async def update_job_status(
     db: aiosqlite.Connection, job_id: int, status: str, stage: str | None = None
 ) -> None:
     """Updates the status and stage of a job."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     await db.execute(
         """
         UPDATE jobs
@@ -57,7 +57,7 @@ async def update_file_upload(
     db: aiosqlite.Connection, job_id: int, role: str, path: str, uploaded: bool
 ) -> None:
     """Updates file upload state and path for either 'bom' or 'archive' role."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     uploaded_val = 1 if uploaded else 0
     if role == "bom":
         await db.execute(
@@ -88,7 +88,7 @@ async def create_cards(
     """Creates card records and sets the total card count on the job."""
     if not card_paths:
         return
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     cards_data = [(job_id, path, "pending", now, now) for path in card_paths]
     await db.executemany(
         """
@@ -129,7 +129,7 @@ async def update_mapping_config(
     db: aiosqlite.Connection, job_id: int, mapping_config: dict[str, Any]
 ) -> None:
     """Updates the mapping config field for a job."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     config_json = json.dumps(mapping_config)
     await db.execute(
         """

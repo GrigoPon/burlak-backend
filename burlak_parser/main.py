@@ -16,44 +16,33 @@ import os
 import shutil
 import sys
 import time
-from pathlib import Path
-from typing import List, Optional
 
 from tqdm import tqdm
 
 from burlak_parser.bom_parser import (
     BOMData,
-    BOMService,
-    PartInfo,
-    get_all_config_quantities,
     get_config_quantities,
     parse_bom,
 )
 from burlak_parser.card_parser import (
-    CardService,
-    CardsData,
     parse_cards,
     split_cards_to_files,
 )
 from burlak_parser.comparator import (
-    Discrepancy,
     DiscrepancyType,
-    IntegrityCheck,
-    MatchingEngine,
     MultiConfigComparisonResult,
     compare_all_configs,
     compare_single_config,
     verify_integrity,
 )
+from burlak_parser.diagnostic import (
+    create_diagnostic_from_bom,
+    create_diagnostic_from_cards,
+)
 from burlak_parser.fuzzy_matcher import FuzzyMatcher
 from burlak_parser.report_generator import (
     Reporter,
     create_split_cards_archive,
-)
-from burlak_parser.diagnostic import (
-    DiagnosticDumper,
-    create_diagnostic_from_bom,
-    create_diagnostic_from_cards,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,7 +77,7 @@ def clean_output_dirs(output_dir: str) -> None:
     Args:
         output_dir: Путь к основной директории результатов.
     """
-    dirs_to_clean: List[str] = []
+    dirs_to_clean: list[str] = []
 
     # Основная директория результатов
     if os.path.isdir(output_dir):
@@ -117,7 +106,9 @@ def select_config_interactive(bom: BOMData) -> str:
         sys.exit(1)
 
     if len(configs) == 1:
-        print(f"\u2705 Автоматически выбрана единственная комплектация: {configs[0][:60]}")
+        print(
+            f"\u2705 Автоматически выбрана единственная комплектация: {configs[0][:60]}"
+        )
         return configs[0]
 
     print(f"\n{'=' * 60}")
@@ -131,7 +122,9 @@ def select_config_interactive(bom: BOMData) -> str:
 
     while True:
         try:
-            choice = input(f"\nВыберите комплектацию (1-{len(display_configs)}): ").strip()
+            choice = input(
+                f"\nВыберите комплектацию (1-{len(display_configs)}): "
+            ).strip()
             idx = int(choice) - 1
             if 0 <= idx < len(display_configs):
                 return configs[idx]
@@ -144,12 +137,12 @@ def select_config_interactive(bom: BOMData) -> str:
 def run_pipeline(
     bom_path: str,
     cards_path: str,
-    config_name: Optional[str] = None,
-    output_dir: Optional[str] = None,
+    config_name: str | None = None,
+    output_dir: str | None = None,
     auto_split: bool = True,
     use_fuzzy: bool = True,
     single_config: bool = False,
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
     show_split_stats: bool = False,
     diagnostic: bool = False,
 ) -> None:
@@ -176,7 +169,7 @@ def run_pipeline(
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\n{'=' * 60}")
-    print(f"\U0001f680 Burlak Parser — Система сверки BOM и операционных карт")
+    print("\U0001f680 Burlak Parser — Система сверки BOM и операционных карт")
     print(f"{'=' * 60}")
     print(f"BOM файл: {bom_path}")
     print(f"Карты:    {cards_path}")
@@ -191,7 +184,9 @@ def run_pipeline(
         bom = parse_bom(bom_path)
         pbar.update(1)
 
-    print(f"\n\u2705 BOM загружен: {len(bom.parts)} деталей, {len(bom.config_names)} комплектаций")
+    print(
+        f"\n\u2705 BOM загружен: {len(bom.parts)} деталей, {len(bom.config_names)} комплектаций"
+    )
 
     # ── Диагностический дамп BOM ──
     if diagnostic:
@@ -200,12 +195,14 @@ def run_pipeline(
         bom_dump_path = create_diagnostic_from_bom(bom, diag_dir)
         print(f"   \U0001f4cb Diagnostic: BOM dump → {bom_dump_path}")
     if not single_config:
-        print(f"   Будут обработаны ВСЕ {len(bom.config_names)} комплектаций одновременно.")
+        print(
+            f"   Будут обработаны ВСЕ {len(bom.config_names)} комплектаций одновременно."
+        )
     else:
         if config_name:
             if config_name not in bom.config_quantities:
                 print(f"\n\u274c Комплектация '{config_name}' не найдена!")
-                print(f"Доступные варианты (первые 5):")
+                print("Доступные варианты (первые 5):")
                 for c in bom.config_names[:5]:
                     print(f"  - {c}")
                 sys.exit(1)
@@ -231,7 +228,9 @@ def run_pipeline(
     print(f"   Служебных файлов пропущено: {cards.service_files_skipped}")
     if cards.corrupted_files:
         print(f"   \u26a0\ufe0f  Повреждённых файлов: {len(cards.corrupted_files)}")
-    print(f"   Всего листов: {cards.total_sheets_processed + cards.total_sheets_skipped}")
+    print(
+        f"   Всего листов: {cards.total_sheets_processed + cards.total_sheets_skipped}"
+    )
     print(f"   Из них непустых: {cards.total_sheets_processed}")
     print(f"   Пропущено (пустых): {cards.total_sheets_skipped}")
     print(f"   Уникальных деталей найдено: {len(cards.all_parts)}")
@@ -249,13 +248,16 @@ def run_pipeline(
     if auto_split:
         # Используем кэш для инкрементальной обработки
         from burlak_parser.cache import ProcessingCache
+
         cache_dir = os.path.join(output_dir, ".burlak_cache")
         cache = ProcessingCache(cache_dir)
 
         print("\u2702\ufe0f  Разделение многолистовых карт на отдельные файлы...")
         split_dir = os.path.join(output_dir, "split_cards")
         created_files = split_cards_to_files(
-            cards, split_dir, max_workers=max_workers,
+            cards,
+            split_dir,
+            max_workers=max_workers,
         )
 
         # Сохраняем кэш
@@ -271,29 +273,33 @@ def run_pipeline(
         print(f"   Повреждённых при split: {split_stats.total_errors}")
 
         if split_stats.openpyxl_fallback_count > 0:
-            print(f"   \u2705 Успешно спасены через openpyxl (fallback): {split_stats.openpyxl_fallback_count} файлов")
+            print(
+                f"   \u2705 Успешно спасены через openpyxl (fallback): {split_stats.openpyxl_fallback_count} файлов"
+            )
             for fname in split_stats.openpyxl_fallback_files:
                 print(f"     - {fname}")
 
         if show_split_stats and split_stats is not None:
             # ── Детальная статистика split ──
-            print(f"\n   📊 Детальная статистика split:")
+            print("\n   📊 Детальная статистика split:")
             print(f"     - Всего файлов в картах: {len(cards.card_results)}")
-            print(f"     - Служебных файлов (пропущено): {split_stats.total_service_files}")
+            print(
+                f"     - Служебных файлов (пропущено): {split_stats.total_service_files}"
+            )
             print(f"     - Всего листов: {split_stats.total_sheets_all}")
             print(f"       ├ Разделено: {split_stats.total_sheets_split}")
             print(f"       └ Пропущено: {split_stats.total_sheets_skipped}")
 
             # Причины пропуска листов
             if split_stats.total_sheets_skipped > 0:
-                print(f"\n   🔍 Причины пропуска листов:")
+                print("\n   🔍 Причины пропуска листов:")
                 for reason, count in split_stats.get_top_skip_reasons():
                     print(f"     - {reason}: {count}")
 
             # Топ файлов по пропускам
             top_skips = split_stats.get_files_with_most_skips(5)
             if top_skips:
-                print(f"\n   📁 Файлы с наибольшим числом пропущенных листов:")
+                print("\n   📁 Файлы с наибольшим числом пропущенных листов:")
                 for fname, total, skipped in top_skips:
                     print(f"     - {fname[:55]:55s} всего={total} пропущено={skipped}")
 
@@ -306,7 +312,7 @@ def run_pipeline(
                 if len(error_files) > 5:
                     print(f"     ... и ещё {len(error_files) - 5}")
 
-        print(f"\n\U0001f4e6 Создание ZIP-архива...")
+        print("\n\U0001f4e6 Создание ZIP-архива...")
         zip_path = os.path.join(output_dir, "split_cards.zip")
         create_split_cards_archive(split_dir, zip_path)
         print()
@@ -319,7 +325,9 @@ def run_pipeline(
         all_bom_parts = set(bom.parts.keys())
         fuzzy_matcher = FuzzyMatcher(all_bom_parts) if use_fuzzy else None
         single_result = compare_single_config(
-            bom_config_parts, cards, config_name=selected_config,
+            bom_config_parts,
+            cards,
+            config_name=selected_config,
             fuzzy_matcher=fuzzy_matcher,
         )
         result = MultiConfigComparisonResult(
@@ -330,21 +338,29 @@ def run_pipeline(
             total_cards_unique_parts=len(cards.all_parts),
         )
 
-        print(f"\n\U0001f4ca Результаты сверки:")
+        print("\n\U0001f4ca Результаты сверки:")
         print(f"{'\u2500' * 50}")
         print(f"  Деталей в BOM:          {single_result.total_bom_parts:>6}")
         print(f"  Деталей в картах:       {single_result.total_cards_parts:>6}")
         print(f"  Совпало:                {single_result.matched_parts:>6}")
         print(f"  Fuzzy match:            {single_result.fuzzy_matched:>6}")
         print(f"  Расхождений:            {len(single_result.discrepancies):>6}")
-        print(f"    \u251c Только в BOM:       {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM):>6}")
-        print(f"    \u251c Только в картах:    {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}")
-        print(f"    \u2514 Конфликт количества: {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}")
+        print(
+            f"    \u251c Только в BOM:       {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_BOM):>6}"
+        )
+        print(
+            f"    \u251c Только в картах:    {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.ONLY_IN_CARDS):>6}"
+        )
+        print(
+            f"    \u2514 Конфликт количества: {sum(1 for d in single_result.discrepancies if d.discrepancy_type == DiscrepancyType.QUANTITY_MISMATCH):>6}"
+        )
     else:
         # Новый режим: все комплектации
         result = compare_all_configs(bom, cards, use_fuzzy=use_fuzzy)
 
-        print(f"\n\U0001f4ca Результаты сверки (ВСЕ {result.total_configs} комплектаций):")
+        print(
+            f"\n\U0001f4ca Результаты сверки (ВСЕ {result.total_configs} комплектаций):"
+        )
         print(f"{'\u2500' * 50}")
         print(f"  Уникальных деталей BOM:  {result.total_bom_unique_parts:>6}")
         print(f"  Уникальных деталей карт: {result.total_cards_unique_parts:>6}")
@@ -352,7 +368,9 @@ def run_pipeline(
 
         for cr in result.config_results[:5]:
             short = cr.config_name[:45]
-            print(f"  {short:45s}  BOM={cr.total_bom_parts:>4}  Карты={cr.total_cards_parts:>4}  Disc={len(cr.discrepancies):>4}")
+            print(
+                f"  {short:45s}  BOM={cr.total_bom_parts:>4}  Карты={cr.total_cards_parts:>4}  Disc={len(cr.discrepancies):>4}"
+            )
         if result.total_configs > 5:
             print(f"  ... и ещё {result.total_configs - 5} комплектаций")
 
@@ -365,20 +383,22 @@ def run_pipeline(
     print(f"   Excel-отчёт: {outputs.get('excel_report', 'N/A')}")
 
     # ── Верификация целостности ──
-    print(f"\n\U0001f50d Верификация целостности:")
+    print("\n\U0001f50d Верификация целостности:")
     print(f"{'\u2500' * 60}")
 
     integrity = verify_integrity(result)
 
     if integrity.is_ok:
-        print(f"  \u2705 {integrity.configs_ok}/{integrity.total_configs} конфигураций: matched + discrepancies = total_bom_parts")
-        print(f"  \u2705 Сумма типов расхождений совпадает с общим количеством")
+        print(
+            f"  \u2705 {integrity.configs_ok}/{integrity.total_configs} конфигураций: matched + discrepancies = total_bom_parts"
+        )
+        print("  \u2705 Сумма типов расхождений совпадает с общим количеством")
     else:
         for issue in integrity.config_issues:
             logger.warning("Нарушение целостности: %s", issue)
         if integrity.global_issue:
             logger.warning("Нарушение целостности: %s", integrity.global_issue)
-        print(f"  \u26a0\ufe0f  Обнаружены нарушения целостности (см. лог)")
+        print("  \u26a0\ufe0f  Обнаружены нарушения целостности (см. лог)")
     print()
 
     elapsed = time.time() - start_time
@@ -390,7 +410,9 @@ def run_pipeline(
     # Выводим первые несколько расхождений в консоль
     if result.all_discrepancies:
         n_show = min(10, len(result.all_discrepancies))
-        print(f"\n\U0001f4cb Первые расхождения ({n_show} из {len(result.all_discrepancies)}):")
+        print(
+            f"\n\U0001f4cb Первые расхождения ({n_show} из {len(result.all_discrepancies)}):"
+        )
         print(f"{'\u2500' * 80}")
         for disc in result.all_discrepancies[:10]:
             print(f"  {disc}")
@@ -431,27 +453,32 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--bom", "-b",
+        "--bom",
+        "-b",
         required=True,
         help="Путь к BOM-файлу (.xlsx)",
     )
     parser.add_argument(
-        "--cards", "-c",
+        "--cards",
+        "-c",
         required=True,
         help="Путь к папке с операционными картами или ZIP-архиву",
     )
     parser.add_argument(
-        "--config", "-k",
+        "--config",
+        "-k",
         default=None,
         help="Название комплектации (только для --single-config режима)",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default=None,
         help="Директория для результатов (по умолчанию: ./output)",
     )
     parser.add_argument(
-        "--single-config", "-s",
+        "--single-config",
+        "-s",
         action="store_true",
         help="Обработать только одну комплектацию (старый режим)",
     )
@@ -466,28 +493,33 @@ def main() -> None:
         help="Отключить нечеткое сравнение парт-номеров",
     )
     parser.add_argument(
-        "--workers", "-w",
+        "--workers",
+        "-w",
         type=int,
         default=None,
         help=f"Количество процессов (по умолчанию: количество CPU = {os.cpu_count() or 4})",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Подробный вывод (debug)",
     )
     parser.add_argument(
-        "--split-stats", "-S",
+        "--split-stats",
+        "-S",
         action="store_true",
         help="Показать детальную статистику разделения файлов (топ причин, пропуски, ошибки)",
     )
     parser.add_argument(
-        "--diagnostic", "-d",
+        "--diagnostic",
+        "-d",
         action="store_true",
         help="Режим диагностики: вывод промежуточных данных в JSON (BOM_dump, OC_dump, schema)",
     )
     parser.add_argument(
-        "--quiet", "-q",
+        "--quiet",
+        "-q",
         action="store_true",
         help="Тихий режим (только ошибки и предупреждения)",
     )
@@ -511,7 +543,9 @@ def main() -> None:
     # File size validation
     bom_size_mb = os.path.getsize(args.bom) / (1024 * 1024)
     if bom_size_mb > 200:
-        logger.warning("BOM file is very large (%.1f MB) — may use significant memory", bom_size_mb)
+        logger.warning(
+            "BOM file is very large (%.1f MB) — may use significant memory", bom_size_mb
+        )
     logger.info("BOM file size: %.1f MB", bom_size_mb)
 
     try:

@@ -14,7 +14,6 @@
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -59,7 +58,8 @@ def _check_brand(brand: str, output_dir: str) -> dict:
     # Проверка split_cards
     if os.path.isdir(split_dir):
         xlsx_files = [
-            f for f in os.listdir(split_dir)
+            f
+            for f in os.listdir(split_dir)
             if f.endswith(".xlsx") and not f.startswith("~$")
         ]
         result["xlsx_count"] = len(xlsx_files)
@@ -71,7 +71,7 @@ def _check_brand(brand: str, output_dir: str) -> dict:
     if os.path.isfile(manifest_path):
         result["has_manifest"] = True
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
+            with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
             total_manifested = sum(len(v) for v in manifest.values())
             result["manifest_count"] = total_manifested
@@ -89,9 +89,7 @@ def _check_brand(brand: str, output_dir: str) -> dict:
                     )
                     result["ok"] = False
                 if not isinstance(files, list):
-                    result["errors"].append(
-                        f"Manifest value for '{src}' is not a list"
-                    )
+                    result["errors"].append(f"Manifest value for '{src}' is not a list")
                     result["ok"] = False
                 for f in files:
                     if not isinstance(f, str):
@@ -103,7 +101,7 @@ def _check_brand(brand: str, output_dir: str) -> dict:
             result["errors"].append(f"Manifest JSON parse error: {e}")
             result["ok"] = False
     else:
-        result["errors"].append(f"split_manifest.json not found")
+        result["errors"].append("split_manifest.json not found")
         result["ok"] = False
 
     # Проверка discrepancies.xlsx
@@ -129,13 +127,11 @@ def _check_brand(brand: str, output_dir: str) -> dict:
     if os.path.isfile(report_path):
         result["has_report"] = True
         try:
-            with open(report_path, "r", encoding="utf-8") as f:
+            with open(report_path, encoding="utf-8") as f:
                 content = f.read()
             # Отчёт должен содержать заголовок
             if "ОТЧЁТ" not in content or "ПРОВЕРКИ" not in content:
-                result["errors"].append(
-                    "report.txt missing report header"
-                )
+                result["errors"].append("report.txt missing report header")
                 result["ok"] = False
         except Exception as e:
             result["errors"].append(f"Cannot read report.txt: {e}")
@@ -175,7 +171,7 @@ def _run_determinism_check(brand: str, output_dir: str) -> dict:
         result["errors"].append("No manifest for determinism check")
         return result
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     # Проверка: манифест должен быть отсортирован по ключам
@@ -264,9 +260,7 @@ def test_all_brands_manifest_integrity():
             continue  # Skip if not generated yet
         check = _check_brand(brand, output_dir)
         assert check["has_manifest"], f"{brand}: missing split_manifest.json"
-        assert check["has_discrepancies"], (
-            f"{brand}: missing discrepancies.xlsx"
-        )
+        assert check["has_discrepancies"], f"{brand}: missing discrepancies.xlsx"
         assert check["has_report"], f"{brand}: missing report.txt"
         # xlsx_count must match manifest_count
         assert check["xlsx_count"] == check["manifest_count"], (
@@ -289,8 +283,7 @@ def test_all_brands_determinism():
             continue
         det = _run_determinism_check(brand, output_dir)
         assert det["ok"], (
-            f"{brand}: determinism check failed: "
-            f"{'; '.join(det['errors'])}"
+            f"{brand}: determinism check failed: {'; '.join(det['errors'])}"
         )
 
 
@@ -302,7 +295,7 @@ def test_split_manifest_json_structure():
     if not os.path.isfile(manifest_path):
         return  # Skip if not generated
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     # Тип — dict
@@ -314,17 +307,11 @@ def test_split_manifest_json_structure():
     # Каждый источник должен иметь список файлов
     for src, files in manifest.items():
         assert isinstance(src, str), f"Source key must be string: {src}"
-        assert isinstance(files, list), (
-            f"Files for {src} must be list"
-        )
+        assert isinstance(files, list), f"Files for {src} must be list"
         assert len(files) > 0, f"Source {src} must have at least 1 file"
         for f in files:
-            assert isinstance(f, str), (
-                f"File entry must be string: {f}"
-            )
-            assert f.endswith(".xlsx"), (
-                f"File entry must end with .xlsx: {f}"
-            )
+            assert isinstance(f, str), f"File entry must be string: {f}"
+            assert f.endswith(".xlsx"), f"File entry must end with .xlsx: {f}"
 
 
 def test_report_txt_contains_results():
@@ -333,7 +320,7 @@ def test_report_txt_contains_results():
     if not os.path.isfile(report_path):
         return  # Skip if not generated
 
-    with open(report_path, "r", encoding="utf-8") as f:
+    with open(report_path, encoding="utf-8") as f:
         content = f.read()
 
     # Должен содержать количество комплектаций

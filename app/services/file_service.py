@@ -85,9 +85,7 @@ class FileService:
         )
 
         if not chunk_files:
-            raise FileUploadError(
-                f"No chunks found for role '{role}' in job {job_id}"
-            )
+            raise FileUploadError(f"No chunks found for role '{role}' in job {job_id}")
 
         total_chunks = len(chunk_files)
         output_path = assemble_chunks(job_id, role, total_chunks)

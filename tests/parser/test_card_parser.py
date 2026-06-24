@@ -16,50 +16,45 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import openpyxl
 import pytest
 from openpyxl import Workbook
 
 from burlak_parser.card_parser import (
-    CardPart,
+    SKIP_REASON_NO_DATA,
+    SKIP_REASON_TEMPLATE,
+    TEMPLATE_SHEET_KEYWORDS,
     CardParseResult,
+    CardPart,
     CardsData,
     CardService,
     CardSheetInfo,
     ExcelReader,
     ExcelSheet,
     FileSplitStats,
-    SKIP_REASON_NO_DATA,
-    SKIP_REASON_TEMPLATE,
     SplitStatistics,
-    TEMPLATE_SHEET_KEYWORDS,
     _check_sheet_has_data,
     _collect_all_tables,
     _collect_raw_rows,
     _extract_card_number,
     _find_excel_files,
     _merge_multiline_part_numbers,
-    _safe_remove,
     _safe_name,
+    _safe_remove,
     _walk_extracted_dir,
     parse_card_file,
     parse_cards,
     split_cards_to_files,
 )
-from burlak_parser.heuristic_analyzer import (
-    HeuristicAnalyzer,
-    clean_part_number,
-    is_valid_part_number,
-)
 
 # ═══════════════════════════════════════════════════════════════════════
 #  23. ExcelSheet.cell_value — xlrd edge cases (153, 157-158)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExcelSheetCellValueXlrd:
     """ExcelSheet.cell_value в xlrd-ветке.
@@ -73,17 +68,25 @@ class TestExcelSheetCellValueXlrd:
     def test_empty_string_returns_none(self, monkeypatch):
         """xlrd возвращает пустую строку → cell_value возвращает None."""
         import xlrd as real_xlrd
+
         class MockSheet:
             nrows, ncols = 2, 2
+
             def cell_value(self, r, c):
                 return ""  # empty string
+
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
+
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda p: MockBook())
 
         fd, p = tempfile.mkstemp(suffix=".xls", prefix="xlrempty_")
-        os.close(fd); open(p, "w").close()
+        os.close(fd)
+        open(p, "w").close()
         try:
             reader = ExcelReader(p)
             sheet = reader.get_sheet("Sheet1")
@@ -96,17 +99,25 @@ class TestExcelSheetCellValueXlrd:
     def test_float_to_int_conversion(self, monkeypatch):
         """xlrd float → int: cell_value(2,2)=2.0 → ExcelSheet возвращает 2."""
         import xlrd as real_xlrd
+
         class MockSheet:
             nrows, ncols = 2, 2
+
             def cell_value(self, r, c):
                 return 2.0  # float
+
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
+
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda p: MockBook())
 
         fd, p = tempfile.mkstemp(suffix=".xls", prefix="xlrint_")
-        os.close(fd); open(p, "w").close()
+        os.close(fd)
+        open(p, "w").close()
         try:
             reader = ExcelReader(p)
             sheet = reader.get_sheet("Sheet1")
@@ -119,17 +130,25 @@ class TestExcelSheetCellValueXlrd:
     def test_regular_value_returned(self, monkeypatch):
         """xlrd не-float значение → возвращается как есть (line 158)."""
         import xlrd as real_xlrd
+
         class MockSheet:
             nrows, ncols = 2, 2
+
             def cell_value(self, r, c):
                 return "ABC-123"  # regular string
+
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
+
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda p: MockBook())
 
         fd, p = tempfile.mkstemp(suffix=".xls", prefix="xlrreg_")
-        os.close(fd); open(p, "w").close()
+        os.close(fd)
+        open(p, "w").close()
         try:
             reader = ExcelReader(p)
             sheet = reader.get_sheet("Sheet1")
@@ -142,17 +161,25 @@ class TestExcelSheetCellValueXlrd:
     def test_xlrd_exception_returns_none(self, monkeypatch):
         """Исключение в xlrd cell_value → except возвращает None."""
         import xlrd as real_xlrd
+
         class MockSheet:
             nrows, ncols = 2, 2
+
             def cell_value(self, r, c):
                 raise IndexError("mock")
+
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
+
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda p: MockBook())
 
         fd, p = tempfile.mkstemp(suffix=".xls", prefix="xlrex_")
-        os.close(fd); open(p, "w").close()
+        os.close(fd)
+        open(p, "w").close()
         try:
             reader = ExcelReader(p)
             sheet = reader.get_sheet("Sheet1")
@@ -167,12 +194,12 @@ class TestExcelSheetCellValueXlrd:
 #  24. _extract_card_number — fallback to basename (220-221)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractCardNumberAbsoluteFallback:
     """Абсолютный fallback: extract_card_number вернул None → basename."""
 
     def test_fallback_no_card_number(self, monkeypatch):
         """Когда extract_card_number (heuristic) возвращает None → os.path.splitext(basename)[0]."""
-        from burlak_parser.heuristic_analyzer import extract_card_number as ha_fn
         monkeypatch.setattr(
             "burlak_parser.card_parser.extract_card_number",
             lambda fp, ws: None,
@@ -185,6 +212,7 @@ class TestExtractCardNumberAbsoluteFallback:
 # ═══════════════════════════════════════════════════════════════════════
 #  25. _merge_multiline — trailing buffer flush with valid PN (261)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestMergeMultilineBufferFlush:
     """_merge_multiline_part_numbers — trailing buffer flush (line 261)."""
@@ -202,6 +230,7 @@ class TestMergeMultilineBufferFlush:
 # ═══════════════════════════════════════════════════════════════════════
 #  26. parse_card_file — max_row=0 / max_col=0 (325-331)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseCardFileEmptySheetCoverage:
     """parse_card_file: пустые листы с max_row=0 или max_col=0 (строки 325-331)."""
@@ -233,18 +262,26 @@ class TestParseCardFileEmptySheetCoverage:
     def test_empty_sheet_via_xlrd(self, monkeypatch):
         """Лист с nrows=0 через xlrd → max_row=0 → блок 325-331."""
         import xlrd as real_xlrd
+
         class MockSheet:
             nrows = 0
             ncols = 0
+
             def cell_value(self, r, c):
                 raise IndexError()
+
         class MockBook:
-            def sheet_names(self): return ["Empty"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Empty"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
+
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda p: MockBook())
 
         fd, p = tempfile.mkstemp(suffix=".xls")
-        os.close(fd); open(p, "w").close()
+        os.close(fd)
+        open(p, "w").close()
         try:
             result = parse_card_file(p)
             assert len(result.parts) == 0
@@ -258,16 +295,19 @@ class TestParseCardFileEmptySheetCoverage:
 #  27. _collect_raw_rows — whitespace skip & exception (495, 520-522)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectRawRowsEdgeCoverage:
     """_collect_raw_rows: пробельный part_no и исключение (строки 495, 520-522)."""
 
     def test_whitespace_only_part_no_skipped(self):
         """Ячейка с пробелами → raw_part_no_str="" → continue (line 495)."""
-        es = _make_excel_sheet([
-            ["Part No"],
-            ["   "],   # whitespace only → str strip = "" → continue
-            ["P001"],  # this one should be collected
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No"],
+                ["   "],  # whitespace only → str strip = "" → continue
+                ["P001"],  # this one should be collected
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 3, 1, 1, 0, 0, "test.xlsx")
         assert len(rows) == 1, f"Expected 1 (whitespace skipped), got {len(rows)}"
         assert rows[0][1] == "P001"
@@ -276,10 +316,12 @@ class TestCollectRawRowsEdgeCoverage:
         """Исключение в теле цикла → ловится на 520-522."""
         es = _make_excel_sheet([["P001"], ["P002"], ["P003"]])  # 3 data rows
         orig_cell = ExcelSheet.cell_value
+
         def mock_cell(self_obj, row, col):
             if row == 2:  # first data row raises
                 raise ValueError("mock error")
             return orig_cell(self_obj, row, col)
+
         monkeypatch.setattr(ExcelSheet, "cell_value", mock_cell)
 
         rows = _collect_raw_rows(es, 1, 3, 1, 1, 0, 0, "test.xlsx")
@@ -292,21 +334,26 @@ class TestCollectRawRowsEdgeCoverage:
 #  28. _collect_all_tables — header already processed & empty log (556, 608)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectAllTablesEdgeCoverage:
     """_collect_all_tables: header_row < start_search и total_part_nos_collected==0."""
 
     def test_header_already_processed_breaks(self):
         """find_part_table returns header_row < start_search → break."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],  # R1 — header
-            ["1", "P001"],         # R2 — data
-            [None, None],
-            [None, None],
-            [None, None],          # R5 — 3 empty rows → boundary
-            ["1", "NOT_DATA"],    # R6 — looks like data but starts a 'table' below
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],  # R1 — header
+                ["1", "P001"],  # R2 — data
+                [None, None],
+                [None, None],
+                [None, None],  # R5 — 3 empty rows → boundary
+                ["1", "NOT_DATA"],  # R6 — looks like data but starts a 'table' below
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 6, 2, "test.xlsx")
-        assert len(parts) == 1, f"Expected 1 part (second table skipped), got {len(parts)}"
+        assert len(parts) == 1, (
+            f"Expected 1 part (second table skipped), got {len(parts)}"
+        )
         assert table_count == 1
         assert parts[0][0] == "P001"
 
@@ -321,6 +368,7 @@ class TestCollectAllTablesEdgeCoverage:
 # ═══════════════════════════════════════════════════════════════════════
 #  29. _find_excel_files — zip auto extract_dir (608)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindExcelFilesAutoExtract:
     """_find_excel_files с ZIP без extract_dir → auto tempdir (line 608)."""
@@ -346,6 +394,7 @@ class TestFindExcelFilesAutoExtract:
 #  30. _walk_extracted_dir — nested zip error (666-667)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestWalkExtractedDirNestedZipError:
     """_walk_extracted_dir: ошибка распаковки вложенного ZIP (строки 666-667)."""
 
@@ -361,7 +410,7 @@ class TestWalkExtractedDirNestedZipError:
             xlsx = os.path.join(tmpdir, "normal.xlsx")
             _touch_excel(xlsx)
 
-            files: List[str] = []
+            files: list[str] = []
             seen: set = set()
             _walk_extracted_dir(tmpdir, tmpdir, files, seen, is_temp=True)
             # Bad zip should be removed (is_temp=True), normal xlsx found
@@ -376,6 +425,7 @@ class TestWalkExtractedDirNestedZipError:
 #  31. _safe_remove — exception handling (676-677)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSafeRemoveException:
     """_safe_remove: os.remove бросает исключение → pass (строки 676-677)."""
 
@@ -389,6 +439,7 @@ class TestSafeRemoveException:
 
         def mock_remove(path):
             raise PermissionError("Permission denied")
+
         monkeypatch.setattr("os.remove", mock_remove)
         # Вызываем модульную _safe_remove, а не тестовую helper
         _cp._safe_remove("/some/path")  # no crash
@@ -397,6 +448,7 @@ class TestSafeRemoveException:
 # ═══════════════════════════════════════════════════════════════════════
 #  32. parse_cards — parallel errors & service files (776-780, 806-816)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseCardsErrors:
     """parse_cards: ошибки в параллельном парсинге и обработка служебных файлов."""
@@ -457,10 +509,12 @@ class TestParseCardsErrors:
         """Ошибка при обработке служебного файла → except (строки 815-816)."""
         # Мокаем parse_card_file для служебных файлов
         original_parse = parse_card_file
+
         def mock_parse(fp, is_service_file=False):
             if is_service_file:
                 raise ValueError("Mock service file error")
             return original_parse(fp, is_service_file=is_service_file)
+
         monkeypatch.setattr(
             "burlak_parser.card_parser.parse_card_file",
             mock_parse,
@@ -493,6 +547,7 @@ class TestParseCardsErrors:
 # ═══════════════════════════════════════════════════════════════════════
 #  33. split_cards_to_files — покрытие всех строк (938-990)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitCardsToFiles:
     """split_cards_to_files — все ветки.
@@ -561,7 +616,9 @@ class TestSplitCardsToFiles:
             stats = cd.split_stats
             assert stats is not None
             assert stats.total_sheets_skipped == 1
-            assert "空表_Empty" in stats.file_stats[0].skip_reasons.get(SKIP_REASON_TEMPLATE, [])
+            assert "空表_Empty" in stats.file_stats[0].skip_reasons.get(
+                SKIP_REASON_TEMPLATE, []
+            )
         finally:
             _rmtree(tmpdir)
 
@@ -570,7 +627,8 @@ class TestSplitCardsToFiles:
         from burlak_parser import splitter as splitter_mod
 
         monkeypatch.setattr(
-            splitter_mod, "_extract_to_path_worker",
+            splitter_mod,
+            "_extract_to_path_worker",
             _mock_extract_success,
         )
 
@@ -584,7 +642,9 @@ class TestSplitCardsToFiles:
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
         try:
-            files = split_cards_to_files(cd, tmpdir, split_all_non_empty=False, max_workers=1)
+            files = split_cards_to_files(
+                cd, tmpdir, split_all_non_empty=False, max_workers=1
+            )
             assert len(files) == 1
         finally:
             _rmtree(tmpdir)
@@ -612,20 +672,25 @@ class TestSplitCardsToFiles:
         from burlak_parser import splitter as splitter_mod
 
         monkeypatch.setattr(
-            splitter_mod, "_extract_to_path_worker",
+            splitter_mod,
+            "_extract_to_path_worker",
             _mock_extract_success,
         )
 
         # Создаём 2 задачи
         r1 = CardParseResult(
-            card_number="C010", file_path="test1.xlsx",
+            card_number="C010",
+            file_path="test1.xlsx",
             sheets=[CardSheetInfo("C010", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         r2 = CardParseResult(
-            card_number="C011", file_path="test2.xlsx",
+            card_number="C011",
+            file_path="test2.xlsx",
             sheets=[CardSheetInfo("C011", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[r1, r2])
         tmpdir = str(tmp_path)
@@ -644,14 +709,17 @@ class TestSplitCardsToFiles:
                 raise ValueError("Mock split error")
 
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
+            splitter_mod,
+            "CardSplitter",
             lambda **kw: MockSplitter(),
         )
 
         result = CardParseResult(
-            card_number="C020", file_path="test.xlsx",
+            card_number="C020",
+            file_path="test.xlsx",
             sheets=[CardSheetInfo("C020", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -673,14 +741,17 @@ class TestSplitCardsToFiles:
                 raise ValueError("error")
 
         monkeypatch.setattr(
-            splitter_mod, "CardSplitter",
+            splitter_mod,
+            "CardSplitter",
             lambda **kw: MockSplitter(),
         )
 
         result = CardParseResult(
-            card_number="C030", file_path="test.xlsx",
+            card_number="C030",
+            file_path="test.xlsx",
             sheets=[CardSheetInfo("C030", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         assert cd.corrupted_files == [], "Default should be empty list"
@@ -697,7 +768,8 @@ class TestSplitCardsToFiles:
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
 
-def _make_ws(data: List[List[Optional[Any]]]) -> Any:
+
+def _make_ws(data: list[list[Any | None]]) -> Any:
     """Create in-memory openpyxl worksheet."""
     wb = Workbook()
     ws = wb.active
@@ -708,14 +780,14 @@ def _make_ws(data: List[List[Optional[Any]]]) -> Any:
     return ws
 
 
-def _make_excel_sheet(data: List[List[Optional[Any]]]) -> ExcelSheet:
+def _make_excel_sheet(data: list[list[Any | None]]) -> ExcelSheet:
     """Create an ExcelSheet wrapper from data rows."""
     ws = _make_ws(data)
     return ExcelSheet(ws, "openpyxl")
 
 
 def _make_card_xlsx(
-    data: List[List[Optional[Any]]],
+    data: list[list[Any | None]],
     file_name: str = "test_card.xlsx",
 ) -> str:
     """Create a temporary .xlsx file for parse_card_file testing."""
@@ -735,6 +807,7 @@ def _make_card_xlsx(
 # ═══════════════════════════════════════════════════════════════════════
 #  1. Data Structures
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCardSheetInfo:
     def test_default_creation(self):
@@ -760,7 +833,9 @@ class TestCardSheetInfo:
 
 class TestCardPart:
     def test_default_creation(self):
-        cp = CardPart(part_number="ABC001", quantity=2.0, source_card="C001", source_sheet="S1")
+        cp = CardPart(
+            part_number="ABC001", quantity=2.0, source_card="C001", source_sheet="S1"
+        )
         assert cp.part_number == "ABC001"
         assert cp.quantity == 2.0
         assert cp.source_card == "C001"
@@ -782,8 +857,12 @@ class TestCardParseResult:
 
     def test_with_parts(self):
         parts = [
-            CardPart(part_number="P001", quantity=1.0, source_card="C001", source_sheet="S1"),
-            CardPart(part_number="P002", quantity=2.0, source_card="C001", source_sheet="S1"),
+            CardPart(
+                part_number="P001", quantity=1.0, source_card="C001", source_sheet="S1"
+            ),
+            CardPart(
+                part_number="P002", quantity=2.0, source_card="C001", source_sheet="S1"
+            ),
         ]
         result = CardParseResult(
             card_number="C001",
@@ -792,7 +871,7 @@ class TestCardParseResult:
             parts=parts,
             aggregated_parts={"P001": 1.0, "P002": 2.0},
             is_service_file=True,
-            )
+        )
         assert len(result.parts) == 2
         assert result.is_service_file is True is True
 
@@ -816,30 +895,37 @@ class TestCardsData:
 #  2. ExcelSheet
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExcelSheet:
     def test_max_row(self):
-        es = _make_excel_sheet([
-            ["A", "B"],
-            ["C", "D"],
-            ["E", "F"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["A", "B"],
+                ["C", "D"],
+                ["E", "F"],
+            ]
+        )
         assert es.max_row == 3
         assert es.max_column == 2
 
     def test_cell_value(self):
-        es = _make_excel_sheet([
-            ["Hello", "World"],
-            [None, 42],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Hello", "World"],
+                [None, 42],
+            ]
+        )
         assert es.cell_value(1, 1) == "Hello"
         assert es.cell_value(1, 2) == "World"
         assert es.cell_value(2, 1) is None
         assert es.cell_value(2, 2) == 42
 
     def test_multiline_cell(self):
-        es = _make_excel_sheet([
-            ["序号\nСерийный номер", "零部件代号\nКод детали"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号\nСерийный номер", "零部件代号\nКод детали"],
+            ]
+        )
         val = es.cell_value(1, 1)
         assert val is not None
         assert "序号" in str(val)
@@ -853,6 +939,7 @@ class TestExcelSheet:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. _check_sheet_has_data
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCheckSheetHasData:
     def test_non_empty_sheet(self):
@@ -890,15 +977,18 @@ class TestCheckSheetHasData:
 #  4. _collect_raw_rows — basic collection
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectRawRows:
     def test_normal_collection(self):
         """T1L card: part_no=C1, qty=C3, name=C2, data rows after header."""
-        es = _make_excel_sheet([
-            ["物料编码", "零件名称", "数量", "单位"],
-            ["P001", "Part1", "2", "pcs"],
-            ["P002", "Part2", "1", "pcs"],
-            ["P003", "Part3", "3", "pcs"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "零件名称", "数量", "单位"],
+                ["P001", "Part1", "2", "pcs"],
+                ["P002", "Part2", "1", "pcs"],
+                ["P003", "Part3", "3", "pcs"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 4, 1, 3, 2, "test.xlsx")
         assert len(rows) == 3
         assert rows[0][1] == "P001"
@@ -909,11 +999,13 @@ class TestCollectRawRows:
 
     def test_default_qty_when_qty_col_0(self):
         """When qty_col=0, all parts get qty=1.0."""
-        es = _make_excel_sheet([
-            ["零部件代号"],
-            ["P001"],
-            ["P002"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["零部件代号"],
+                ["P001"],
+                ["P002"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 3, 1, 1, 0, 0, "test.xlsx")
         assert len(rows) == 2
         assert rows[0][2] == 1.0
@@ -921,11 +1013,13 @@ class TestCollectRawRows:
 
     def test_empty_name_when_name_col_0(self):
         """When name_col=0, names are empty."""
-        es = _make_excel_sheet([
-            ["Part No", "Qty"],
-            ["P001", "2"],
-            ["P002", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Qty"],
+                ["P001", "2"],
+                ["P002", "1"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 3, 2, 1, 2, 0, "test.xlsx")
         assert len(rows) == 2
         assert rows[0][3] == ""  # name
@@ -933,12 +1027,14 @@ class TestCollectRawRows:
 
     def test_skips_empty_rows(self):
         """Empty rows should be skipped."""
-        es = _make_excel_sheet([
-            ["物料编码", "名称"],
-            ["P001", "Part1"],
-            [None, None],  # empty row
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "名称"],
+                ["P001", "Part1"],
+                [None, None],  # empty row
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         assert len(rows) == 2
         assert rows[0][1] == "P001"
@@ -946,12 +1042,14 @@ class TestCollectRawRows:
 
     def test_skips_keyword_rows(self):
         """Rows with skip keywords should be skipped."""
-        es = _make_excel_sheet([
-            ["物料编码", "名称"],
-            ["P001", "Part1"],
-            ["变更记录", "Change log"],
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "名称"],
+                ["P001", "Part1"],
+                ["变更记录", "Change log"],
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         assert len(rows) == 2
         assert rows[0][1] == "P001"
@@ -959,21 +1057,25 @@ class TestCollectRawRows:
 
     def test_qty_from_string(self):
         """Quantity should be parsed from string values."""
-        es = _make_excel_sheet([
-            ["Part", "Qty"],
-            ["P001", "2.5"],
-            ["P002", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part", "Qty"],
+                ["P001", "2.5"],
+                ["P002", "1"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 3, 2, 1, 2, 0, "test.xlsx")
         assert rows[0][2] == 2.5
         assert rows[1][2] == 1.0
 
     def test_invalid_qty_defaults_to_1(self):
         """Invalid qty values should default to 1.0."""
-        es = _make_excel_sheet([
-            ["Part", "Qty"],
-            ["P001", "N/A"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part", "Qty"],
+                ["P001", "N/A"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 2, 2, 1, 2, 0, "test.xlsx")
         assert rows[0][2] == 1.0
 
@@ -982,46 +1084,55 @@ class TestCollectRawRows:
 #  5. _collect_raw_rows — section boundary detection
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectRawRowsBoundaries:
     def test_stops_at_new_header(self):
         """SWM card: first table at R1, new header at R5 with part_no keyword."""
-        es = _make_excel_sheet([
-            ["序号\nСерийный номер", "零部件代号\nКод детали"],
-            ["1", "P001"],
-            ["2", "P002"],
-            ["3", "P003"],
-            ["序号", "零部件代号"],  # NEW header → should stop
-            ["1", "Q001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号\nСерийный номер", "零部件代号\nКод детали"],
+                ["1", "P001"],
+                ["2", "P002"],
+                ["3", "P003"],
+                ["序号", "零部件代号"],  # NEW header → should stop
+                ["1", "Q001"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 6, 2, 2, 0, 0, "test.xlsx")
-        assert len(rows) == 3, f"Expected 3 parts before section boundary, got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 parts before section boundary, got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
         assert rows[2][1] == "P003"
 
     def test_stops_after_3_consecutive_empty_rows(self):
         """Data with 3+ empty rows should stop collection."""
-        es = _make_excel_sheet([
-            ["零部件代号", "名称"],
-            ["P001", "Part1"],
-            [None, None],
-            [None, None],
-            [None, None],
-            ["P002", "Part2"],  # after 3 empty rows → should NOT be collected
-        ])
+        es = _make_excel_sheet(
+            [
+                ["零部件代号", "名称"],
+                ["P001", "Part1"],
+                [None, None],
+                [None, None],
+                [None, None],
+                ["P002", "Part2"],  # after 3 empty rows → should NOT be collected
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 6, 2, 1, 0, 2, "test.xlsx")
         assert len(rows) == 1, f"Expected 1 part (3 empties stop), got {len(rows)}"
         assert rows[0][1] == "P001"
 
     def test_does_not_stop_at_2_empty_rows(self):
         """2 empty rows should not stop — only 3+."""
-        es = _make_excel_sheet([
-            ["Part No"],
-            ["P001"],
-            [None],
-            [None],
-            ["P002"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No"],
+                ["P001"],
+                [None],
+                [None],
+                ["P002"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 1, 1, 0, 0, "test.xlsx")
         assert len(rows) == 2, f"Expected 2 parts (2 empties OK), got {len(rows)}"
         assert rows[1][1] == "P002"
@@ -1029,38 +1140,49 @@ class TestCollectRawRowsBoundaries:
     def test_skips_long_cell_in_boundary_check(self):
         """A cell with part_no keyword but > 50 chars should NOT trigger boundary."""
         long_text = "拿取零部件1检查是否有破损；Возьмите деталь"  # > 50 chars
-        es = _make_excel_sheet([
-            ["序号\nСерийный номер", "零部件代号\nКод детали"],
-            ["1", "P001"],
-            ["2", "P002"],
-            [long_text, None],  # long cell with 'деталь' — should NOT trigger boundary; C2=None → skip row
-            ["3", "P003"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号\nСерийный номер", "零部件代号\nКод детали"],
+                ["1", "P001"],
+                ["2", "P002"],
+                [
+                    long_text,
+                    None,
+                ],  # long cell with 'деталь' — should NOT trigger boundary; C2=None → skip row
+                ["3", "P003"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 2, 2, 0, 0, "test.xlsx")
         assert len(rows) == 3, f"Expected 3 parts (long cell skipped), got {len(rows)}"
         assert rows[2][1] == "P003"
 
     def test_does_not_trigger_on_data_rows(self):
         """Data rows with part numbers but no keywords should not trigger boundary."""
-        es = _make_excel_sheet([
-            ["物料编码", "名称"],
-            ["P001", "Part1"],
-            ["P002", "Part2"],
-            ["ABC-123-DEF", "Part3"],  # looks like part no, not a header
-            ["P003", "Part4"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "名称"],
+                ["P001", "Part1"],
+                ["P002", "Part2"],
+                ["ABC-123-DEF", "Part3"],  # looks like part no, not a header
+                ["P003", "Part4"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 2, 1, 0, 2, "test.xlsx")
-        assert len(rows) == 4, f"Expected 4 parts (data rows pass through), got {len(rows)}"
+        assert len(rows) == 4, (
+            f"Expected 4 parts (data rows pass through), got {len(rows)}"
+        )
 
     def test_boundary_english_keyword(self):
         """English header 'Part No' should trigger boundary."""
-        es = _make_excel_sheet([
-            ["Seq", "Part No", "Qty"],
-            ["1", "P001", "2"],
-            ["2", "P002", "1"],
-            ["Seq", "Part No", "Qty"],  # English header → boundary
-            ["1", "Q001", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Seq", "Part No", "Qty"],
+                ["1", "P001", "2"],
+                ["2", "P002", "1"],
+                ["Seq", "Part No", "Qty"],  # English header → boundary
+                ["1", "Q001", "1"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 3, 2, 3, 0, "test.xlsx")
         assert len(rows) == 2, f"Expected 2 parts (English boundary), got {len(rows)}"
         assert rows[0][1] == "P001"
@@ -1068,13 +1190,15 @@ class TestCollectRawRowsBoundaries:
 
     def test_boundary_russian_keyword(self):
         """Russian header 'Код детали' should trigger boundary."""
-        es = _make_excel_sheet([
-            ["№", "Код детали", "Кол-во"],
-            ["1", "P001", "2"],
-            ["2", "P002", "1"],
-            ["№", "Код детали", "Кол-во"],  # Russian header → boundary
-            ["1", "Q001", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["№", "Код детали", "Кол-во"],
+                ["1", "P001", "2"],
+                ["2", "P002", "1"],
+                ["№", "Код детали", "Кол-во"],  # Russian header → boundary
+                ["1", "Q001", "1"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 3, 2, 3, 0, "test.xlsx")
         assert len(rows) == 2, f"Expected 2 parts (Russian boundary), got {len(rows)}"
         assert rows[0][1] == "P001"
@@ -1083,43 +1207,62 @@ class TestCollectRawRowsBoundaries:
     def test_boundary_not_triggered_by_service_keyword(self):
         """Service keyword row '变更记录' without part_no keyword should NOT trigger boundary.
         The row should be skipped (not collected) due to skip_keywords instead."""
-        es = _make_excel_sheet([
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "2"],
-            ["P002", "Part2", "1"],
-            ["变更记录", "Change", "Log"],  # no PART_NO_KEYWORD → not a boundary; skip via skip_keywords
-            ["P003", "Part3", "3"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "2"],
+                ["P002", "Part2", "1"],
+                [
+                    "变更记录",
+                    "Change",
+                    "Log",
+                ],  # no PART_NO_KEYWORD → not a boundary; skip via skip_keywords
+                ["P003", "Part3", "3"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 3, 1, 3, 2, "test.xlsx")
         # 变更记录 should be skipped (via skip_keywords), not trigger boundary
-        assert len(rows) == 3, f"Expected 3 parts (service row skipped), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 parts (service row skipped), got {len(rows)}"
+        )
         assert rows[2][1] == "P003"
 
     def test_boundary_not_triggered_by_single_cell(self):
         """Single cell with part_no keyword should NOT trigger boundary (need >=2 non-empty)."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],
-            ["1", "P001"],
-            ["2", "P002"],
-            ["零部件代号", None],  # part_no keyword but only 1 non-empty cell
-            ["3", "P003"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],
+                ["1", "P001"],
+                ["2", "P002"],
+                ["零部件代号", None],  # part_no keyword but only 1 non-empty cell
+                ["3", "P003"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 2, 2, 0, 0, "test.xlsx")
         # R4: raw_part_no=None → not all_empty (C1 has data) → skip; NOT a boundary
-        assert len(rows) == 3, f"Expected 3 parts (single-cell skipped), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 parts (single-cell skipped), got {len(rows)}"
+        )
         assert rows[2][1] == "P003"
 
     def test_part_no_none_with_data_elsewhere(self):
         """Row with None in part_no column but data in other columns should be skipped,
         NOT counted as an empty row (does not increment consecutive_empty_pn)."""
-        es = _make_excel_sheet([
-            ["Part No", "Description"],
-            ["P001", "Part1"],
-            [None, "Some description"],  # part_no is None but desc has data → skip, not empty
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Description"],
+                ["P001", "Part1"],
+                [
+                    None,
+                    "Some description",
+                ],  # part_no is None but desc has data → skip, not empty
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
-        assert len(rows) == 2, f"Expected 2 parts (description row skipped), got {len(rows)}"
+        assert len(rows) == 2, (
+            f"Expected 2 parts (description row skipped), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
@@ -1127,6 +1270,7 @@ class TestCollectRawRowsBoundaries:
 # ═══════════════════════════════════════════════════════════════════════
 #  5b. _collect_raw_rows — пограничные сценарии (ПРОДВИНУТЫЕ)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCollectRawRowsBoundariesExtended:
     """Продвинутые тесты границ секций в _collect_raw_rows.
@@ -1144,28 +1288,32 @@ class TestCollectRawRowsBoundariesExtended:
 
     def test_boundary_case_insensitive_english(self):
         """'Part No' (mixed case) должен триггерить границу."""
-        es = _make_excel_sheet([
-            ["Seq", "Part No", "Qty"],      # header
-            ["1", "P001", "2"],
-            ["2", "P002", "1"],
-            ["Seq", "Part No", "Qty"],      # mixed case → boundary
-            ["1", "Q001", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Seq", "Part No", "Qty"],  # header
+                ["1", "P001", "2"],
+                ["2", "P002", "1"],
+                ["Seq", "Part No", "Qty"],  # mixed case → boundary
+                ["1", "Q001", "1"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 5, 3, 2, 3, 0, "test.xlsx")
-        assert len(rows) == 2, f"Comprehensive detection should work with mixed case"
+        assert len(rows) == 2, "Comprehensive detection should work with mixed case"
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
     def test_boundary_case_insensitive_chinese(self):
         """'零部件代号' (китайский, нижний регистр не применим) должен триггерить границу."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],
-            ["1", "P001"],
-            ["序号", "零部件代号"],  # exact same → boundary
-            ["1", "Q001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],
+                ["1", "P001"],
+                ["序号", "零部件代号"],  # exact same → boundary
+                ["1", "Q001"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 2, 0, 0, "test.xlsx")
-        assert len(rows) == 1, f"Chinese header should trigger boundary"
+        assert len(rows) == 1, "Chinese header should trigger boundary"
         assert rows[0][1] == "P001"
 
     def test_long_cell_with_keyword_does_not_trigger_boundary(self):
@@ -1176,30 +1324,38 @@ class TestCollectRawRowsBoundariesExtended:
         C2 непустой, чтобы non_empty >= 2 и проверка `len < 50` достиглась.
         """
         long_text = "код детали " + "x" * 39  # 50 chars exactly, contains keyword
-        assert len(long_text) >= 50, f"Long text must be >= 50 chars, got {len(long_text)}"
+        assert len(long_text) >= 50, (
+            f"Long text must be >= 50 chars, got {len(long_text)}"
+        )
         assert "код детали" in long_text
 
-        es = _make_excel_sheet([
-            ["Part No", "Desc"],
-            ["P001", "Part1"],
-            [long_text, "has data"],     # C1 >= 50 with keyword, C2 non-empty
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Desc"],
+                ["P001", "Part1"],
+                [long_text, "has data"],  # C1 >= 50 with keyword, C2 non-empty
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: non_empty=2 (C1=long_text, C2="has data")
         # has_part_no_keyword_short? C1 содержит "код детали" но len=50, NOT < 50 → False
         # NOT a boundary. raw_part_no = long_text → collected.
-        assert len(rows) == 3, f"Expected 3 raw rows (50-char with keyword NOT boundary), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 raw rows (50-char with keyword NOT boundary), got {len(rows)}"
+        )
 
     def test_long_cell_without_keyword_does_not_trigger_boundary(self):
         """Ячейка >= 50 символов БЕЗ PART_NO_KEYWORD — не триггерит границу."""
         long_text = "A" * 55  # 55 chars, no keyword
-        es = _make_excel_sheet([
-            ["Part No", "Desc"],
-            ["P001", "Part1"],
-            [long_text, "Some long description"],  # C1 long, no keyword
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Desc"],
+                ["P001", "Part1"],
+                [long_text, "Some long description"],  # C1 long, no keyword
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: C1 has long_text, C2 has data. non_empty=2. has_part_no_keyword_short?
         # C1: "AAA..." (55 chars) → no keyword. C2: "some long description" → no keyword.
@@ -1208,18 +1364,24 @@ class TestCollectRawRowsBoundariesExtended:
         # Wait, no - is_valid_part_number is checked in _merge_multiline_part_numbers,
         # not in _collect_raw_rows. _collect_raw_rows just collects ALL rows.
         # So it would be collected as a raw row.
-        assert len(rows) == 3, f"Expected 3 parts (long cell passes through), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 parts (long cell passes through), got {len(rows)}"
+        )
 
     def test_skip_keywords_mixed_case(self):
         """Skip-ключевые слова должны работать независимо от регистра."""
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            ["变更记录", "Change Log"],  # Chinese skip keyword
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                ["变更记录", "Change Log"],  # Chinese skip keyword
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
-        assert len(rows) == 2, f"Expected 2 parts (skip keyword skipped), got {len(rows)}"
+        assert len(rows) == 2, (
+            f"Expected 2 parts (skip keyword skipped), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
@@ -1246,68 +1408,84 @@ class TestCollectRawRowsBoundariesExtended:
     def test_multiple_consecutive_skip_rows(self):
         """3+ skip-строк (part_no=None, но данные в других колонках) НЕ триггерят
         границу пустых строк. Данные после скипов собираются."""
-        es = _make_excel_sheet([
-            ["Part No", "Description"],
-            ["P001", "Part1"],
-            [None, "Skip description 1"],  # skip row (has data in C2)
-            [None, "Skip description 2"],  # skip row
-            [None, "Skip description 3"],  # skip row (3 consecutive!)
-            ["P002", "Part2"],            # should be collected
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Description"],
+                ["P001", "Part1"],
+                [None, "Skip description 1"],  # skip row (has data in C2)
+                [None, "Skip description 2"],  # skip row
+                [None, "Skip description 3"],  # skip row (3 consecutive!)
+                ["P002", "Part2"],  # should be collected
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 6, 2, 1, 0, 2, "test.xlsx")
-        assert len(rows) == 2, f"Expected 2 parts (skips don't trigger 3-empty boundary), got {len(rows)}"
+        assert len(rows) == 2, (
+            f"Expected 2 parts (skips don't trigger 3-empty boundary), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
     def test_all_empty_then_data_after_3_empties_not_collected(self):
         """3+ полностью пустых строк → граница. Данные после НЕ собираются."""
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            [None, None],  # empty 1
-            [None, None],  # empty 2
-            [None, None],  # empty 3 → boundary!
-            ["P002", "Part2"],  # should NOT be collected
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                [None, None],  # empty 1
+                [None, None],  # empty 2
+                [None, None],  # empty 3 → boundary!
+                ["P002", "Part2"],  # should NOT be collected
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 6, 2, 1, 0, 2, "test.xlsx")
-        assert len(rows) == 1, f"Expected 1 part (3 empties stop at boundary), got {len(rows)}"
+        assert len(rows) == 1, (
+            f"Expected 1 part (3 empties stop at boundary), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
 
     def test_mixed_skip_then_empty_triggers_boundary(self):
         """2 skip-строки + 2 пустых строки → граница НЕ триггерится (skip не увеличивает
         счётчик пустых). После скипов data, потом 3 пустых → граница."""
-        es = _make_excel_sheet([
-            ["Part No", "Desc"],
-            ["P001", "Part1"],
-            [None, "Skip1"],   # skip (not empty, not data)
-            [None, "Skip2"],   # skip
-            ["P002", "Part2"],  # data collected
-            [None, None],       # empty 1
-            [None, None],       # empty 2
-            [None, None],       # empty 3 → boundary!
-            ["P003", "Part3"],  # should NOT be collected
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Desc"],
+                ["P001", "Part1"],
+                [None, "Skip1"],  # skip (not empty, not data)
+                [None, "Skip2"],  # skip
+                ["P002", "Part2"],  # data collected
+                [None, None],  # empty 1
+                [None, None],  # empty 2
+                [None, None],  # empty 3 → boundary!
+                ["P003", "Part3"],  # should NOT be collected
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 9, 2, 1, 0, 2, "test.xlsx")
         # После скипов P002 собран. Потом 3 пустых → граница. P003 НЕ собран.
-        assert len(rows) == 2, f"Expected 2 parts (3 empties after data), got {len(rows)}"
+        assert len(rows) == 2, (
+            f"Expected 2 parts (3 empties after data), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
     def test_boundary_not_triggered_by_2_non_empty_no_keyword(self):
         """Строка с >= 2 непустыми ячейками, но без PART_NO_KEYWORD — НЕ граница."""
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            ["Такелажные", "ремни"],  # 2 non-empty, no keyword
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                ["Такелажные", "ремни"],  # 2 non-empty, no keyword
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: non_empty=2. has_part_no_keyword_short? "Такелажные" → no keyword match.
         # "ремни" → no keyword match. NOT a boundary.
         # raw_part_no at C1 = "Такелажные" → not None, not skip keyword → collected!
         # Но "Такелажные" не пройдёт is_valid_part_number (нет цифр)
         # _collect_raw_rows не проверяет is_valid_part_number, _merge_multiline делает
-        assert len(rows) == 3, f"Expected 3 raw rows (text row passes through), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 raw rows (text row passes through), got {len(rows)}"
+        )
 
     def test_max_data_row_collects_up_to_header_plus_500(self):
         """Данные собираются до header_row + 500 включительно.
@@ -1341,16 +1519,20 @@ class TestCollectRawRowsBoundariesExtended:
         long_text = base + "x" * (50 - len(base))  # 50 chars exactly
         assert len(long_text) == 50, f"Must be exactly 50 chars, got {len(long_text)}"
 
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            [long_text, "Extra"],  # C1 = 50 chars, contains "код детали"
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                [long_text, "Extra"],  # C1 = 50 chars, contains "код детали"
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: non_empty=2. has_part_no_keyword_short? len(rv)=50, NOT < 50 → False!
         # NOT a boundary. raw_part_no = long_text → not None → collected as raw row!
-        assert len(rows) == 3, f"Expected 3 raw rows (exact 50-char boundary NOT triggered), got {len(rows)}"
+        assert len(rows) == 3, (
+            f"Expected 3 raw rows (exact 50-char boundary NOT triggered), got {len(rows)}"
+        )
 
     def test_row_has_part_no_keyword_49_chars_triggers_boundary(self):
         """Ячейка длины 49 символов с PART_NO_KEYWORD — триггерит границу (< 50)."""
@@ -1358,31 +1540,39 @@ class TestCollectRawRowsBoundariesExtended:
         text_49 = base + "x" * (49 - len(base))
         assert len(text_49) == 49, f"Must be exactly 49 chars, got {len(text_49)}"
 
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            [text_49, "Extra"],  # 49 chars, len < 50 → boundary!
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                [text_49, "Extra"],  # 49 chars, len < 50 → boundary!
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: non_empty=2. has_part_no_keyword_short? len(rv)=49 < 50 → True!
         # Boundary triggered! P002 is NOT collected.
-        assert len(rows) == 1, f"Expected 1 part (49-char boundary triggered), got {len(rows)}"
+        assert len(rows) == 1, (
+            f"Expected 1 part (49-char boundary triggered), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
 
     def test_skip_keyword_triggers_on_substring_match(self):
         """Строка, содержащая skip-ключевое слово как подстроку, скипается.
         Например '变更记录仪' содержит '变更记录' → скипается.
         Это корректно, т.к. такие строки — заголовки, а не детали."""
-        es = _make_excel_sheet([
-            ["Part No", "Name"],
-            ["P001", "Part1"],
-            ["变更记录仪", "Measuring device"],  # contains '变更记录' → skipped
-            ["P002", "Part2"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Part No", "Name"],
+                ["P001", "Part1"],
+                ["变更记录仪", "Measuring device"],  # contains '变更记录' → skipped
+                ["P002", "Part2"],
+            ]
+        )
         rows = _collect_raw_rows(es, 1, 4, 2, 1, 0, 2, "test.xlsx")
         # R3: skip check: '变更记录' in '变更记录仪' → True → skipped
-        assert len(rows) == 2, f"Expected 2 parts (substring match skips row), got {len(rows)}"
+        assert len(rows) == 2, (
+            f"Expected 2 parts (substring match skips row), got {len(rows)}"
+        )
         assert rows[0][1] == "P001"
         assert rows[1][1] == "P002"
 
@@ -1390,6 +1580,7 @@ class TestCollectRawRowsBoundariesExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  6. _merge_multiline_part_numbers
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestMergeMultilinePartNumbers:
     def test_normal_no_merge(self):
@@ -1485,12 +1676,15 @@ class TestMergeMultilinePartNumbers:
 #  7. _extract_card_number
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractCardNumber:
     def test_from_sheet_content(self):
         """Card number found in sheet content."""
-        es = _make_excel_sheet([
-            ["Header", "SQRT1L-17-AS-04001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["Header", "SQRT1L-17-AS-04001"],
+            ]
+        )
         num = _extract_card_number("unknown.xlsx", es)
         assert num == "SQRT1L-17-AS-04001"
 
@@ -1511,15 +1705,18 @@ class TestExtractCardNumber:
 #  8. _collect_all_tables — multi-operation support
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectAllTables:
     def test_single_table(self):
         """Single table with 3 parts."""
-        es = _make_excel_sheet([
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "1"],
-            ["P002", "Part2", "2"],
-            ["P003", "Part3", "1"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "1"],
+                ["P002", "Part2", "2"],
+                ["P003", "Part3", "1"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 4, 3, "test.xlsx")
         assert len(parts) == 3
         assert table_count == 1
@@ -1528,17 +1725,19 @@ class TestCollectAllTables:
 
     def test_multi_table(self):
         """2 tables separated by a gap with header."""
-        es = _make_excel_sheet([
-            ["序号\nСерийный номер", "零部件代号\nКод детали"],
-            ["1", "P001"],
-            ["2", "P002"],
-            [None, None],
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],  # Second table header
-            ["1", "Q001"],
-            ["2", "Q002"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号\nСерийный номер", "零部件代号\nКод детали"],
+                ["1", "P001"],
+                ["2", "P002"],
+                [None, None],
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],  # Second table header
+                ["1", "Q001"],
+                ["2", "Q002"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 9, 2, "test.xlsx")
         assert len(parts) == 4, f"Expected 4 parts from 2 tables, got {len(parts)}"
         assert table_count == 2
@@ -1550,12 +1749,14 @@ class TestCollectAllTables:
 
     def test_multi_table_with_boundary(self):
         """Two tables stopped by section boundary (new header)."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],
-            ["1", "P001"],
-            ["序号", "零部件代号"],  # New header → boundary
-            ["1", "Q001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],
+                ["1", "P001"],
+                ["序号", "零部件代号"],  # New header → boundary
+                ["1", "Q001"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 4, 2, "test.xlsx")
         # First table: P001. Second table: should continue past the boundary.
         # Both tables found.
@@ -1571,11 +1772,13 @@ class TestCollectAllTables:
 
     def test_empty_table_skipped(self):
         """Table with no valid parts should be skipped."""
-        es = _make_excel_sheet([
-            ["零部件代号", "名称"],
-            ["AB", "Too Short"],  # invalid part number
-            ["P001", "Valid"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["零部件代号", "名称"],
+                ["AB", "Too Short"],  # invalid part number
+                ["P001", "Valid"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 3, 2, "test.xlsx")
         # "AB" is invalid (too short), "P001" is valid
         assert len(parts) == 1, f"Expected 1 valid part, got {len(parts)}"
@@ -1584,41 +1787,46 @@ class TestCollectAllTables:
 
     def test_three_tables(self):
         """Three tables on one sheet separated by 3+ empty rows."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],     # R1 — table 1
-            ["1", "P001"],
-            ["2", "P002"],
-            [None, None],
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],     # R7 — table 2
-            ["1", "Q001"],
-            ["2", "Q002"],
-            [None, None],
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],     # R13 — table 3
-            ["1", "R001"],
-            ["2", "R002"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],  # R1 — table 1
+                ["1", "P001"],
+                ["2", "P002"],
+                [None, None],
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],  # R7 — table 2
+                ["1", "Q001"],
+                ["2", "Q002"],
+                [None, None],
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],  # R13 — table 3
+                ["1", "R001"],
+                ["2", "R002"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 15, 2, "test.xlsx")
         assert len(parts) == 6, f"Expected 6 parts from 3 tables, got {len(parts)}"
         assert table_count == 3
         pns = [p[0] for p in parts]
-        assert pns == ["P001", "P002", "Q001", "Q002", "R001", "R002"], \
+        assert pns == ["P001", "P002", "Q001", "Q002", "R001", "R002"], (
             f"Expected ordered parts, got {pns}"
+        )
 
     def test_tables_with_description_rows(self):
         """Tables separated by description/operation text rows (SWM-style)."""
-        es = _make_excel_sheet([
-            ["序号\nСерийный номер", "零部件代号\nКод детали"],
-            ["1", "P001"],
-            ["操作描述：拿取零部件1", None],  # description row, C2=None → skip
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],     # R6 — table 2 header
-            ["1", "Q001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号\nСерийный номер", "零部件代号\nКод детали"],
+                ["1", "P001"],
+                ["操作描述：拿取零部件1", None],  # description row, C2=None → skip
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],  # R6 — table 2 header
+                ["1", "Q001"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 7, 2, "test.xlsx")
         assert len(parts) == 2, f"Expected 2 parts from 2 tables, got {len(parts)}"
         assert table_count == 2
@@ -1641,22 +1849,26 @@ class TestCollectAllTables:
         # Should not crash, should find all 12 data tables
         # (trailing empty header not counted — tables_found only increments for non-empty tables)
         assert len(parts) == 12, f"Expected exactly 12 parts, got {len(parts)}"
-        assert table_count == 12, f"Expected 12 tables (only data tables counted), got {table_count}"
+        assert table_count == 12, (
+            f"Expected 12 tables (only data tables counted), got {table_count}"
+        )
         pns = [p[0] for p in parts]
         assert "P000" in pns
         assert "P011" in pns
 
     def test_all_tables_empty(self):
         """When all tables have no valid parts, returns empty list."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],
-            ["AB", "Too Short"],  # invalid (too short)
-            [None, None],
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],
-            ["XY", "Also Short"],  # invalid (too short)
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],
+                ["AB", "Too Short"],  # invalid (too short)
+                [None, None],
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],
+                ["XY", "Also Short"],  # invalid (too short)
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 7, 2, "test.xlsx")
         assert parts == [], f"Expected empty list (no valid parts), got {len(parts)}"
         # table_count is 0 because no tables had valid parts (only counted when merged_parts non-empty)
@@ -1664,21 +1876,25 @@ class TestCollectAllTables:
 
     def test_tables_staggered_positions(self):
         """Tables at different row positions with staggered headers."""
-        es = _make_excel_sheet([
-            ["序号", "零部件代号"],     # R1 — table 1 at top
-            ["1", "P001"],
-            [None, None],
-            [None, None],
-            [None, None],
-            ["Some", "Text"],           # R6 — non-header row (only 2 col, no PART_NO)
-            [None, None],
-            [None, None],
-            [None, None],
-            ["序号", "零部件代号"],     # R10 — table 2 deeper
-            ["1", "Q001"],
-        ])
+        es = _make_excel_sheet(
+            [
+                ["序号", "零部件代号"],  # R1 — table 1 at top
+                ["1", "P001"],
+                [None, None],
+                [None, None],
+                [None, None],
+                ["Some", "Text"],  # R6 — non-header row (only 2 col, no PART_NO)
+                [None, None],
+                [None, None],
+                [None, None],
+                ["序号", "零部件代号"],  # R10 — table 2 deeper
+                ["1", "Q001"],
+            ]
+        )
         parts, table_count = _collect_all_tables(es, 11, 2, "test.xlsx")
-        assert len(parts) == 2, f"Expected 2 parts from 2 staggered tables, got {len(parts)}"
+        assert len(parts) == 2, (
+            f"Expected 2 parts from 2 staggered tables, got {len(parts)}"
+        )
         assert table_count == 2
         pns = [p[0] for p in parts]
         assert "P001" in pns
@@ -1689,15 +1905,18 @@ class TestCollectAllTables:
 #  9. parse_card_file
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseCardFile:
     def test_normal_card(self):
         """T1L card: header + data rows → should find parts with qty."""
-        path = _make_card_xlsx([
-            ["物料编码", "零件名称", "数量", "单位"],
-            ["P001", "Part1", "2", "pcs"],
-            ["P002", "Part2", "1", "pcs"],
-            ["P003", "Part3", "3", "pcs"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["物料编码", "零件名称", "数量", "单位"],
+                ["P001", "Part1", "2", "pcs"],
+                ["P002", "Part2", "1", "pcs"],
+                ["P003", "Part3", "3", "pcs"],
+            ]
+        )
         result = parse_card_file(path)
         assert not result.is_service_file
         assert len(result.parts) == 3
@@ -1707,10 +1926,12 @@ class TestParseCardFile:
 
     def test_service_file(self):
         """Service files should not parse parts."""
-        path = _make_card_xlsx([
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "1"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "1"],
+            ]
+        )
         result = parse_card_file(path, is_service_file=True)
         assert result.is_service_file
         assert len(result.parts) == 0
@@ -1719,9 +1940,11 @@ class TestParseCardFile:
 
     def test_no_part_table(self):
         """Sheet without part table → valid=False, no parts."""
-        path = _make_card_xlsx([
-            ["Just some", "text without", "part numbers"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["Just some", "text without", "part numbers"],
+            ]
+        )
         result = parse_card_file(path)
         assert not result.is_service_file
         assert len(result.parts) == 0
@@ -1730,23 +1953,27 @@ class TestParseCardFile:
 
     def test_card_number_extracted(self):
         """Card number should be extracted from sheet content."""
-        path = _make_card_xlsx([
-            ["SQRT1L-17-AS-04001", None, None],
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "1"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["SQRT1L-17-AS-04001", None, None],
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "1"],
+            ]
+        )
         result = parse_card_file(path)
         # Card number from sheet content
         assert "SQRT1L-17-AS-04001" in result.card_number
 
     def test_aggregation_of_duplicate_parts(self):
         """Duplicate parts should have quantities summed."""
-        path = _make_card_xlsx([
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "1"],
-            ["P001", "Part1", "2"],
-            ["P002", "Part2", "1"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "1"],
+                ["P001", "Part1", "2"],
+                ["P002", "Part2", "1"],
+            ]
+        )
         result = parse_card_file(path)
         assert result.aggregated_parts["P001"] == 3.0  # 1+2
         assert result.aggregated_parts["P002"] == 1.0
@@ -1779,6 +2006,7 @@ class TestParseCardFile:
 #  10. CardService
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCardService:
     def test_initial_state(self):
         svc = CardService()
@@ -1806,13 +2034,14 @@ class TestCardService:
 #  10b. CardService — load_from_bytes, cleanup, context manager, async
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCardServiceServer:
     """Тесты серверной функциональности CardService:
-      - load_from_bytes (in-memory upload) для .xlsx
-      - load_from_bytes для ZIP
-      - cleanup (автоудаление temp-файлов)
-      - context manager (with)
-      - async (load_async)
+    - load_from_bytes (in-memory upload) для .xlsx
+    - load_from_bytes для ZIP
+    - cleanup (автоудаление temp-файлов)
+    - context manager (with)
+    - async (load_async)
     """
 
     @pytest.fixture
@@ -1855,6 +2084,7 @@ class TestCardServiceServer:
 
         zip_path = os.path.join(tmp_path, "cards.zip")
         import zipfile
+
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.write(xlsx_path, "001-card.xlsx")
         with open(zip_path, "rb") as f:
@@ -1933,6 +2163,7 @@ class TestCardServiceServer:
     def test_load_from_bytes_invalid_zip(self):
         """Загрузка невалидного ZIP — должна выбросить исключение."""
         import zipfile
+
         data = b"not a real zip file"
         svc = CardService(max_workers=1)
         with pytest.raises((zipfile.BadZipFile, ValueError)):
@@ -1963,6 +2194,7 @@ class TestCardServiceServer:
 # ═══════════════════════════════════════════════════════════════════════
 #  11. _find_excel_files
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindExcelFiles:
     def test_single_xlsx_file(self):
@@ -2037,6 +2269,7 @@ class TestFindExcelFiles:
 #  12. TEMPLATE_SHEET_KEYWORDS (constant)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestTemplateSheetKeywords:
     def test_contains_expected_keywords(self):
         assert "空表" in TEMPLATE_SHEET_KEYWORDS
@@ -2044,11 +2277,10 @@ class TestTemplateSheetKeywords:
         assert "范本" in TEMPLATE_SHEET_KEYWORDS
 
 
-
-
 # ═══════════════════════════════════════════════════════════════════════
 #  35. Интеграционный тест: template-лист с данными попадает в split_cards
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestTemplateSheetSplitIntegration:
     """Интеграционный тест: template-лист (空表) с данными включается в split_cards.
@@ -2068,35 +2300,39 @@ class TestTemplateSheetSplitIntegration:
         tmpdir = str(tmp_path)
         try:
             # ── 1. Создаём реальный .xlsx файл ──
-            fd, xlsx_path = tempfile.mkstemp(suffix='.xlsx', prefix='int_template_')
+            fd, xlsx_path = tempfile.mkstemp(suffix=".xlsx", prefix="int_template_")
             os.close(fd)
 
             wb = Workbook()
             ws = wb.active
-            ws.title = '空表'  # template name
+            ws.title = "空表"  # template name
             # Заполняем данными (как реальная T1L карта)
-            ws.cell(row=1, column=1, value='物料编码')
-            ws.cell(row=1, column=2, value='零件名称')
-            ws.cell(row=1, column=3, value='数量')
-            ws.cell(row=2, column=1, value='P001')
-            ws.cell(row=2, column=2, value='Болт')
+            ws.cell(row=1, column=1, value="物料编码")
+            ws.cell(row=1, column=2, value="零件名称")
+            ws.cell(row=1, column=3, value="数量")
+            ws.cell(row=2, column=1, value="P001")
+            ws.cell(row=2, column=2, value="Болт")
             ws.cell(row=2, column=3, value=2.0)
-            ws.cell(row=3, column=1, value='P002')
-            ws.cell(row=3, column=2, value='Гайка')
+            ws.cell(row=3, column=1, value="P002")
+            ws.cell(row=3, column=2, value="Гайка")
             ws.cell(row=3, column=3, value=4.0)
             wb.save(xlsx_path)
 
             # ── 2. Парсим файл ──
             result = parse_card_file(xlsx_path)
-            assert len(result.sheets) == 1, f"Expected 1 sheet, got {len(result.sheets)}"
+            assert len(result.sheets) == 1, (
+                f"Expected 1 sheet, got {len(result.sheets)}"
+            )
             s = result.sheets[0]
-            assert '空表' in s.sheet_name, f"Expected '空表' sheet, got {s.sheet_name}"
+            assert "空表" in s.sheet_name, f"Expected '空表' sheet, got {s.sheet_name}"
             assert s.has_data, "Template sheet with real data should have has_data=True"
             assert s.is_valid, "Template sheet with valid parts should be is_valid=True"
-            assert len(result.parts) >= 2, f"Expected at least 2 parts, got {len(result.parts)}"
+            assert len(result.parts) >= 2, (
+                f"Expected at least 2 parts, got {len(result.parts)}"
+            )
 
             # ── 3. Запускаем split_cards_to_files ──
-            output_dir = os.path.join(tmpdir, 'split_output')
+            output_dir = os.path.join(tmpdir, "split_output")
             cd = CardsData(
                 all_parts=result.aggregated_parts,
                 part_sources={
@@ -2109,7 +2345,9 @@ class TestTemplateSheetSplitIntegration:
             created_files = split_cards_to_files(cd, output_dir, max_workers=1)
 
             # ── 4. Проверяем что файлы созданы ──
-            assert len(created_files) > 0,                 "Template sheet with data should produce split files, got 0"
+            assert len(created_files) > 0, (
+                "Template sheet with data should produce split files, got 0"
+            )
 
             # Проверяем что созданный файл существует и читается
             for fpath in created_files:
@@ -2119,15 +2357,21 @@ class TestTemplateSheetSplitIntegration:
                 ws_check = wb_check.active
                 assert ws_check is not None
                 # Должны быть хотя бы заголовки и данные
-                assert ws_check.cell(1, 1).value is not None, f"Split file {fpath} has no headers"
-                assert ws_check.cell(2, 1).value is not None, f"Split file {fpath} has no data"
+                assert ws_check.cell(1, 1).value is not None, (
+                    f"Split file {fpath} has no headers"
+                )
+                assert ws_check.cell(2, 1).value is not None, (
+                    f"Split file {fpath} has no data"
+                )
                 wb_check.close()
 
             # ── 5. Проверяем статистику split ──
             stats = cd.split_stats
             assert stats is not None
             assert stats.total_files_created > 0
-            assert stats.total_sheets_skipped == 0,                 f"Template sheet with data should NOT be skipped, but got {stats.total_sheets_skipped} skipped"
+            assert stats.total_sheets_skipped == 0, (
+                f"Template sheet with data should NOT be skipped, but got {stats.total_sheets_skipped} skipped"
+            )
 
         finally:
             _safe_remove(xlsx_path)
@@ -2140,49 +2384,58 @@ class TestTemplateSheetSplitIntegration:
         """
         tmpdir = str(tmp_path)
         try:
-            fd, xlsx_path = tempfile.mkstemp(suffix='.xlsx', prefix='int_template_hdr_')
+            fd, xlsx_path = tempfile.mkstemp(suffix=".xlsx", prefix="int_template_hdr_")
             os.close(fd)
 
             wb = Workbook()
             ws = wb.active
-            ws.title = '空表'
-            ws.cell(row=1, column=1, value='Header')
+            ws.title = "空表"
+            ws.cell(row=1, column=1, value="Header")
             wb.save(xlsx_path)
 
             result = parse_card_file(xlsx_path)
-            assert result.sheets[0].has_data, "Header-only sheet should have has_data=True"
+            assert result.sheets[0].has_data, (
+                "Header-only sheet should have has_data=True"
+            )
 
             cd = CardsData(
                 all_parts={},
                 part_sources={},
                 card_results=[result],
             )
-            output_dir = os.path.join(tmpdir, 'split_hdr')
+            output_dir = os.path.join(tmpdir, "split_hdr")
             created_files = split_cards_to_files(cd, output_dir, max_workers=1)
 
             # has_data=True → лист включается в split, файл создаётся
             stats = cd.split_stats
             assert stats is not None
-            assert stats.total_files_created >= 1,                 f"Header-only template should be included, got {stats.total_files_created}"
+            assert stats.total_files_created >= 1, (
+                f"Header-only template should be included, got {stats.total_files_created}"
+            )
             assert len(created_files) >= 1
 
         finally:
             _safe_remove(xlsx_path)
             _rmtree(tmpdir)
+
     def test_mkdtemp_creates_in_system_temp(self):
         """mkdtemp() без dir= создаёт временную папку в tempfile.gettempdir(), а не в CWD."""
         tmpdir = tempfile.mkdtemp()
         try:
-            assert os.path.isdir(tmpdir), f"mkdtemp should create a directory, got {tmpdir}"
+            assert os.path.isdir(tmpdir), (
+                f"mkdtemp should create a directory, got {tmpdir}"
+            )
             abs_path = os.path.abspath(tmpdir)
             temp_dir = os.path.abspath(tempfile.gettempdir())
             # Путь должен начинаться с системной temp-директории
-            assert abs_path.startswith(temp_dir + os.sep), \
+            assert abs_path.startswith(temp_dir + os.sep), (
                 f"mkdtemp() created {abs_path}, expected under {temp_dir}"
+            )
             # Путь НЕ должен быть в CWD
             cwd = os.path.abspath(os.getcwd())
-            assert not abs_path.startswith(cwd + os.sep), \
+            assert not abs_path.startswith(cwd + os.sep), (
                 f"mkdtemp() created {abs_path} in CWD {cwd}, expected in system temp"
+            )
         finally:
             _rmtree(tmpdir)
 
@@ -2194,8 +2447,9 @@ class TestTemplateSheetSplitIntegration:
             try:
                 abs_path = os.path.abspath(tmpdir)
                 custom_abs = os.path.abspath(custom_dir)
-                assert abs_path.startswith(custom_abs + os.sep), \
+                assert abs_path.startswith(custom_abs + os.sep), (
                     f"mkdtemp(dir=...) created {abs_path}, expected under {custom_abs}"
+                )
             finally:
                 _rmtree(tmpdir)
         finally:
@@ -2205,6 +2459,7 @@ class TestTemplateSheetSplitIntegration:
 # ═══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (для _find_excel_files)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def _safe_remove(path: str) -> None:
     try:
@@ -2217,6 +2472,7 @@ def _safe_remove(path: str) -> None:
 def _rmtree(path: str) -> None:
     try:
         import shutil
+
         shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
@@ -2256,10 +2512,10 @@ def _mock_extract_error(source_path, output_path, sheet_name):
     }
 
 
-
 # ═══════════════════════════════════════════════════════════════════════
 #  13. ExcelReader — xlrd, fallback, error handling
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExcelReader:
     """ExcelReader — универсальный загрузчик .xlsx / .xls.
@@ -2290,12 +2546,14 @@ class TestExcelReader:
         class MockSheet:
             nrows = 2
             ncols = 2
+
             def cell_value(self, r, c):
                 return [["A", "B"], ["1", "2"]][r][c]
 
         class MockBook:
             def sheet_names(self):
                 return ["Sheet1"]
+
             def sheet_by_name(self, name):
                 return MockSheet()
 
@@ -2328,6 +2586,7 @@ class TestExcelReader:
         class MockSheet:
             nrows = 2
             ncols = 2
+
             def cell_value(self, r, c):
                 if c == 0:  # column 1: part_no
                     if r == 0:
@@ -2340,8 +2599,11 @@ class TestExcelReader:
                 return None
 
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
 
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda path: MockBook())
 
@@ -2364,21 +2626,33 @@ class TestExcelReader:
         class MockSheet:
             nrows = 1
             ncols = 1
-            def cell_value(self, r, c): return "XL"
+
+            def cell_value(self, r, c):
+                return "XL"
 
         class MockBook:
-            def sheet_names(self): return ["Sheet1"]
-            def sheet_by_name(self, name): return MockSheet()
+            def sheet_names(self):
+                return ["Sheet1"]
+
+            def sheet_by_name(self, name):
+                return MockSheet()
 
         # Make openpyxl.load_workbook fail
         import openpyxl as real_openpyxl
-        monkeypatch.setattr(real_openpyxl, "load_workbook", lambda path, **kw: (_ for _ in ()).throw(Exception("mock fail")))
+
+        monkeypatch.setattr(
+            real_openpyxl,
+            "load_workbook",
+            lambda path, **kw: (_ for _ in ()).throw(Exception("mock fail")),
+        )
         monkeypatch.setattr(real_xlrd, "open_workbook", lambda path: MockBook())
 
         path = _make_card_xlsx([["A"]], "test_fallback.xlsx")
         try:
             reader = ExcelReader(path)
-            assert reader._engine == "xlrd", f"Expected xlrd fallback, got {reader._engine}"
+            assert reader._engine == "xlrd", (
+                f"Expected xlrd fallback, got {reader._engine}"
+            )
             reader.close()
         finally:
             _safe_remove(path)
@@ -2386,6 +2660,7 @@ class TestExcelReader:
     def test_xlrd_import_error(self, monkeypatch):
         """xlrd не установлен → ImportError."""
         import builtins
+
         original_import = builtins.__import__
 
         def mock_import(name, *args, **kwargs):
@@ -2407,7 +2682,12 @@ class TestExcelReader:
     def test_xlrd_open_error(self, monkeypatch):
         """xlrd.open_workbook падает → ValueError."""
         import xlrd as real_xlrd
-        monkeypatch.setattr(real_xlrd, "open_workbook", lambda path: (_ for _ in ()).throw(Exception("Corrupt")))
+
+        monkeypatch.setattr(
+            real_xlrd,
+            "open_workbook",
+            lambda path: (_ for _ in ()).throw(Exception("Corrupt")),
+        )
 
         fd, xls_path = tempfile.mkstemp(suffix=".xls", prefix="card_xlscorrupt_")
         os.close(fd)
@@ -2443,6 +2723,7 @@ class TestExcelReader:
 #  14. _walk_extracted_dir — nested ZIP, temp cleanup
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestWalkExtractedDir:
     """_walk_extracted_dir — обход директории, вложенные ZIP.
 
@@ -2460,9 +2741,11 @@ class TestWalkExtractedDir:
         try:
             open(os.path.join(tmpdir, "~$tempfile.xlsx"), "w").close()
             open(os.path.join(tmpdir, "normal.xlsx"), "w").close()
-            files: List[str] = []
+            files: list[str] = []
             _walk_extracted_dir(tmpdir, tmpdir, files, set(), is_temp=False)
-            assert len(files) == 1, f"Expected 1 normal file (temp skipped), got {len(files)}"
+            assert len(files) == 1, (
+                f"Expected 1 normal file (temp skipped), got {len(files)}"
+            )
             assert "normal.xlsx" in files[0]
         finally:
             _rmtree(tmpdir)
@@ -2476,10 +2759,12 @@ class TestWalkExtractedDir:
             excel_path = os.path.join(tmpdir, "card.xlsx")
             _touch_excel(excel_path)
 
-            files: List[str] = []
+            files: list[str] = []
             _walk_extracted_dir(tmpdir, tmpdir, files, set(), is_temp=True)
             # Junk file should be removed
-            assert not os.path.isfile(junk_path), "Junk file should be removed in temp dir"
+            assert not os.path.isfile(junk_path), (
+                "Junk file should be removed in temp dir"
+            )
             assert os.path.isfile(excel_path), "Excel file should remain"
             assert len(files) == 1
         finally:
@@ -2491,9 +2776,11 @@ class TestWalkExtractedDir:
         try:
             txt_path = os.path.join(tmpdir, "notes.txt")
             open(txt_path, "w").close()
-            files: List[str] = []
+            files: list[str] = []
             _walk_extracted_dir(tmpdir, tmpdir, files, set(), is_temp=False)
-            assert os.path.isfile(txt_path), "Non-Excel file should remain in non-temp dir"
+            assert os.path.isfile(txt_path), (
+                "Non-Excel file should remain in non-temp dir"
+            )
             assert len(files) == 0
         finally:
             _rmtree(tmpdir)
@@ -2514,7 +2801,7 @@ class TestWalkExtractedDir:
             outer_xlsx = os.path.join(tmpdir, "outer.xlsx")
             _touch_excel(outer_xlsx)
 
-            files: List[str] = []
+            files: list[str] = []
             seen = set()
             _walk_extracted_dir(tmpdir, tmpdir, files, seen, is_temp=True)
 
@@ -2540,8 +2827,10 @@ class TestWalkExtractedDir:
                 zf.write(inner_xlsx, "same_name.xlsx")
             os.remove(inner_xlsx)
 
-            files: List[str] = []
-            _walk_extracted_dir(tmpdir, tmpdir, files, seen, is_temp=True, is_nested=True)
+            files: list[str] = []
+            _walk_extracted_dir(
+                tmpdir, tmpdir, files, seen, is_temp=True, is_nested=True
+            )
             # The file 'same_name.xlsx' should be skipped (already in seen)
             # And the zip file should be removed (is_temp=True)
             assert not os.path.isfile(inner_zip), "Zip should be removed in temp"
@@ -2553,6 +2842,7 @@ class TestWalkExtractedDir:
 # ═══════════════════════════════════════════════════════════════════════
 #  15. _merge_multiline — trailing continuation and edge cases
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestMergeMultilineExtended:
     """Дополнительные тесты _merge_multiline_part_numbers.
@@ -2567,12 +2857,14 @@ class TestMergeMultilineExtended:
         (она просто не существует) — buffer не должен появиться в результате.
         """
         rows = [
-            (2, "P001", 1.0, "Part1", 1),   # normal
-            (3, "ABC-", 3.0, "Part2", 1),   # continuation at the end, no next row
+            (2, "P001", 1.0, "Part1", 1),  # normal
+            (3, "ABC-", 3.0, "Part2", 1),  # continuation at the end, no next row
         ]
         merged = _merge_multiline_part_numbers(rows)
         # P001 should be in result, ABC- should NOT (incomplete continuation)
-        assert len(merged) == 1, f"Expected 1 part (incomplete continuation dropped), got {len(merged)}"
+        assert len(merged) == 1, (
+            f"Expected 1 part (incomplete continuation dropped), got {len(merged)}"
+        )
         assert merged[0][0] == "P001"
 
     def test_continuation_invalid_final_buffer(self):
@@ -2587,6 +2879,7 @@ class TestMergeMultilineExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  16. _find_excel_files — .xls, nested ZIP
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindExcelFilesExtended:
     """Дополнительные тесты _find_excel_files.
@@ -2654,6 +2947,7 @@ class TestFindExcelFilesExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  17. parse_cards — parallel & sequential paths
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseCards:
     """parse_cards — параллельный и последовательный парсинг.
@@ -2733,14 +3027,18 @@ class TestParseCards:
     def test_original_part_numbers(self):
         """original_part_numbers заполняется из карт."""
         # parse_cards goes through file_classifier — must use recognizable headers
-        path = _make_card_xlsx([
-            ["序号", "零部件代号", "数量"],
-            ["1", "5306200-ED001", 1.0],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["序号", "零部件代号", "数量"],
+                ["1", "5306200-ED001", 1.0],
+            ]
+        )
         try:
             result = parse_card_file(path)
             aggregated = result.aggregated_parts
-            assert "5306200ED001" in aggregated, f"Expected cleaned PN, got {list(aggregated.keys())}"
+            assert "5306200ED001" in aggregated, (
+                f"Expected cleaned PN, got {list(aggregated.keys())}"
+            )
             # Check original_part_numbers from the card parse result
             # (parse_card_file doesn't build original_part_numbers — parse_cards does)
             # So we check that the part was found with the right quantity
@@ -2752,6 +3050,7 @@ class TestParseCards:
 # ═══════════════════════════════════════════════════════════════════════
 #  18. parse_card_file — empty sheets, no tables
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseCardFileExtended:
     """Дополнительные тесты parse_card_file.
@@ -2846,10 +3145,12 @@ class TestParseCardFileExtended:
 
     def test_service_file_sheets_info(self):
         """Служебный файл возвращает sheets с is_valid=False, has_data по факту."""
-        path = _make_card_xlsx([
-            ["物料编码", "零件名称", "数量"],
-            ["P001", "Part1", "1"],
-        ])
+        path = _make_card_xlsx(
+            [
+                ["物料编码", "零件名称", "数量"],
+                ["P001", "Part1", "1"],
+            ]
+        )
         try:
             result = parse_card_file(path, is_service_file=True)
             assert result.is_service_file
@@ -2863,6 +3164,7 @@ class TestParseCardFileExtended:
 # ═══════════════════════════════════════════════════════════════════════
 #  19. _extract_card_number — fallback edge
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExtractCardNumberExtended:
     """Дополнительные тесты _extract_card_number.
@@ -2883,6 +3185,7 @@ class TestExtractCardNumberExtended:
 #  20. _safe_name — cleanup helper
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSafeName:
     def test_safe_name_removes_special_chars(self):
         """_safe_name заменяет спецсимволы на подчёркивания."""
@@ -2902,6 +3205,7 @@ class TestSafeName:
 #  21. _safe_remove — error handling
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSafeRemove:
     def test_remove_existing_file(self):
         """Удаление существующего файла."""
@@ -2919,6 +3223,7 @@ class TestSafeRemove:
 # ═══════════════════════════════════════════════════════════════════════
 #  22. CardService - load with .xlsx file
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCardServiceExtended:
     """CardService.load with a real .xlsx file.
@@ -2959,6 +3264,7 @@ class TestCardServiceExtended:
 #  34. SplitStatistics — детальная статистика разделения
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSplitStatistics:
     """split_cards_to_files — детальная per-file статистика (SplitStatistics).
 
@@ -2978,14 +3284,17 @@ class TestSplitStatistics:
         from burlak_parser import splitter as splitter_mod
 
         monkeypatch.setattr(
-            splitter_mod, "_extract_to_path_worker",
+            splitter_mod,
+            "_extract_to_path_worker",
             _mock_extract_success,
         )
 
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[CardSheetInfo("C001", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3009,9 +3318,11 @@ class TestSplitStatistics:
     def test_xls_files_marked_skipped(self, tmp_path):
         """.xls файлы помечаются как неподдерживаемые (split_reason)."""
         result = CardParseResult(
-            card_number="C001", file_path="test.xls",
+            card_number="C001",
+            file_path="test.xls",
             sheets=[CardSheetInfo("C001", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3028,16 +3339,21 @@ class TestSplitStatistics:
             assert fs.is_xlsx is False
             assert fs.sheets_split == 0
             assert fs.sheets_skipped == 1
-            assert "не .xlsx" in fs.split_reason.lower() or "не xlsx" in fs.split_reason.lower()
+            assert (
+                "не .xlsx" in fs.split_reason.lower()
+                or "не xlsx" in fs.split_reason.lower()
+            )
         finally:
             _rmtree(tmpdir)
 
     def test_service_files_marked_skipped(self, tmp_path):
         """Служебные файлы помечаются как пропущенные (split_reason)."""
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[CardSheetInfo("C001", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
             is_service_file=True,
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
@@ -3060,12 +3376,16 @@ class TestSplitStatistics:
     def test_template_sheets_with_data_are_now_included(self, tmp_path):
         """Шаблонные листы с данными БОЛЬШЕ НЕ пропускаются (has_data=True → включены в split)."""
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[
-                CardSheetInfo("C001", "空表_Sheet1", has_data=True),   # has data → NOT skipped anymore
+                CardSheetInfo(
+                    "C001", "空表_Sheet1", has_data=True
+                ),  # has data → NOT skipped anymore
                 CardSheetInfo("C001", "Sheet2", has_data=True),
             ],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3074,10 +3394,14 @@ class TestSplitStatistics:
             stats = cd.split_stats
             assert stats is not None
             assert stats.total_sheets_all == 2
-            assert stats.total_sheets_split == 2, "Both sheets have data → both should split"
+            assert stats.total_sheets_split == 2, (
+                "Both sheets have data → both should split"
+            )
             assert stats.total_sheets_skipped == 0
             fs = stats.file_stats[0]
-            assert SKIP_REASON_TEMPLATE not in fs.skip_reasons,                 "Template sheet with data should NOT be in skip_reasons"
+            assert SKIP_REASON_TEMPLATE not in fs.skip_reasons, (
+                "Template sheet with data should NOT be in skip_reasons"
+            )
             assert fs.sheets_split == 2
             assert fs.sheets_skipped == 0
         finally:
@@ -3086,12 +3410,16 @@ class TestSplitStatistics:
     def test_template_sheets_without_data_still_skipped(self, tmp_path):
         """Шаблонные листы БЕЗ данных по-прежнему пропускаются."""
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[
-                CardSheetInfo("C001", "空表_Empty", has_data=False),  # no data → skipped
+                CardSheetInfo(
+                    "C001", "空表_Empty", has_data=False
+                ),  # no data → skipped
                 CardSheetInfo("C001", "Sheet2", has_data=True),
             ],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3113,13 +3441,15 @@ class TestSplitStatistics:
     def test_empty_sheets_recorded_in_skip_reasons(self, tmp_path):
         """Пустые листы корректно записываются в skip_reasons."""
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[
                 CardSheetInfo("C001", "S1", has_data=True),
                 CardSheetInfo("C001", "S2", has_data=False),
                 CardSheetInfo("C001", "S3", has_data=False),
             ],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3143,14 +3473,22 @@ class TestSplitStatistics:
         stats = SplitStatistics(
             file_stats=[
                 FileSplitStats(
-                    file_path="t.xlsx", file_name="t.xlsx", card_number="C",
-                    is_xlsx=True, is_service_file=False, 
-                    total_sheets=3, sheets_split=1, sheets_skipped=2,
+                    file_path="t.xlsx",
+                    file_name="t.xlsx",
+                    card_number="C",
+                    is_xlsx=True,
+                    is_service_file=False,
+                    total_sheets=3,
+                    sheets_split=1,
+                    sheets_skipped=2,
                     skip_reasons={SKIP_REASON_NO_DATA: ["S1", "S2"]},
                 ),
             ],
-            total_xlsx=1, total_xls=0,
-            total_sheets_all=3, total_sheets_split=1, total_sheets_skipped=2,
+            total_xlsx=1,
+            total_xls=0,
+            total_sheets_all=3,
+            total_sheets_split=1,
+            total_sheets_skipped=2,
             total_files_created=1,
         )
         top = stats.get_top_skip_reasons(5)
@@ -3165,24 +3503,42 @@ class TestSplitStatistics:
         stats = SplitStatistics(
             file_stats=[
                 FileSplitStats(
-                    file_path="a.xlsx", file_name="a.xlsx", card_number="C1",
-                    is_xlsx=True, is_service_file=False,
-                    total_sheets=10, sheets_split=2, sheets_skipped=8,
+                    file_path="a.xlsx",
+                    file_name="a.xlsx",
+                    card_number="C1",
+                    is_xlsx=True,
+                    is_service_file=False,
+                    total_sheets=10,
+                    sheets_split=2,
+                    sheets_skipped=8,
                 ),
                 FileSplitStats(
-                    file_path="b.xlsx", file_name="b.xlsx", card_number="C2",
-                    is_xlsx=True, is_service_file=False,
-                    total_sheets=5, sheets_split=4, sheets_skipped=1,
+                    file_path="b.xlsx",
+                    file_name="b.xlsx",
+                    card_number="C2",
+                    is_xlsx=True,
+                    is_service_file=False,
+                    total_sheets=5,
+                    sheets_split=4,
+                    sheets_skipped=1,
                 ),
                 FileSplitStats(
-                    file_path="c.xlsx", file_name="c.xlsx", card_number="C3",
-                    is_xlsx=False, is_service_file=True,
-                    total_sheets=3, sheets_split=0, sheets_skipped=3,
+                    file_path="c.xlsx",
+                    file_name="c.xlsx",
+                    card_number="C3",
+                    is_xlsx=False,
+                    is_service_file=True,
+                    total_sheets=3,
+                    sheets_split=0,
+                    sheets_skipped=3,
                     split_reason="skip",
                 ),
             ],
-            total_xlsx=2, total_xls=1,
-            total_sheets_all=18, total_sheets_split=6, total_sheets_skipped=12,
+            total_xlsx=2,
+            total_xls=1,
+            total_sheets_all=18,
+            total_sheets_split=6,
+            total_sheets_skipped=12,
             total_files_created=6,
         )
         top = stats.get_files_with_most_skips(2)
@@ -3208,14 +3564,17 @@ class TestSplitStatistics:
             }
 
         monkeypatch.setattr(
-            splitter_mod, "_extract_to_path_worker",
+            splitter_mod,
+            "_extract_to_path_worker",
             mock_extract_to_path,
         )
 
         result = CardParseResult(
-            card_number="C001", file_path="test.xlsx",
+            card_number="C001",
+            file_path="test.xlsx",
             sheets=[CardSheetInfo("C001", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])
         tmpdir = str(tmp_path)
@@ -3236,14 +3595,17 @@ class TestSplitStatistics:
         from burlak_parser import splitter as splitter_mod
 
         monkeypatch.setattr(
-            splitter_mod, "_extract_to_path_worker",
+            splitter_mod,
+            "_extract_to_path_worker",
             _mock_extract_success,
         )
 
         result = CardParseResult(
-            card_number="CP001", file_path="cp7.xlsx",
+            card_number="CP001",
+            file_path="cp7.xlsx",
             sheets=[CardSheetInfo("CP001", "S1", has_data=True)],
-            parts=[], aggregated_parts={},
+            parts=[],
+            aggregated_parts={},
             is_service_file=False,
         )
         cd = CardsData(all_parts={}, part_sources={}, card_results=[result])

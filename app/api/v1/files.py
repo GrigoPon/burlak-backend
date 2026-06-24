@@ -1,8 +1,6 @@
-from fastapi import APIRouter, Depends, Header, Request, status
-
 import aiosqlite
+from fastapi import APIRouter, Depends, Header, Request
 
-from app.core.exceptions import FileUploadError
 from app.db.database import get_async_db
 from app.schemas.file import ChunkUploadResponse, FileCompleteResponse
 from app.services.file_service import FileService

@@ -1,7 +1,7 @@
+import aiosqlite
+
 from app.core.exceptions import JobNotFoundError, JobStateError
 from app.db.async_repository import get_job, update_job_status
-
-import aiosqlite
 
 
 class JobProcessingService:
@@ -70,4 +70,3 @@ class JobProcessingService:
         # TODO: Trigger Celery task unpack.delay(job_id)
         # from app.worker.tasks.unpack import unpack
         # unpack.delay(job_id)
-        

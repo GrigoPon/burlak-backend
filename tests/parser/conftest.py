@@ -11,10 +11,8 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import List
 
-
-_KNOWN_PREFIXES: List[str] = [
+_KNOWN_PREFIXES: list[str] = [
     # test_bom_parser.py
     "bom_test_",
     "bom_empty_",

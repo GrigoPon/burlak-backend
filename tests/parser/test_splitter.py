@@ -14,28 +14,28 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import openpyxl
 import pytest
 
+from burlak_parser.heuristic_analyzer import HeuristicAnalyzer
 from burlak_parser.splitter import (
     CardSplitter,
     _clean_named_ranges,
     _collect_related_files,
     _extract_to_path_worker,
 )
-from burlak_parser.heuristic_analyzer import HeuristicAnalyzer
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def _create_multi_sheet_xlsx(
     dir_path: str,
     filename: str = "test_multi.xlsx",
-    sheets: Optional[Dict[str, List[List[Any]]]] = None,
+    sheets: dict[str, list[list[Any]]] | None = None,
 ) -> str:
     """Create an .xlsx file with multiple sheets and return its path."""
     if sheets is None:
@@ -77,6 +77,7 @@ def _get_xlsx_cell(path: str, sheet: str, row: int, col: int) -> Any:
 #  Fixtures
 # ═══════════════════════════════════════════════════════════════════════
 
+
 @pytest.fixture
 def tmp_dir() -> str:
     """Create a temporary directory for test files."""
@@ -95,7 +96,8 @@ def multi_sheet_xlsx(tmp_dir: str) -> str:
 def single_sheet_xlsx(tmp_dir: str) -> str:
     """Create a single-sheet .xlsx file."""
     return _create_multi_sheet_xlsx(
-        tmp_dir, "single.xlsx",
+        tmp_dir,
+        "single.xlsx",
         sheets={"OnlySheet": [["Data1"], ["Data2"]]},
     )
 
@@ -104,13 +106,17 @@ def single_sheet_xlsx(tmp_dir: str) -> str:
 #  1. CardSplitter.split_file — basic
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSplitFileBasic:
     def test_split_one_sheet(self, tmp_dir: str, multi_sheet_xlsx: str):
         """Split one sheet from a multi-sheet file."""
         output_dir = os.path.join(tmp_dir, "out1")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            "TestCard",
         )
         assert len(created) == 1, f"Expected 1 file, got {len(created)}"
         assert os.path.exists(created[0])
@@ -122,7 +128,10 @@ class TestSplitFileBasic:
         output_dir = os.path.join(tmp_dir, "out2")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1", "Sheet2"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1", "Sheet2"],
+            "TestCard",
         )
         assert len(created) == 2, f"Expected 2 files, got {len(created)}"
         for fp in created:
@@ -134,7 +143,10 @@ class TestSplitFileBasic:
         output_dir = os.path.join(tmp_dir, "out3")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1", "Sheet2", "Sheet3"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1", "Sheet2", "Sheet3"],
+            "TestCard",
         )
         assert len(created) == 3, f"Expected 3 files, got {len(created)}"
 
@@ -143,7 +155,10 @@ class TestSplitFileBasic:
         output_dir = os.path.join(tmp_dir, "out4")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet2"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet2"],
+            "TestCard",
         )[0]
 
         # Sheet2 in original had C1, D1; C2, D2
@@ -155,15 +170,17 @@ class TestSplitFileBasic:
             for r in range(1, 3)
         ]
         split_wb.close()
-        assert data == [["C1", "D1"], ["C2", "D2"]], \
-            f"Data mismatch. Got: {data}"
+        assert data == [["C1", "D1"], ["C2", "D2"]], f"Data mismatch. Got: {data}"
 
     def test_split_without_label(self, tmp_dir: str, multi_sheet_xlsx: str):
         """Split without file_label uses sheet name as filename."""
         output_dir = os.path.join(tmp_dir, "out5")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], file_label="",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            file_label="",
         )
         assert len(created) == 1
         # Filename should be based on sheet name
@@ -174,6 +191,7 @@ class TestSplitFileBasic:
 # ═══════════════════════════════════════════════════════════════════════
 #  2. CardSplitter.split_file — edge cases
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitFileEdgeCases:
     def test_non_xlsx_file(self, tmp_dir: str):
@@ -191,7 +209,10 @@ class TestSplitFileEdgeCases:
         output_dir = os.path.join(tmp_dir, "out_edge2")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["NonExistentSheet"], "Test",
+            multi_sheet_xlsx,
+            output_dir,
+            ["NonExistentSheet"],
+            "Test",
         )
         assert len(created) == 1, "Fallback should copy source as last resort"
         assert os.path.exists(created[0])
@@ -201,7 +222,10 @@ class TestSplitFileEdgeCases:
         output_dir = os.path.join(tmp_dir, "out_edge3")
         splitter = CardSplitter()
         created = splitter.split_file(
-            single_sheet_xlsx, output_dir, ["OnlySheet"], "Test",
+            single_sheet_xlsx,
+            output_dir,
+            ["OnlySheet"],
+            "Test",
         )
         # Single sheet file — splitting should still work
         assert len(created) == 1, f"Expected 1 file, got {len(created)}"
@@ -213,10 +237,16 @@ class TestSplitFileEdgeCases:
         splitter = CardSplitter()
         # Split same sheet twice
         created1 = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            "TestCard",
         )
         created2 = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            "TestCard",
         )
         assert len(created1) == 1
         # Second call skips because file already exists (pre-allocation model)
@@ -228,7 +258,10 @@ class TestSplitFileEdgeCases:
         output_dir = os.path.join(tmp_dir, "out_edge5")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, [], "Test",
+            multi_sheet_xlsx,
+            output_dir,
+            [],
+            "Test",
         )
         assert created == [], "Empty sheet list should return empty"
 
@@ -238,7 +271,10 @@ class TestSplitFileEdgeCases:
         assert not os.path.exists(output_dir)
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], "Test",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            "Test",
         )
         assert len(created) == 1
         assert os.path.exists(output_dir)
@@ -247,6 +283,7 @@ class TestSplitFileEdgeCases:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. CardSplitter._extract_sheet_via_zip — content integrity
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExtractSheetViaZip:
     def test_sheet_data_correct(self, tmp_dir: str):
@@ -273,7 +310,10 @@ class TestExtractSheetViaZip:
         output_dir = os.path.join(tmp_dir, "extract2")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir, ["Sheet1"], "TestCard",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1"],
+            "TestCard",
         )
         # openpyxl should be able to open it without errors
         wb = openpyxl.load_workbook(created[0])
@@ -301,8 +341,10 @@ class TestExtractSheetViaZip:
         output_dir = os.path.join(tmp_dir, "extract4")
         splitter = CardSplitter()
         created = splitter.split_file(
-            multi_sheet_xlsx, output_dir,
-            ["Sheet1", "Sheet2", "Sheet3"], "Test",
+            multi_sheet_xlsx,
+            output_dir,
+            ["Sheet1", "Sheet2", "Sheet3"],
+            "Test",
         )
         assert len(created) == 3
         for fp in created:
@@ -312,6 +354,7 @@ class TestExtractSheetViaZip:
 # ═══════════════════════════════════════════════════════════════════════
 #  4. CardSplitter.split_many_parallel
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitManyParallel:
     def test_parallel_split(self, tmp_dir: str):
@@ -324,7 +367,9 @@ class TestSplitManyParallel:
                 f"Op{i}B": [["Part", "Qty"], [f"P{i}02", "2"]],
             }
             path = _create_multi_sheet_xlsx(
-                tmp_dir, f"card_{i}.xlsx", sheets,
+                tmp_dir,
+                f"card_{i}.xlsx",
+                sheets,
             )
             files.append(path)
 
@@ -336,9 +381,13 @@ class TestSplitManyParallel:
         ]
 
         splitter = CardSplitter(max_workers=2)
-        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(
+            tasks
+        )
         assert len(errors) == 0, f"Expected 0 errors, got {errors}"
-        assert len(created) == 6, f"Expected 6 files from 3 cards × 2 ops, got {len(created)}"
+        assert len(created) == 6, (
+            f"Expected 6 files from 3 cards × 2 ops, got {len(created)}"
+        )
         for fp in created:
             assert os.path.exists(fp), f"File {fp} missing"
             assert _count_xlsx_sheets(fp) == 1
@@ -349,14 +398,18 @@ class TestSplitManyParallel:
         tasks = [(multi_sheet_xlsx, output_dir, ["Sheet1"], "Card")]
 
         splitter = CardSplitter(max_workers=2)
-        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(
+            tasks
+        )
         assert len(errors) == 0
         assert len(created) == 1
 
     def test_parallel_empty_tasks(self, tmp_dir: str):
         """Empty tasks list returns empty."""
         splitter = CardSplitter()
-        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel([])
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(
+            []
+        )
         assert len(errors) == 0
         assert created == []
 
@@ -364,6 +417,7 @@ class TestSplitManyParallel:
 # ═══════════════════════════════════════════════════════════════════════
 #  5. _split_file_worker
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitFileWorker:
     def test_worker_basic(self, tmp_dir: str, multi_sheet_xlsx: str):
@@ -383,7 +437,9 @@ class TestSplitFileWorker:
             output_path = path_map.get((multi_sheet_xlsx, sheet_name))
             if output_path:
                 result = _extract_to_path_worker(
-                    multi_sheet_xlsx, output_path, sheet_name,
+                    multi_sheet_xlsx,
+                    output_path,
+                    sheet_name,
                 )
                 results.append(result)
 
@@ -399,6 +455,7 @@ class TestSplitFileWorker:
 # ═══════════════════════════════════════════════════════════════════════
 #  6. Integration: split + re-parse
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestSplitIntegration:
     def test_split_then_parse_detects_table(self, tmp_dir: str):
@@ -440,114 +497,129 @@ class TestSplitIntegration:
 #  7. _clean_named_ranges (XML-level unit tests)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCleanNamedRanges:
     """Test _clean_named_ranges at the XML ElementTree level."""
 
-    def _make_wb_root(self, defined_names: Optional[List[Dict[str, str]]] = None):
+    def _make_wb_root(self, defined_names: list[dict[str, str]] | None = None):
         """Create a minimal workbook.xml with definedNames."""
         import xml.etree.ElementTree as ET
+
         NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
         NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
         root = ET.fromstring(
             f'<workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}">'
-            f'  <sheets>'
+            f"  <sheets>"
             f'    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
             f'    <sheet name="Sheet2" sheetId="2" r:id="rId2"/>'
-            f'  </sheets>'
-            f'</workbook>'
+            f"  </sheets>"
+            f"</workbook>"
         )
 
         if defined_names:
-            dn_elem = ET.SubElement(root, f'{{{NS_MAIN}}}definedNames')
+            dn_elem = ET.SubElement(root, f"{{{NS_MAIN}}}definedNames")
             for dn in defined_names:
-                d = ET.SubElement(dn_elem, f'{{{NS_MAIN}}}definedName')
-                d.set('name', dn.get('name', ''))
-                if 'localSheetId' in dn:
-                    d.set('localSheetId', dn['localSheetId'])
-                d.text = dn.get('formula', '')
+                d = ET.SubElement(dn_elem, f"{{{NS_MAIN}}}definedName")
+                d.set("name", dn.get("name", ""))
+                if "localSheetId" in dn:
+                    d.set("localSheetId", dn["localSheetId"])
+                d.text = dn.get("formula", "")
 
         return root
 
     def test_removes_named_range_for_deleted_sheet(self):
         """Named range referencing deleted sheet is removed."""
-        root = self._make_wb_root([
-            {'name': 'MyRange', 'formula': "Sheet2!$A$1:$B$2"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "MyRange", "formula": "Sheet2!$A$1:$B$2"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
 
         # definedNames should be empty (only range was for Sheet2)
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
-        assert dn_elem is None or len(dn_elem) == 0, \
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
+        assert dn_elem is None or len(dn_elem) == 0, (
             "Named range for deleted sheet should be removed"
+        )
 
     def test_keeps_named_range_for_kept_sheet(self):
         """Named range referencing kept sheet stays."""
-        root = self._make_wb_root([
-            {'name': 'MyRange', 'formula': "Sheet1!$A$1:$B$2"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "MyRange", "formula": "Sheet1!$A$1:$B$2"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
 
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is not None
         assert len(dn_elem) == 1, "Named range for kept sheet should remain"
-        assert dn_elem[0].get('name') == 'MyRange'
+        assert dn_elem[0].get("name") == "MyRange"
 
     def test_removes_quoted_sheet_name(self):
         """Named range with quoted sheet name (spaces) is removed."""
-        root = self._make_wb_root([
-            {'name': 'Range1', 'formula': "'Sheet Two'!$A$1"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "Range1", "formula": "'Sheet Two'!$A$1"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet Two"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is None or len(dn_elem) == 0
 
     def test_updates_local_sheet_id(self):
         """Non-zero localSheetId on kept sheet's named ranges is reset to 0."""
-        root = self._make_wb_root([
-            {'name': 'LocalRange', 'formula': "Sheet1!$A$1",
-             'localSheetId': '1'},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "LocalRange", "formula": "Sheet1!$A$1", "localSheetId": "1"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is not None
-        assert dn_elem[0].get('localSheetId') == '0', \
+        assert dn_elem[0].get("localSheetId") == "0", (
             "localSheetId should be reset to 0"
+        )
 
     def test_removes_elem_when_empty(self):
         """definedNames element removed entirely if no ranges remain."""
-        root = self._make_wb_root([
-            {'name': 'ToDelete', 'formula': "Sheet2!$A$1"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "ToDelete", "formula": "Sheet2!$A$1"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is None, "Empty definedNames should be removed"
 
     def test_no_defined_names_at_all(self):
         """Workbook without definedNames is unchanged."""
         root = self._make_wb_root()  # no defined names
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is None
 
     def test_mixed_ranges_keeps_and_deletes(self):
         """Mixed: keep ranges for remaining sheet, delete for removed sheets."""
-        root = self._make_wb_root([
-            {'name': 'Keep', 'formula': "Sheet1!$A$1"},
-            {'name': 'Delete', 'formula': "Sheet2!$B$2"},
-            {'name': 'AlsoKeep', 'formula': "Sheet1!$C$3"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "Keep", "formula": "Sheet1!$A$1"},
+                {"name": "Delete", "formula": "Sheet2!$B$2"},
+                {"name": "AlsoKeep", "formula": "Sheet1!$C$3"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is not None
-        names = [d.get('name') for d in dn_elem]
+        names = [d.get("name") for d in dn_elem]
         assert "Keep" in names
         assert "AlsoKeep" in names
         assert "Delete" not in names
@@ -557,12 +629,13 @@ class TestCleanNamedRanges:
 #  8. _collect_related_files unit tests
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCollectRelatedFiles:
     """Unit tests for _collect_related_files."""
 
     def test_no_rels_no_files_added(self):
         """No files added when .rels doesn't exist."""
-        zip_entries: Dict[str, bytes] = {}
+        zip_entries: dict[str, bytes] = {}
         files_to_remove: set = set()
         _collect_related_files(zip_entries, "xl/worksheets/sheet2.xml", files_to_remove)
         assert len(files_to_remove) == 0
@@ -583,7 +656,7 @@ class TestCollectRelatedFiles:
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
-                b'</Relationships>'
+                b"</Relationships>"
             ),
             "xl/drawings/drawing2.xml": b"dummy",
         }
@@ -594,7 +667,7 @@ class TestCollectRelatedFiles:
 
     def test_recursive_rels_collected(self):
         """Rels files for drawings are also collected (added to removal set).
-        
+
         Note: _collect_related_files adds the drawing's .rels file but does NOT
         parse it recursively to find its targets (e.g. images referenced inside
         the drawing rels). Only the .rels file itself is added.
@@ -604,14 +677,14 @@ class TestCollectRelatedFiles:
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing3.xml"/>'
-                b'</Relationships>'
+                b"</Relationships>"
             ),
             "xl/drawings/drawing3.xml": b"dummy",
             "xl/drawings/_rels/drawing3.xml.rels": (
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>'
-                b'</Relationships>'
+                b"</Relationships>"
             ),
             "xl/media/image1.png": b"dummy",
         }
@@ -629,7 +702,7 @@ class TestCollectRelatedFiles:
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
-                b'</Relationships>'
+                b"</Relationships>"
             ),
         }
         files_to_remove: set = set()
@@ -650,75 +723,86 @@ class TestCollectRelatedFiles:
 #  9. _clean_named_ranges — advanced edge cases
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestCleanNamedRangesAdvanced:
     """Test advanced edge cases of _clean_named_ranges (regex branch, localSheetId)."""
 
     def _make_wb_root(self, defined_names=None):
         """Create a minimal workbook.xml with definedNames."""
         import xml.etree.ElementTree as ET
+
         NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
         NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
         root = ET.fromstring(
             f'<workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}">'
-            f'  <sheets>'
+            f"  <sheets>"
             f'    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
             f'    <sheet name="Sheet2" sheetId="2" r:id="rId2"/>'
-            f'  </sheets>'
-            f'</workbook>'
+            f"  </sheets>"
+            f"</workbook>"
         )
         if defined_names:
-            dn_elem = ET.SubElement(root, f'{{{NS_MAIN}}}definedNames')
+            dn_elem = ET.SubElement(root, f"{{{NS_MAIN}}}definedNames")
             for dn in defined_names:
-                d = ET.SubElement(dn_elem, f'{{{NS_MAIN}}}definedName')
-                d.set('name', dn.get('name', ''))
-                if 'localSheetId' in dn:
-                    d.set('localSheetId', dn['localSheetId'])
-                d.text = dn.get('formula', '')
+                d = ET.SubElement(dn_elem, f"{{{NS_MAIN}}}definedName")
+                d.set("name", dn.get("name", ""))
+                if "localSheetId" in dn:
+                    d.set("localSheetId", dn["localSheetId"])
+                d.text = dn.get("formula", "")
         return root
 
     def test_removes_via_regex_complex_formula(self):
         """Named range with Sheet2! not at start of formula is removed via regex.
-        
+
         Covers lines 389-390: regex branch should_remove = True / break.
-        Formula '=OFFSET(Sheet2!$A$1,...)' doesn't start with 'Sheet2!' 
+        Formula '=OFFSET(Sheet2!$A$1,...)' doesn't start with 'Sheet2!'
         (starts with '=OFFSET('), so simple startswith check fails.
         But regex \bSheet2! matches inside the formula.
         """
-        root = self._make_wb_root([
-            {'name': 'ComplexRange', 'formula': '=OFFSET(Sheet2!$A$1,0,COUNTA(Sheet2!$A:$A))'},
-        ])
+        root = self._make_wb_root(
+            [
+                {
+                    "name": "ComplexRange",
+                    "formula": "=OFFSET(Sheet2!$A$1,0,COUNTA(Sheet2!$A:$A))",
+                },
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is None or len(dn_elem) == 0
 
     def test_keeps_embedded_name_not_matching_deleted(self):
         """Named range with similar but not same sheet name is kept.
-        
+
         'Sheet2Other' should NOT match regex \bSheet2! because after
         'Sheet2' comes 'Other', not '!'.
         """
-        root = self._make_wb_root([
-            {'name': 'Safe', 'formula': "Sheet2Other!$A$1"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "Safe", "formula": "Sheet2Other!$A$1"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is not None
         assert len(dn_elem) == 1
-        assert dn_elem[0].get('name') == 'Safe'
+        assert dn_elem[0].get("name") == "Safe"
 
     def test_empty_defined_names_elem_removed_from_tree(self):
         """After all definedNames removed, the element is removed from tree.
-        
+
         Covers line 408-409: if len(defined_names_elem) == 0: wb_root.remove(...)
         """
-        root = self._make_wb_root([
-            {'name': 'Test', 'formula': "Sheet2!$A$1"},
-        ])
+        root = self._make_wb_root(
+            [
+                {"name": "Test", "formula": "Sheet2!$A$1"},
+            ]
+        )
         _clean_named_ranges(root, {"Sheet2"}, "Sheet1")
-        ns = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-        dn_elem = root.find('m:definedNames', ns)
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        dn_elem = root.find("m:definedNames", ns)
         assert dn_elem is None, "Empty definedNames element must be removed"
 
 
@@ -726,14 +810,17 @@ class TestCleanNamedRangesAdvanced:
 #  10. Integration: _extract_sheet_via_zip — advanced features
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractSheetAdvanced:
     """Integration tests for _extract_sheet_via_zip with advanced OOXML features.
-    
+
     Covers customWorkbookViews, Content_Types cleanup, and drawing relationships
     via the full _extract_sheet_via_zip code path.
     """
 
-    def _create_xlsx_with_custom_views(self, tmp_dir: str, filename: str = "custom_views.xlsx") -> str:
+    def _create_xlsx_with_custom_views(
+        self, tmp_dir: str, filename: str = "custom_views.xlsx"
+    ) -> str:
         """Create .xlsx with customWorkbookViews element."""
         import io
         import zipfile
@@ -746,26 +833,28 @@ class TestExtractSheetAdvanced:
         wb.save(path)
         wb.close()
 
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             data = f.read()
-        with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             entries = {n: zf.read(n) for n in zf.namelist()}
 
         # Add customWorkbookViews before <sheets>
-        wb_xml = entries['xl/workbook.xml'].decode('utf-8')
+        wb_xml = entries["xl/workbook.xml"].decode("utf-8")
         wb_xml = wb_xml.replace(
-            '<sheets>',
-            '<customWorkbookViews><customWorkbookView guid="{00000000-0000-0000-0000-000000000001}" autoUpdate="0"/></customWorkbookViews><sheets>'
+            "<sheets>",
+            '<customWorkbookViews><customWorkbookView guid="{00000000-0000-0000-0000-000000000001}" autoUpdate="0"/></customWorkbookViews><sheets>',
         )
-        entries['xl/workbook.xml'] = wb_xml.encode('utf-8')
+        entries["xl/workbook.xml"] = wb_xml.encode("utf-8")
 
         os.remove(path)
-        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
             for name, data in entries.items():
                 zout.writestr(name, data)
         return path
 
-    def _create_xlsx_with_drawings(self, tmp_dir: str, filename: str = "with_drawings.xlsx") -> str:
+    def _create_xlsx_with_drawings(
+        self, tmp_dir: str, filename: str = "with_drawings.xlsx"
+    ) -> str:
         """Create .xlsx with drawing relationships for Sheet2."""
         import io
         import zipfile
@@ -778,9 +867,9 @@ class TestExtractSheetAdvanced:
         wb.save(path)
         wb.close()
 
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             data = f.read()
-        with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             entries = {n: zf.read(n) for n in zf.namelist()}
 
         # Add drawing .rels for sheet2
@@ -788,20 +877,20 @@ class TestExtractSheetAdvanced:
             b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             b'  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/>'
-            b'</Relationships>'
+            b"</Relationships>"
         )
-        entries['xl/worksheets/_rels/sheet2.xml.rels'] = sheet2_rels
-        entries['xl/drawings/drawing2.xml'] = b'<xml>dummy</xml>'
+        entries["xl/worksheets/_rels/sheet2.xml.rels"] = sheet2_rels
+        entries["xl/drawings/drawing2.xml"] = b"<xml>dummy</xml>"
 
         os.remove(path)
-        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
             for name, data in entries.items():
                 zout.writestr(name, data)
         return path
 
     def test_custom_workbook_views_removed(self, tmp_dir: str):
         """customWorkbookViews is removed during split.
-        
+
         Covers line 263: wb_root.remove(custom_views)
         """
         path = self._create_xlsx_with_custom_views(tmp_dir)
@@ -819,16 +908,18 @@ class TestExtractSheetAdvanced:
         # Verify customWorkbookViews was removed from workbook.xml
         import io
         import zipfile
-        with open(created[0], 'rb') as f:
+
+        with open(created[0], "rb") as f:
             data = f.read()
-        with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
-            wb_xml = zf.read('xl/workbook.xml').decode('utf-8')
-        assert 'customWorkbookViews' not in wb_xml, \
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            wb_xml = zf.read("xl/workbook.xml").decode("utf-8")
+        assert "customWorkbookViews" not in wb_xml, (
             "customWorkbookViews should be removed from workbook.xml"
+        )
 
     def test_drawings_removed_with_sheet(self, tmp_dir: str):
         """Drawing references are cleaned up when a sheet with drawings is removed.
-        
+
         Covers lines 314-334: _collect_related_files resolving drawing targets
         """
         path = self._create_xlsx_with_drawings(tmp_dir)
@@ -846,18 +937,21 @@ class TestExtractSheetAdvanced:
         # Verify drawing files for Sheet2 are not in the output
         import io
         import zipfile
-        with open(created[0], 'rb') as f:
+
+        with open(created[0], "rb") as f:
             data = f.read()
-        with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             names = zf.namelist()
-        assert 'xl/drawings/drawing2.xml' not in names, \
+        assert "xl/drawings/drawing2.xml" not in names, (
             "Drawing for removed sheet should be removed"
-        assert 'xl/worksheets/_rels/sheet2.xml.rels' not in names, \
+        )
+        assert "xl/worksheets/_rels/sheet2.xml.rels" not in names, (
             "Sheet .rels should be removed"
+        )
 
     def test_content_types_cleaned(self, tmp_dir: str):
         """Content types for removed sheets are cleaned up.
-        
+
         Covers line 274: ct_root.remove(override_el)
         """
         sheets = {
@@ -875,27 +969,27 @@ class TestExtractSheetAdvanced:
         # Inspect [Content_Types].xml — should NOT have overrides for removed sheets
         import io
         import zipfile
-        with open(created[0], 'rb') as f:
-            data = f.read()
-        with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
-            ct_xml = zf.read('[Content_Types].xml').decode('utf-8')
 
-        assert 'sheet2' not in ct_xml.lower(), \
-            f"Found sheet2 reference in content types"
-        assert 'sheet3' not in ct_xml.lower(), \
-            f"Found sheet3 reference in content types"
+        with open(created[0], "rb") as f:
+            data = f.read()
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            ct_xml = zf.read("[Content_Types].xml").decode("utf-8")
+
+        assert "sheet2" not in ct_xml.lower(), "Found sheet2 reference in content types"
+        assert "sheet3" not in ct_xml.lower(), "Found sheet3 reference in content types"
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  11. CardSplitter.split_many_parallel — error handling
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestSplitManyParallelErrors:
     """Test error handling in parallel split."""
 
     def test_nonexistent_file_handled(self, tmp_dir: str):
         """Non-existent file in parallel split is handled gracefully.
-        
+
         split_file catches FileNotFoundError internally, so no exception
         propagates to as_completed — errors list remains empty.
         """
@@ -904,7 +998,9 @@ class TestSplitManyParallelErrors:
             ("/nonexistent/file.xlsx", output_dir, ["Sheet1"], "BadFile"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(
+            tasks
+        )
         assert created == []
         # split_many_parallel теперь ловит ошибки через _extract_to_path_worker
         # и возвращает их в errors. Несуществующий файл — это ошибка.
@@ -917,7 +1013,8 @@ class TestSplitManyParallelErrors:
         ошибка одного файла не блокирует остальные.
         """
         valid_path = _create_multi_sheet_xlsx(
-            tmp_dir, "valid.xlsx",
+            tmp_dir,
+            "valid.xlsx",
             sheets={"Op1": [["A", "B"]], "Op2": [["C", "D"]]},
         )
         output_dir = os.path.join(tmp_dir, "parallel_mixed")
@@ -927,7 +1024,9 @@ class TestSplitManyParallelErrors:
             (valid_path, output_dir, ["Op1", "Op2"], "Good"),
         ]
         splitter = CardSplitter(max_workers=1)
-        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(tasks)
+        created, errors, oxl_count, oxl_files, manifest = splitter.split_many_parallel(
+            tasks
+        )
         assert len(created) == 2
         # Bad file может быть в errors, но Good файлы должны быть созданы
         assert len(created) >= 2, "Good files should be created despite bad file"
@@ -940,6 +1039,7 @@ class TestSplitManyParallelErrors:
 #  12. _extract_sheet_via_zip — Error handling (строки 184, 189, 212, 249)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractSheetCorruptedFiles:
     """Тесты для обработки битых/нестандартных .xlsx файлов.
 
@@ -951,7 +1051,11 @@ class TestExtractSheetCorruptedFiles:
     """
 
     def _modify_xlsx_zip(
-        self, source_path: str, modifier, tmp_dir: str, filename: str,
+        self,
+        source_path: str,
+        modifier,
+        tmp_dir: str,
+        filename: str,
     ) -> str:
         """Создать копию .xlsx, модифицируя ZIP записи."""
         import io
@@ -959,14 +1063,14 @@ class TestExtractSheetCorruptedFiles:
 
         new_path = os.path.join(tmp_dir, filename)
 
-        with open(source_path, 'rb') as f:
+        with open(source_path, "rb") as f:
             zip_data = f.read()
-        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+        with zipfile.ZipFile(io.BytesIO(zip_data), "r") as zf:
             entries = {n: zf.read(n) for n in zf.namelist()}
 
         entries = modifier(entries)
 
-        with zipfile.ZipFile(new_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(new_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for name, data in entries.items():
                 zout.writestr(name, data)
         return new_path
@@ -979,8 +1083,10 @@ class TestExtractSheetCorruptedFiles:
         base = _create_multi_sheet_xlsx(tmp_dir, "base.xlsx")
         # Удаляем xl/workbook.xml из ZIP
         corrupted = self._modify_xlsx_zip(
-            base, lambda e: {k: v for k, v in e.items() if k != 'xl/workbook.xml'},
-            tmp_dir, "no_wb.xlsx",
+            base,
+            lambda e: {k: v for k, v in e.items() if k != "xl/workbook.xml"},
+            tmp_dir,
+            "no_wb.xlsx",
         )
         output_dir = os.path.join(tmp_dir, "out_no_wb")
         splitter = CardSplitter()
@@ -995,10 +1101,10 @@ class TestExtractSheetCorruptedFiles:
         base = _create_multi_sheet_xlsx(tmp_dir, "base.xlsx")
 
         def modifier(entries):
-            wb_xml = entries['xl/workbook.xml'].decode('utf-8')
+            wb_xml = entries["xl/workbook.xml"].decode("utf-8")
             # Удаляем <sheets>...</sheets>
-            wb_xml = re.sub(r'<sheets>.*?</sheets>', '', wb_xml, flags=re.DOTALL)
-            entries['xl/workbook.xml'] = wb_xml.encode('utf-8')
+            wb_xml = re.sub(r"<sheets>.*?</sheets>", "", wb_xml, flags=re.DOTALL)
+            entries["xl/workbook.xml"] = wb_xml.encode("utf-8")
             return entries
 
         corrupted = self._modify_xlsx_zip(base, modifier, tmp_dir, "no_sheets.xlsx")
@@ -1016,8 +1122,9 @@ class TestExtractSheetCorruptedFiles:
 
         corrupted = self._modify_xlsx_zip(
             base,
-            lambda e: {k: v for k, v in e.items() if k != 'xl/_rels/workbook.xml.rels'},
-            tmp_dir, "no_rels.xlsx",
+            lambda e: {k: v for k, v in e.items() if k != "xl/_rels/workbook.xml.rels"},
+            tmp_dir,
+            "no_rels.xlsx",
         )
         output_dir = os.path.join(tmp_dir, "out_no_rels")
         splitter = CardSplitter()
@@ -1033,10 +1140,12 @@ class TestExtractSheetCorruptedFiles:
         base = _create_multi_sheet_xlsx(tmp_dir, "base.xlsx")
 
         def modifier(entries):
-            rels_xml = entries['xl/_rels/workbook.xml.rels'].decode('utf-8')
+            rels_xml = entries["xl/_rels/workbook.xml.rels"].decode("utf-8")
             # Меняем Target="/xl/worksheets/..." на Target="worksheets/..."
-            rels_xml = rels_xml.replace('Target="/xl/worksheets/', 'Target="worksheets/')
-            entries['xl/_rels/workbook.xml.rels'] = rels_xml.encode('utf-8')
+            rels_xml = rels_xml.replace(
+                'Target="/xl/worksheets/', 'Target="worksheets/'
+            )
+            entries["xl/_rels/workbook.xml.rels"] = rels_xml.encode("utf-8")
             return entries
 
         rel_path = self._modify_xlsx_zip(base, modifier, tmp_dir, "rel_path.xlsx")

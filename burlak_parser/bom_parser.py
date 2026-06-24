@@ -26,35 +26,40 @@ import os
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
 
 import openpyxl
 
 from burlak_parser.heuristic_analyzer import (
-    HeuristicAnalyzer,
-    clean_cell_text,
     NAME_KEYWORDS,
     QTY_KEYWORDS,
+    HeuristicAnalyzer,
+    clean_cell_text,
 )
 from burlak_parser.normalizer import (
-    normalize_quantity,
-    normalize_part_number,
     clean_part_number,
     is_valid_part_number,
+    normalize_quantity,
 )
 
 # Листы с мета-именами, которые НЕ создают конфигурации (单车用量, 发动机附件 и т.д.)
 _NON_CONFIG_SHEET_KEYWORDS = (
-    "单车用量", "组件数量", "发动机附件",
-    "Расход на один автомобиль", "количество компонентов",
+    "单车用量",
+    "组件数量",
+    "发动机附件",
+    "Расход на один автомобиль",
+    "количество компонентов",
 )
 
 # Ключевые слова для идентификации SWM-стиля листов (总装BOM/涂装BOM/焊装BOM)
 # Эти листы не имеют отдельных config-колонок, но имеют qty-колонку;
 # все три листа агрегируются в одну общую конфигурацию.
 _SWM_MULTISHEET_BOM_KEYWORDS = (
-    "总装bom", "涂装bom", "焊装bom",
-    "总装", "涂装", "焊装",
+    "总装bom",
+    "涂装bom",
+    "焊装bom",
+    "总装",
+    "涂装",
+    "焊装",
 )
 
 logger = logging.getLogger(__name__)
@@ -63,24 +68,30 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PartInfo:
     """Информация о детали из BOM."""
+
     part_number: str
     name_cn: str = ""
     name_en: str = ""
     # Количество для конкретной комплектации (будет заполнено после выбора)
     quantity: float = 0.0
     # Номера/коды комплектаций, для которых указана деталь
-    applicable_configs: List[str] = field(default_factory=list)
+    applicable_configs: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BOMData:
     """Результат парсинга BOM-файла."""
-    parts: Dict[str, PartInfo]  # part_number -> PartInfo
-    config_names: List[str]  # названия колонок комплектаций
-    config_quantities: Dict[str, Dict[str, float]]  # config_name -> {part_number -> qty}
+
+    parts: dict[str, PartInfo]  # part_number -> PartInfo
+    config_names: list[str]  # названия колонок комплектаций
+    config_quantities: dict[
+        str, dict[str, float]
+    ]  # config_name -> {part_number -> qty}
     source_file: str = ""
     # Глобальный словарь названий (составлен из ВСЕХ строк, а не только для комплектации)
-    global_names: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # part_number -> (name_cn, name_en)
+    global_names: dict[str, tuple[str, str]] = field(
+        default_factory=dict
+    )  # part_number -> (name_cn, name_en)
 
 
 def _detect_multi_block_layout(
@@ -89,7 +100,7 @@ def _detect_multi_block_layout(
     part_no_col: int,
     name_cn_col: int,
     qty_col: int,
-) -> List[Tuple[int, int, int]]:
+) -> list[tuple[int, int, int]]:
     """Detect multi-block horizontal layout (side-by-side tables).
 
     Some BOM sheets (e.g., SWM 舒享版焊装合件) have multiple blocks
@@ -103,20 +114,20 @@ def _detect_multi_block_layout(
     from burlak_parser.heuristic_analyzer import PART_NO_KEYWORDS
 
     max_col = ws.max_column or 20
-    blocks: List[Tuple[int, int, int]] = [(part_no_col, name_cn_col, qty_col)]
+    blocks: list[tuple[int, int, int]] = [(part_no_col, name_cn_col, qty_col)]
 
     if header_row < 1 or max_col < 5:
         return blocks
 
     # Scan header row for additional part_no columns
     # Pattern: part_no, name, qty, [empty separator], part_no, name, qty, ...
-    row_vals: List[str] = []
+    row_vals: list[str] = []
     for c in range(1, max_col + 1):
         v = ws.cell(header_row, c).value
         row_vals.append(str(v).strip().lower() if v is not None else "")
 
     # Find all columns that contain part_no keywords
-    pn_cols: List[int] = []
+    pn_cols: list[int] = []
     for idx, val in enumerate(row_vals):
         if val and any(kw in val for kw in PART_NO_KEYWORDS):
             pn_cols.append(idx + 1)  # 1-indexed
@@ -149,7 +160,9 @@ def _detect_multi_block_layout(
     if len(blocks) > 1:
         logger.debug(
             "Multi-block layout detected: %d blocks in %s (header row %d)",
-            len(blocks), ws.title, header_row,
+            len(blocks),
+            ws.title,
+            header_row,
         )
 
     return blocks
@@ -175,7 +188,9 @@ def parse_bom(file_path: str) -> BOMData:
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
     except Exception as e:
-        logger.warning("Не удалось загрузить обычным режимом (%s), пробуем read_only", e)
+        logger.warning(
+            "Не удалось загрузить обычным режимом (%s), пробуем read_only", e
+        )
         wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
 
     # Check if data_only=True produced empty results (formulas never cached)
@@ -215,33 +230,41 @@ def parse_bom(file_path: str) -> BOMData:
     # Все sub-листы SWM (总装/涂装/焊装) вносят данные в ОДНУ конфигурацию
     # Инициализируются ДО try-блока для гарантии доступности в finally
     _SWM_COMBINED_CONFIG = "SWM_COMBINED"
-    _swm_multisheet_sheets: List[str] = []  # собираем имена для логирования
+    _swm_multisheet_sheets: list[str] = []  # собираем имена для логирования
 
     try:
         sheet_names = wb.sheetnames
 
         # ── Результаты, агрегированные по всем листам ──
-        all_parts: Dict[str, PartInfo] = {}
-        all_config_quantities: Dict[str, Dict[str, float]] = {}
-        all_config_names: List[str] = []
-        all_global_names: Dict[str, Tuple[str, str]] = {}
-        seen_config_names: Dict[str, str] = {}  # config_name -> нормализованный оригинал
+        all_parts: dict[str, PartInfo] = {}
+        all_config_quantities: dict[str, dict[str, float]] = {}
+        all_config_names: list[str] = []
+        all_global_names: dict[str, tuple[str, str]] = {}
+        seen_config_names: dict[
+            str, str
+        ] = {}  # config_name -> нормализованный оригинал
 
         for sheet_name in sheet_names:
             try:
                 ws = wb[sheet_name]
                 logger.info(
                     "Анализ листа: %s (строк: %s, колонок: %s)",
-                    sheet_name, ws.max_row, ws.max_column,
+                    sheet_name,
+                    ws.max_row,
+                    ws.max_column,
                 )
 
                 # Анализируем лист одним вызовом (без дублирования)
                 # min_configs=1: поддержка SWM-стиля листов (总装/涂装/焊装) с 0-1 конфиг-колонками
                 analysis = HeuristicAnalyzer.analyze_bom_sheet(
-                    ws, min_configs=1, sheet_name=sheet_name,
+                    ws,
+                    min_configs=1,
+                    sheet_name=sheet_name,
                 )
                 if analysis is None:
-                    logger.info("Лист не является BOM-кандидатом, пропуск: %s", sheet_name)
+                    logger.info(
+                        "Лист не является BOM-кандидатом, пропуск: %s", sheet_name
+                    )
                     continue
 
                 header_rows, col_types, config_cols = analysis
@@ -250,14 +273,20 @@ def parse_bom(file_path: str) -> BOMData:
                 name_en_col = col_types.get("name_en", 0)
 
                 if part_no_col == 0:
-                    logger.warning("Не найдена колонка парт-номеров в листе: %s", sheet_name)
+                    logger.warning(
+                        "Не найдена колонка парт-номеров в листе: %s", sheet_name
+                    )
                     continue
 
                 header_row = header_rows[0]
 
                 # ── 3. Строим ГЛОБАЛЬНЫЙ словарь названий (ВСЕ строки, ВСЕ листы) ──
                 sheet_names_dict = HeuristicAnalyzer.build_global_name_dict(
-                    ws, part_no_col, name_cn_col, name_en_col, header_row,
+                    ws,
+                    part_no_col,
+                    name_cn_col,
+                    name_en_col,
+                    header_row,
                 )
                 for pn, (nc, ne) in sheet_names_dict.items():
                     if pn not in all_global_names:
@@ -274,7 +303,9 @@ def parse_bom(file_path: str) -> BOMData:
                 qty_col = col_types.get("qty", 0)
 
                 # ── 5. Если есть отдельная qty-колонка (спец-листы 附件 или SWM multi-sheet) ──
-                is_non_config_sheet = any(kw in sheet_name for kw in _NON_CONFIG_SHEET_KEYWORDS)
+                is_non_config_sheet = any(
+                    kw in sheet_name for kw in _NON_CONFIG_SHEET_KEYWORDS
+                )
 
                 # Определяем, является ли это SWM-стилем листа (总装/涂装/焊装)
                 # Такие листы агрегируются в ЕДИНЫЙ конфиг, а не создают отдельные конфиги
@@ -283,7 +314,11 @@ def parse_bom(file_path: str) -> BOMData:
                     kw in sheet_name_lower for kw in _SWM_MULTISHEET_BOM_KEYWORDS
                 )
 
-                if (not config_cols or len(config_cols) == 0) and qty_col > 0 and not is_non_config_sheet:
+                if (
+                    (not config_cols or len(config_cols) == 0)
+                    and qty_col > 0
+                    and not is_non_config_sheet
+                ):
                     data_start = header_row + 1
 
                     # SWM-стиль: все листы идут в один агрегированный конфиг
@@ -304,7 +339,9 @@ def parse_bom(file_path: str) -> BOMData:
                         # Пропускаем зачёркнутые строки (отменённые позиции)
                         if HeuristicAnalyzer.is_cell_strike(ws, row_idx, part_no_col):
                             continue
-                        if qty_col > 0 and HeuristicAnalyzer.is_cell_strike(ws, row_idx, qty_col):
+                        if qty_col > 0 and HeuristicAnalyzer.is_cell_strike(
+                            ws, row_idx, qty_col
+                        ):
                             continue
 
                         pn = HeuristicAnalyzer.get_cell_value(ws, row_idx, part_no_col)
@@ -321,25 +358,40 @@ def parse_bom(file_path: str) -> BOMData:
 
                         if qty > 0:
                             pn_normalized = clean_part_number(pn_str)
-                            current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
-                            all_config_quantities[config_name][pn_normalized] = current_qty + qty
+                            current_qty = all_config_quantities[config_name].get(
+                                pn_normalized, 0.0
+                            )
+                            all_config_quantities[config_name][pn_normalized] = (
+                                current_qty + qty
+                            )
                             if current_qty > 0:
                                 logger.debug(
                                     "Cross-sheet aggregation: %s qty %.1f + %.1f = %.1f "
                                     "for config '%s' (sheet: %s)",
-                                    pn_normalized, current_qty, qty,
-                                    current_qty + qty, config_name, sheet_name,
+                                    pn_normalized,
+                                    current_qty,
+                                    qty,
+                                    current_qty + qty,
+                                    config_name,
+                                    sheet_name,
                                 )
 
                             if pn_normalized not in all_parts:
                                 all_parts[pn_normalized] = PartInfo(part_number=pn_str)
-                            if config_name not in all_parts[pn_normalized].applicable_configs:
-                                all_parts[pn_normalized].applicable_configs.append(config_name)
+                            if (
+                                config_name
+                                not in all_parts[pn_normalized].applicable_configs
+                            ):
+                                all_parts[pn_normalized].applicable_configs.append(
+                                    config_name
+                                )
                             sheet_parts_added += 1
 
                     logger.info(
                         "Лист %s → config='%s': %d деталей добавлено (итого в конфиге: %d)",
-                        sheet_name, config_name, sheet_parts_added,
+                        sheet_name,
+                        config_name,
+                        sheet_parts_added,
                         len(all_config_quantities[config_name]),
                     )
                     continue
@@ -361,15 +413,20 @@ def parse_bom(file_path: str) -> BOMData:
                         pn_normalized = clean_part_number(pn_str)
                         if pn_normalized not in all_parts:
                             all_parts[pn_normalized] = PartInfo(part_number=pn_str)
-                    logger.info("Лист %s: не-конфигурационный, детали собраны в all_parts", sheet_name)
+                    logger.info(
+                        "Лист %s: не-конфигурационный, детали собраны в all_parts",
+                        sheet_name,
+                    )
                     continue
 
                 if not config_cols:
-                    logger.info("Лист %s: не найдено колонок комплектаций, пропуск", sheet_name)
+                    logger.info(
+                        "Лист %s: не найдено колонок комплектаций, пропуск", sheet_name
+                    )
                     continue
 
                 # ── 6. Дедупликация имён комплектаций ──
-                config_names: List[str] = []
+                config_names: list[str] = []
                 for col_idx in config_cols:
                     name = HeuristicAnalyzer.get_cell_value(ws, header_row, col_idx)
                     name_str = str(name) if name is not None else ""
@@ -377,7 +434,9 @@ def parse_bom(file_path: str) -> BOMData:
 
                     if not name_str:
                         for look_row in range(max(1, header_row - 1), 0, -1):
-                            meta_val = HeuristicAnalyzer.get_cell_value(ws, look_row, col_idx)
+                            meta_val = HeuristicAnalyzer.get_cell_value(
+                                ws, look_row, col_idx
+                            )
                             if meta_val is not None:
                                 meta_str = str(meta_val).strip()
                                 if meta_str and len(meta_str) < 80:
@@ -387,8 +446,8 @@ def parse_bom(file_path: str) -> BOMData:
                         name_str = f"Config_{col_idx}"
                     config_names.append(name_str)
 
-                deduped_indices: List[int] = []
-                seen_norm: Set[str] = set()
+                deduped_indices: list[int] = []
+                seen_norm: set[str] = set()
                 for i, name in enumerate(config_names):
                     norm = name.lower().replace(" ", "").replace("-", "")
                     if norm not in seen_norm:
@@ -398,7 +457,8 @@ def parse_bom(file_path: str) -> BOMData:
                 if len(deduped_indices) < len(config_cols):
                     logger.info(
                         "Дедупликация: %d -> %d имён комплектаций",
-                        len(config_cols), len(deduped_indices),
+                        len(config_cols),
+                        len(deduped_indices),
                     )
                     config_cols = [config_cols[i] for i in deduped_indices]
                     config_names = [config_names[i] for i in deduped_indices]
@@ -410,7 +470,11 @@ def parse_bom(file_path: str) -> BOMData:
 
                 # Detect multi-block horizontal layout (side-by-side tables)
                 multi_blocks = _detect_multi_block_layout(
-                    ws, header_row, part_no_col, name_cn_col, qty_col,
+                    ws,
+                    header_row,
+                    part_no_col,
+                    name_cn_col,
+                    qty_col,
                 )
 
                 # Precompute strikethrough rows for part_no + qty columns
@@ -419,7 +483,9 @@ def parse_bom(file_path: str) -> BOMData:
                 if qty_col > 0:
                     strike_cols.append(qty_col)
                 strike_rows_cache = HeuristicAnalyzer.get_strike_rows(
-                    ws, range(data_start, max_row + 1), strike_cols,
+                    ws,
+                    range(data_start, max_row + 1),
+                    strike_cols,
                 )
 
                 for row_idx in range(data_start, max_row + 1):
@@ -444,11 +510,15 @@ def parse_bom(file_path: str) -> BOMData:
                     for i, col_idx in enumerate(config_cols):
                         if HeuristicAnalyzer.is_cell_strike(ws, row_idx, col_idx):
                             continue
-                        config_val = str(HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or '').strip()
+                        config_val = str(
+                            HeuristicAnalyzer.get_cell_value(ws, row_idx, col_idx) or ""
+                        ).strip()
 
-                        if config_val.upper() == 'S' and qty_col > 0:
-                            qty = normalize_quantity(HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col))
-                        elif config_val in ('-', '–', '—', ''):
+                        if config_val.upper() == "S" and qty_col > 0:
+                            qty = normalize_quantity(
+                                HeuristicAnalyzer.get_cell_value(ws, row_idx, qty_col)
+                            )
+                        elif config_val in ("-", "–", "—", ""):
                             continue
                         else:
                             qty = normalize_quantity(config_val)
@@ -462,14 +532,22 @@ def parse_bom(file_path: str) -> BOMData:
                             if config_name not in all_config_quantities:
                                 all_config_quantities[config_name] = {}
 
-                            current_qty = all_config_quantities[config_name].get(pn_normalized, 0.0)
-                            all_config_quantities[config_name][pn_normalized] = current_qty + qty
+                            current_qty = all_config_quantities[config_name].get(
+                                pn_normalized, 0.0
+                            )
+                            all_config_quantities[config_name][pn_normalized] = (
+                                current_qty + qty
+                            )
                             if current_qty > 0:
                                 logger.debug(
                                     "Cross-sheet aggregation: %s qty %.1f + %.1f = %.1f "
                                     "for config '%s' (sheet: %s)",
-                                    pn_normalized, current_qty, qty,
-                                    current_qty + qty, config_name, sheet_name,
+                                    pn_normalized,
+                                    current_qty,
+                                    qty,
+                                    current_qty + qty,
+                                    config_name,
+                                    sheet_name,
                                 )
 
                             if config_name not in part.applicable_configs:
@@ -483,7 +561,9 @@ def parse_bom(file_path: str) -> BOMData:
                         blk_count = 0
                         # Precompute strike rows for this block's column
                         blk_strike_rows = HeuristicAnalyzer.get_strike_rows(
-                            ws, range(data_start, max_row + 1), [blk_pn],
+                            ws,
+                            range(data_start, max_row + 1),
+                            [blk_pn],
                         )
                         for row_idx in range(data_start, max_row + 1):
                             if row_idx in blk_strike_rows:
@@ -506,17 +586,22 @@ def parse_bom(file_path: str) -> BOMData:
                         if blk_count > 0:
                             logger.debug(
                                 "Multi-block: block at col %d contributed %d parts (sheet: %s)",
-                                blk_pn, blk_count, sheet_name,
+                                blk_pn,
+                                blk_count,
+                                sheet_name,
                             )
 
                 logger.info(
                     "Лист %s: BOM, %d колонок комплектаций, %d строк с данными",
-                    sheet_name, len(config_cols), sheet_config_count,
+                    sheet_name,
+                    len(config_cols),
+                    sheet_config_count,
                 )
             except Exception as e:
                 logger.error(
                     "Ошибка обработки листа %s: %s — пропуск листа",
-                    sheet_name, e,
+                    sheet_name,
+                    e,
                 )
                 continue
 
@@ -537,15 +622,19 @@ def parse_bom(file_path: str) -> BOMData:
     # Это детали, где ВСЕ колонки конфигураций содержат '-', пусто или 0.
     # Они не используются ни в одной комплектации и не должны считаться.
     qty_zero_pns = [
-        pn for pn in all_parts
-        if not any(all_config_quantities.get(cn, {}).get(pn, 0) > 0 for cn in all_config_names)
+        pn
+        for pn in all_parts
+        if not any(
+            all_config_quantities.get(cn, {}).get(pn, 0) > 0 for cn in all_config_names
+        )
     ]
     for pn in qty_zero_pns:
         del all_parts[pn]
 
     logger.info(
         "Загружено деталей с qty>0: %d (отброшено %d деталей с qty=0)",
-        len(all_parts), len(qty_zero_pns),
+        len(all_parts),
+        len(qty_zero_pns),
     )
     logger.info("Найдено комплектаций: %d", len(all_config_names))
     logger.info("Глобальный словарь названий: %d записей", len(all_global_names))
@@ -574,7 +663,7 @@ def parse_bom(file_path: str) -> BOMData:
     )
 
 
-def get_config_quantities(bom: BOMData, config_name: str) -> Dict[str, PartInfo]:
+def get_config_quantities(bom: BOMData, config_name: str) -> dict[str, PartInfo]:
     """Получить данные деталей для выбранной комплектации.
 
     Args:
@@ -590,7 +679,7 @@ def get_config_quantities(bom: BOMData, config_name: str) -> Dict[str, PartInfo]
             f"Доступные: {bom.config_names[:10]}..."
         )
 
-    result: Dict[str, PartInfo] = {}
+    result: dict[str, PartInfo] = {}
     for part_no, qty in bom.config_quantities[config_name].items():
         if part_no in bom.parts:
             part = bom.parts[part_no]
@@ -613,7 +702,7 @@ def get_config_quantities(bom: BOMData, config_name: str) -> Dict[str, PartInfo]
     return result
 
 
-def get_all_config_quantities(bom: BOMData) -> Dict[str, Dict[str, PartInfo]]:
+def get_all_config_quantities(bom: BOMData) -> dict[str, dict[str, PartInfo]]:
     """Получить данные деталей для ВСЕХ комплектаций одновременно.
 
     Args:
@@ -625,7 +714,7 @@ def get_all_config_quantities(bom: BOMData) -> Dict[str, Dict[str, PartInfo]]:
     return {cn: get_config_quantities(bom, cn) for cn in bom.config_names}
 
 
-def lookup_part_name(bom: BOMData, part_number: str) -> Tuple[str, str]:
+def lookup_part_name(bom: BOMData, part_number: str) -> tuple[str, str]:
     """Найти название детали по парт-номеру.
 
     Сначала ищет в parts, затем в global_names.
@@ -656,11 +745,11 @@ class BOMService:
     """
 
     def __init__(self):
-        self._bom: Optional[BOMData] = None
-        self._temp_paths: List[str] = []
+        self._bom: BOMData | None = None
+        self._temp_paths: list[str] = []
 
     @property
-    def bom(self) -> Optional[BOMData]:
+    def bom(self) -> BOMData | None:
         return self._bom
 
     @property
@@ -715,6 +804,7 @@ class BOMService:
             Распарсенные данные BOMData.
         """
         import asyncio
+
         return await asyncio.to_thread(self.load_from_bytes, data, filename)
 
     def cleanup(self) -> None:
@@ -733,7 +823,7 @@ class BOMService:
     def __exit__(self, *args: object) -> None:
         self.cleanup()
 
-    def get_config_names(self) -> List[str]:
+    def get_config_names(self) -> list[str]:
         """Получить список названий всех найденных комплектаций."""
         if not self._bom:
             raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
@@ -745,25 +835,25 @@ class BOMService:
             return 0
         return len(self._bom.config_names)
 
-    def get_parts_for_config(self, config_name: str) -> Dict[str, PartInfo]:
+    def get_parts_for_config(self, config_name: str) -> dict[str, PartInfo]:
         """Получить детали для конкретной комплектации."""
         if not self._bom:
             raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
         return get_config_quantities(self._bom, config_name)
 
-    def get_all_configs(self) -> Dict[str, Dict[str, PartInfo]]:
+    def get_all_configs(self) -> dict[str, dict[str, PartInfo]]:
         """Получить детали для ВСЕХ комплектаций."""
         if not self._bom:
             raise RuntimeError("BOM не загружен. Вызовите load() сначала.")
         return get_all_config_quantities(self._bom)
 
-    def get_all_part_numbers(self) -> Set[str]:
+    def get_all_part_numbers(self) -> set[str]:
         """Получить множество ВСЕХ уникальных парт-номеров из BOM."""
         if not self._bom:
             return set()
         return set(self._bom.parts.keys())
 
-    def lookup_name(self, part_number: str) -> Tuple[str, str]:
+    def lookup_name(self, part_number: str) -> tuple[str, str]:
         """Найти название детали по парт-номеру (с учётом глобального словаря)."""
         if not self._bom:
             return ("", "")

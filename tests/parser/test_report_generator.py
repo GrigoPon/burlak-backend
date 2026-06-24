@@ -15,7 +15,7 @@ import os
 import shutil
 import tempfile
 import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import openpyxl
 import pytest
@@ -34,10 +34,10 @@ from burlak_parser.report_generator import (
     generate_discrepancy_report,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def _make_discrepancy(
     pn: str,
@@ -45,7 +45,7 @@ def _make_discrepancy(
     qty_bom: float = 1.0,
     qty_cards: float = 0.0,
     config: str = "C1",
-    card_numbers: Optional[List[str]] = None,
+    card_numbers: list[str] | None = None,
     name_cn: str = "",
     fuzzy_to: str = "",
 ) -> Discrepancy:
@@ -63,8 +63,8 @@ def _make_discrepancy(
 
 
 def _make_multi_result(
-    discs: Optional[List[Discrepancy]] = None,
-    config_names: Optional[List[str]] = None,
+    discs: list[Discrepancy] | None = None,
+    config_names: list[str] | None = None,
     total_bom: int = 5,
     total_cards: int = 4,
 ) -> MultiConfigComparisonResult:
@@ -133,7 +133,7 @@ def _count_xlsx_sheets(xlsx_path: str) -> int:
     return count
 
 
-def _get_xlsx_sheet_names(xlsx_path: str) -> List[str]:
+def _get_xlsx_sheet_names(xlsx_path: str) -> list[str]:
     """Get sheet names from an .xlsx file."""
     wb = openpyxl.load_workbook(xlsx_path)
     names = list(wb.sheetnames)
@@ -153,6 +153,7 @@ def _get_xlsx_cell(xlsx_path: str, sheet: str, row: int, col: int) -> Any:
 # ═══════════════════════════════════════════════════════════════════════
 #  1. generate_discrepancy_report — Basic structure
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportBasic:
     """File creation and sheet structure."""
@@ -177,8 +178,9 @@ class TestGenerateDiscrepancyReportBasic:
             _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
             _make_discrepancy("P002", DiscrepancyType.ONLY_IN_BOM),
             _make_discrepancy("P003", DiscrepancyType.ONLY_IN_CARDS),
-            _make_discrepancy("5306200-ED001", DiscrepancyType.FUZZY_MATCH,
-                              fuzzy_to="5306200ED001"),
+            _make_discrepancy(
+                "5306200-ED001", DiscrepancyType.FUZZY_MATCH, fuzzy_to="5306200ED001"
+            ),
         ]
         result = _make_multi_result(discs, config_names=["C1", "C2"])
         bom = _make_minimal_bom()
@@ -188,8 +190,13 @@ class TestGenerateDiscrepancyReportBasic:
         generate_discrepancy_report(result, path, bom=bom, cards_data=cards)
 
         names = _get_xlsx_sheet_names(path)
-        expected = {"Сводка", "Расхождения", "Неточное совпадение номеров",
-                    "Все детали BOM", "Поврежденные файлы"}
+        expected = {
+            "Сводка",
+            "Расхождения",
+            "Неточное совпадение номеров",
+            "Все детали BOM",
+            "Поврежденные файлы",
+        }
         assert expected.issubset(set(names)), f"Missing sheets. Got: {names}"
 
     def test_sheet_names_russian(self, output_dir: str):
@@ -205,6 +212,7 @@ class TestGenerateDiscrepancyReportBasic:
 # ═══════════════════════════════════════════════════════════════════════
 #  2. generate_discrepancy_report — Сводка (Summary) sheet
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportSummary:
     @pytest.fixture
@@ -257,7 +265,9 @@ class TestGenerateDiscrepancyReportSummary:
         found_c2 = False
         wb = openpyxl.load_workbook(path)
         ws = wb["Сводка"]
-        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=2, values_only=True):
+        for row in ws.iter_rows(
+            min_row=1, max_row=ws.max_row, max_col=2, values_only=True
+        ):
             if row[0] == "C1":
                 found_c1 = True
             if row[0] == "C2":
@@ -278,13 +288,15 @@ class TestGenerateDiscrepancyReportSummary:
         # Search for info text in row 7
         info_text = str(ws.cell(row=7, column=1).value or "")
         wb.close()
-        assert "Обработано файлов" in info_text, \
+        assert "Обработано файлов" in info_text, (
             f"Info row should mention file count. Got: '{info_text}'"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  3. generate_discrepancy_report — Расхождения (Discrepancies) sheet
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportDiscrepancies:
     @pytest.fixture
@@ -296,13 +308,28 @@ class TestGenerateDiscrepancyReportDiscrepancies:
     def test_all_discrepancies_written(self, output_dir: str):
         """All discrepancy types appear in the sheet."""
         discs = [
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH,
-                              qty_bom=2.0, qty_cards=1.0, config="C1"),
-            _make_discrepancy("P002", DiscrepancyType.ONLY_IN_BOM,
-                              qty_bom=1.0, qty_cards=0.0, config="C1"),
-            _make_discrepancy("P003", DiscrepancyType.ONLY_IN_CARDS,
-                              qty_bom=0.0, qty_cards=3.0, config="C2",
-                              card_numbers=["Card1"]),
+            _make_discrepancy(
+                "P001",
+                DiscrepancyType.QUANTITY_MISMATCH,
+                qty_bom=2.0,
+                qty_cards=1.0,
+                config="C1",
+            ),
+            _make_discrepancy(
+                "P002",
+                DiscrepancyType.ONLY_IN_BOM,
+                qty_bom=1.0,
+                qty_cards=0.0,
+                config="C1",
+            ),
+            _make_discrepancy(
+                "P003",
+                DiscrepancyType.ONLY_IN_CARDS,
+                qty_bom=0.0,
+                qty_cards=3.0,
+                config="C2",
+                card_numbers=["Card1"],
+            ),
         ]
         result = _make_multi_result(discs, config_names=["C1", "C2"])
         path = os.path.join(output_dir, "test.xlsx")
@@ -323,8 +350,13 @@ class TestGenerateDiscrepancyReportDiscrepancies:
     def test_discrepancy_values(self, output_dir: str):
         """Verify qty values are written correctly."""
         discs = [
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH,
-                              qty_bom=4.5, qty_cards=2.0, name_cn="TestPart"),
+            _make_discrepancy(
+                "P001",
+                DiscrepancyType.QUANTITY_MISMATCH,
+                qty_bom=4.5,
+                qty_cards=2.0,
+                name_cn="TestPart",
+            ),
         ]
         result = _make_multi_result(discs)
         path = os.path.join(output_dir, "test.xlsx")
@@ -365,13 +397,15 @@ class TestGenerateDiscrepancyReportDiscrepancies:
 
         names = _get_xlsx_sheet_names(path)
         assert "Расхождения" in names
-        assert _get_xlsx_cell(path, "Расхождения", 2, 1) is None, \
+        assert _get_xlsx_cell(path, "Расхождения", 2, 1) is None, (
             "No data rows when no discrepancies"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  4. generate_discrepancy_report — Неточное совпадение номеров (Fuzzy)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportFuzzy:
     @pytest.fixture
@@ -383,17 +417,21 @@ class TestGenerateDiscrepancyReportFuzzy:
     def test_fuzzy_sheet_present(self, output_dir: str):
         """Fuzzy sheet present when fuzzy discrepancies exist."""
         discs = [
-            _make_discrepancy("5306200-ED001", DiscrepancyType.FUZZY_MATCH,
-                              qty_bom=2.0, qty_cards=2.0, config="C1",
-                              fuzzy_to="5306200ED001"),
+            _make_discrepancy(
+                "5306200-ED001",
+                DiscrepancyType.FUZZY_MATCH,
+                qty_bom=2.0,
+                qty_cards=2.0,
+                config="C1",
+                fuzzy_to="5306200ED001",
+            ),
         ]
         result = _make_multi_result(discs)
         path = os.path.join(output_dir, "test.xlsx")
         generate_discrepancy_report(result, path)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Неточное совпадение номеров" in names, \
-            "Fuzzy sheet should exist"
+        assert "Неточное совпадение номеров" in names, "Fuzzy sheet should exist"
 
     def test_fuzzy_sheet_not_present_when_no_fuzzy(self, output_dir: str):
         """Fuzzy sheet NOT present when no fuzzy discrepancies exist."""
@@ -405,15 +443,21 @@ class TestGenerateDiscrepancyReportFuzzy:
         generate_discrepancy_report(result, path)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Неточное совпадение номеров" not in names, \
+        assert "Неточное совпадение номеров" not in names, (
             "Fuzzy sheet should NOT exist without fuzzy discrepancies"
+        )
 
     def test_fuzzy_data_written(self, output_dir: str):
         """Fuzzy match data written correctly."""
         discs = [
-            _make_discrepancy("5306200-ED001", DiscrepancyType.FUZZY_MATCH,
-                              qty_bom=2.0, qty_cards=2.0, config="C1",
-                              fuzzy_to="5306200ED001"),
+            _make_discrepancy(
+                "5306200-ED001",
+                DiscrepancyType.FUZZY_MATCH,
+                qty_bom=2.0,
+                qty_cards=2.0,
+                config="C1",
+                fuzzy_to="5306200ED001",
+            ),
         ]
         result = _make_multi_result(discs)
         path = os.path.join(output_dir, "test.xlsx")
@@ -433,6 +477,7 @@ class TestGenerateDiscrepancyReportFuzzy:
 # ═══════════════════════════════════════════════════════════════════════
 #  5. generate_discrepancy_report — Все детали BOM (BOM parts)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportBomSheet:
     @pytest.fixture
@@ -458,8 +503,9 @@ class TestGenerateDiscrepancyReportBomSheet:
         generate_discrepancy_report(result, path, bom=None)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Все детали BOM" not in names, \
+        assert "Все детали BOM" not in names, (
             "BOM sheet should not appear without bom data"
+        )
 
     def test_bom_parts_written(self, output_dir: str):
         """All BOM parts written to sheet."""
@@ -487,13 +533,17 @@ class TestGenerateDiscrepancyReportBomSheet:
 
         wb = openpyxl.load_workbook(path)
         ws = wb["Все детали BOM"]
-        headers = [str(ws.cell(row=1, column=c).value or "") for c in range(1, ws.max_column + 1)]
+        headers = [
+            str(ws.cell(row=1, column=c).value or "")
+            for c in range(1, ws.max_column + 1)
+        ]
         wb.close()
 
         # Config names should appear as column headers after the first 3 fixed columns
         config_headers = headers[3:]
-        assert "C1" in config_headers or "C2" in config_headers, \
+        assert "C1" in config_headers or "C2" in config_headers, (
             f"Config headers missing. Got: {config_headers}"
+        )
 
     def test_bom_sheet_without_configs(self, output_dir: str):
         """BOM sheet works even without config columns."""
@@ -510,14 +560,16 @@ class TestGenerateDiscrepancyReportBomSheet:
         wb = openpyxl.load_workbook(path)
         ws = wb["Все детали BOM"]
         # Only 3 fixed columns (no config columns)
-        assert ws.max_column == 3, \
+        assert ws.max_column == 3, (
             f"Expected 3 columns (no configs), got {ws.max_column}"
+        )
         wb.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  6. generate_discrepancy_report — Ошибки файлов (Corrupted files)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestGenerateDiscrepancyReportErrors:
     @pytest.fixture
@@ -549,8 +601,9 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=cards)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Поврежденные файлы" not in names, \
+        assert "Поврежденные файлы" not in names, (
             "Error sheet should not appear without corrupted files"
+        )
 
     def test_corrupted_file_paths_written(self, output_dir: str):
         """Corrupted file paths written to the sheet."""
@@ -565,8 +618,9 @@ class TestGenerateDiscrepancyReportErrors:
         wb.close()
 
         assert len(rows) == 1, f"Expected 1 corrupted file, got {len(rows)}"
-        assert "bad_file.xlsx" in str(rows[0][0]), \
+        assert "bad_file.xlsx" in str(rows[0][0]), (
             f"Expected 'bad_file.xlsx', got '{rows[0][0]}'"
+        )
 
     def test_error_sheet_not_present_without_cards_data(self, output_dir: str):
         """Error sheet not present when cards_data is None."""
@@ -575,13 +629,15 @@ class TestGenerateDiscrepancyReportErrors:
         generate_discrepancy_report(result, path, cards_data=None)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Поврежденные файлы" not in names, \
+        assert "Поврежденные файлы" not in names, (
             "Error sheet should not appear without cards_data"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  8. create_split_cards_archive
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestCreateSplitCardsArchive:
     @pytest.fixture
@@ -620,6 +676,7 @@ class TestCreateSplitCardsArchive:
         create_split_cards_archive(src_dir, zip_path)
 
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
         assert "card1.xlsx" in names
@@ -638,6 +695,7 @@ class TestCreateSplitCardsArchive:
         create_split_cards_archive(src_dir, zip_path)
 
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
         assert "card1.xlsx" in names
@@ -653,6 +711,7 @@ class TestCreateSplitCardsArchive:
         assert os.path.exists(zip_path)
 
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             assert len(zf.namelist()) == 0, "Empty ZIP should have no files"
 
@@ -688,6 +747,7 @@ class TestCreateSplitCardsArchive:
         # ZIP должен быть создан, но без card1.xlsx
         assert os.path.exists(zip_path)
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
         assert "card1.xlsx" not in names, "Skipped file should not be in archive"
@@ -725,6 +785,7 @@ class TestCreateSplitCardsArchive:
 #  9. Reporter (service wrapper)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestReporter:
     @pytest.fixture
     def output_dir(self) -> str:
@@ -734,9 +795,12 @@ class TestReporter:
 
     def test_generate_creates_outputs(self, output_dir: str):
         """Reporter.generate creates both Excel and text reports."""
-        result = _make_multi_result([
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
-        ], config_names=["C1"])
+        result = _make_multi_result(
+            [
+                _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
+            ],
+            config_names=["C1"],
+        )
         reporter = Reporter()
         outputs = reporter.generate(result, output_dir)
 
@@ -764,13 +828,16 @@ class TestReporter:
 
     def test_text_report_content(self, output_dir: str):
         """Text report contains Russian text."""
-        result = _make_multi_result([
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
-        ], config_names=["C1"])
+        result = _make_multi_result(
+            [
+                _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
+            ],
+            config_names=["C1"],
+        )
         reporter = Reporter()
         outputs = reporter.generate(result, output_dir)
 
-        with open(outputs["text_report"], "r", encoding="utf-8") as f:
+        with open(outputs["text_report"], encoding="utf-8") as f:
             text = f.read()
 
         assert "ОТЧЁТ ПРОВЕРКИ" in text
@@ -794,6 +861,7 @@ class TestReporter:
 # ═══════════════════════════════════════════════════════════════════════
 #  10. Edge cases
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestReportEdgeCases:
     @pytest.fixture
@@ -838,7 +906,9 @@ class TestReportEdgeCases:
         wb = openpyxl.load_workbook(path)
         ws = wb["Сводка"]
         found_configs = set()
-        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=1, values_only=True):
+        for row in ws.iter_rows(
+            min_row=1, max_row=ws.max_row, max_col=1, values_only=True
+        ):
             if row[0] in configs:
                 found_configs.add(row[0])
         wb.close()
@@ -855,14 +925,17 @@ class TestReportEdgeCases:
         generate_discrepancy_report(result, path)
 
         names = _get_xlsx_sheet_names(path)
-        assert "Неточное совпадение номеров" not in names, \
+        assert "Неточное совпадение номеров" not in names, (
             "Fuzzy sheet should only appear with FUZZY_MATCH discrepancies"
+        )
 
     def test_no_bom_or_cards(self, output_dir: str):
         """Report works without BOM or cards data."""
-        result = _make_multi_result([
-            _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
-        ])
+        result = _make_multi_result(
+            [
+                _make_discrepancy("P001", DiscrepancyType.QUANTITY_MISMATCH),
+            ]
+        )
         path = os.path.join(output_dir, "minimal.xlsx")
         generate_discrepancy_report(result, path, bom=None, cards_data=None)
 

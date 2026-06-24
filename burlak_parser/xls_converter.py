@@ -20,18 +20,16 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 import tempfile
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Кэш путей к LibreOffice binary
-_libreoffice_path: Optional[str] = None
+_libreoffice_path: str | None = None
 
 
-def find_libreoffice() -> Optional[str]:
+def find_libreoffice() -> str | None:
     """Найти путь к LibreOffice binary.
 
     Проверяет:
@@ -57,7 +55,9 @@ def find_libreoffice() -> Optional[str]:
         try:
             result = subprocess.run(
                 ["which", cmd],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
                 path = result.stdout.strip()
@@ -93,9 +93,9 @@ def is_libreoffice_available() -> bool:
 
 def convert_xls_to_xlsx(
     xls_path: str,
-    output_dir: Optional[str] = None,
+    output_dir: str | None = None,
     timeout: int = 120,
-) -> Optional[str]:
+) -> str | None:
     """Конвертировать .xls файл в .xlsx через LibreOffice.
 
     Args:
@@ -136,15 +136,18 @@ def convert_xls_to_xlsx(
     try:
         logger.info(
             "Конвертация .xls → .xlsx: %s → %s",
-            os.path.basename(xls_path), output_dir,
+            os.path.basename(xls_path),
+            output_dir,
         )
 
         # LibreOffice headless конвертация
         cmd = [
             lo_path,
             "--headless",
-            "--convert-to", "xlsx",
-            "--outdir", output_dir,
+            "--convert-to",
+            "xlsx",
+            "--outdir",
+            output_dir,
             xls_path,
         ]
 
@@ -158,7 +161,8 @@ def convert_xls_to_xlsx(
         if result.returncode != 0:
             logger.warning(
                 "LibreOffice конвертация завершилась с кодом %d: %s",
-                result.returncode, result.stderr[:500] if result.stderr else "",
+                result.returncode,
+                result.stderr[:500] if result.stderr else "",
             )
             # Проверяем, создался ли файл несмотря на код возврата
             # (LibreOffice有时 возвращает 1 при成功的 конвертации)
@@ -171,7 +175,8 @@ def convert_xls_to_xlsx(
             file_size = os.path.getsize(xlsx_path)
             logger.info(
                 "Конвертация успешна: %s (%.1f MB)",
-                os.path.basename(xlsx_path), file_size / (1024 * 1024),
+                os.path.basename(xlsx_path),
+                file_size / (1024 * 1024),
             )
             return xlsx_path
 
@@ -183,16 +188,17 @@ def convert_xls_to_xlsx(
                 return found_path
 
         logger.warning(
-            "Сконвертированный .xlsx файл не найден в %s. "
-            "LibreOffice вывод: %s",
-            output_dir, result.stdout[:500] if result.stdout else "",
+            "Сконвертированный .xlsx файл не найден в %s. LibreOffice вывод: %s",
+            output_dir,
+            result.stdout[:500] if result.stdout else "",
         )
         return None
 
     except subprocess.TimeoutExpired:
         logger.error(
             "Таймаут конвертации .xls → .xlsx (%d сек): %s",
-            timeout, os.path.basename(xls_path),
+            timeout,
+            os.path.basename(xls_path),
         )
         return None
     except FileNotFoundError:
@@ -204,10 +210,10 @@ def convert_xls_to_xlsx(
 
 
 def convert_xls_files_batch(
-    xls_files: List[str],
+    xls_files: list[str],
     temp_dir: str,
     max_workers: int = 2,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Конвертировать список .xls файлов в .xlsx.
 
     Args:
@@ -230,7 +236,7 @@ def convert_xls_files_batch(
         return {}
 
     os.makedirs(temp_dir, exist_ok=True)
-    converted: Dict[str, str] = {}
+    converted: dict[str, str] = {}
 
     logger.info(
         "Конвертация %d .xls файлов через LibreOffice...",
@@ -254,6 +260,7 @@ def convert_xls_files_batch(
 
     logger.info(
         "Конвертация завершена: %d/%d успешно",
-        len(converted), len(xls_files),
+        len(converted),
+        len(xls_files),
     )
     return converted

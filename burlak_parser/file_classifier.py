@@ -28,7 +28,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import List
 
 from burlak_parser.heuristic_analyzer import (
     extract_card_number_from_filepath,
@@ -38,31 +37,30 @@ logger = logging.getLogger(__name__)
 
 # Ключевые слова служебных файлов (китайский / английский / русский)
 SERVICE_FILE_KEYWORDS = [
-    "封面",        # обложка / титульный лист
-    "目录",        # каталог / оглавление
-    "记录表",      # таблица учёта / реестр выдачи документов
-    "空表",        # пустая форма / шаблон
-    "填写范本",    # образец заполнения / fill template
-    "填写说明",    # инструкция по заполнению / fill instructions
+    "封面",  # обложка / титульный лист
+    "目录",  # каталог / оглавление
+    "记录表",  # таблица учёта / реестр выдачи документов
+    "空表",  # пустая форма / шаблон
+    "填写范本",  # образец заполнения / fill template
+    "填写说明",  # инструкция по заполнению / fill instructions
     "工艺现场工时汇总清单",  # сводка трудозатрат / work hours summary
-    "工时汇总",    # сводка трудозатрат (краткая форма)
-    "对比",        # сравнение / comparison (служебный файл сравнения)
-    "обложка",     # обложка
+    "工时汇总",  # сводка трудозатрат (краткая форма)
+    "对比",  # сравнение / comparison (служебный файл сравнения)
+    "обложка",  # обложка
     "содержание",  # содержание
-    "cover",       # cover page
-    "toc",         # table of contents
-    "template",    # template
+    "cover",  # cover page
+    "toc",  # table of contents
+    "template",  # template
 ]
 
 # Ключевые слова операционных карт (файлы с этими словами — всегда ОК)
 OPERATIONAL_CARD_KEYWORDS = [
-    "作业指导书",   # BAIC: рабочая инструкция / work instruction
-    "作业要领书",   # аналогичное / similar
-    "操作指导",     # инструкция по операции
-    "工艺卡",       # технологическая карта
-    "工序卡",       # карта工序
+    "作业指导书",  # BAIC: рабочая инструкция / work instruction
+    "作业要领书",  # аналогичное / similar
+    "操作指导",  # инструкция по операции
+    "工艺卡",  # технологическая карта
+    "工序卡",  # карта工序
 ]
-
 
 
 # Универсальное регулярное выражение для номера операции:
@@ -164,7 +162,9 @@ def classify_file(file_path: str) -> FileClassification:
         # Дополнительная эвристика: ищем номер карты эвристически
         card_no = extract_card_number_from_filepath(file_path)
         if card_no and card_no != file_name:
-            logger.debug("Файл определён как операционная карта (эвристика): %s", basename)
+            logger.debug(
+                "Файл определён как операционная карта (эвристика): %s", basename
+            )
             is_operational = True
             should_parse = True
             should_split = True
@@ -202,7 +202,7 @@ def classify_file(file_path: str) -> FileClassification:
     return classification
 
 
-def filter_operational_cards(file_paths: List[str]) -> List[FileClassification]:
+def filter_operational_cards(file_paths: list[str]) -> list[FileClassification]:
     """Отфильтровать список файлов, классифицируя каждый.
 
     Args:
@@ -214,12 +214,14 @@ def filter_operational_cards(file_paths: List[str]) -> List[FileClassification]:
     return [classify_file(fp) for fp in file_paths]
 
 
-def get_parseable_files(classifications: List[FileClassification]) -> List[str]:
+def get_parseable_files(classifications: list[FileClassification]) -> list[str]:
     """Получить список файлов, из которых нужно парсить детали."""
     return [c.file_path for c in classifications if c.should_parse_parts]
 
 
-def get_splittable_files(classifications: List[FileClassification]) -> List[FileClassification]:
+def get_splittable_files(
+    classifications: list[FileClassification],
+) -> list[FileClassification]:
     """Получить список классификаций файлов, которые нужно разделять на листы."""
     return [c for c in classifications if c.should_split]
 
@@ -298,6 +300,3 @@ def _extract_operation_number(file_name: str) -> str:
         return match.group(1)
 
     return ""
-
-
-

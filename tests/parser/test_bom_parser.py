@@ -17,9 +17,8 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-import openpyxl
 import pytest
 from openpyxl import Workbook
 
@@ -33,10 +32,10 @@ from burlak_parser.bom_parser import (
     parse_bom,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def _safe_remove(path: str) -> None:
     """Безопасно удалить файл."""
@@ -54,7 +53,7 @@ def _save_workbook(wb: Workbook, file_path: str) -> str:
 
 
 def _create_xlsx(
-    sheets_data: Dict[str, List[List[Optional[Any]]]],
+    sheets_data: dict[str, list[list[Any | None]]],
     suffix: str = ".xlsx",
 ) -> str:
     """Создать .xlsx файл с несколькими листами и вернуть путь к нему.
@@ -82,6 +81,7 @@ def _create_xlsx(
 # ═══════════════════════════════════════════════════════════════════════
 #  1. PartInfo
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestPartInfo:
     def test_default_creation(self):
@@ -120,6 +120,7 @@ class TestPartInfo:
 # ═══════════════════════════════════════════════════════════════════════
 #  2. BOMData
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestBOMData:
     def test_empty_creation(self):
@@ -162,6 +163,7 @@ class TestBOMData:
 #  3. parse_bom — Multi-config BOM
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomMultiConfigStyle:
     """BOM with multi-config structure: headers at row 3, part_no=C2, name=C3, 4 config columns."""
 
@@ -171,11 +173,28 @@ class TestParseBomMultiConfigStyle:
         data = [
             ["CKD BOM CT1260301", None, None, None, None, None, None, None],
             [None, None, None, None, None, None, None, None],
-            ["序号", "零部件件号", "零部件名称", "CPAC编码",
-             "舒享版-全黑内饰", "舒享版-黑米内饰", "奢享版-全黑内饰", "奢享版-黑米内饰"],
+            [
+                "序号",
+                "零部件件号",
+                "零部件名称",
+                "CPAC编码",
+                "舒享版-全黑内饰",
+                "舒享版-黑米内饰",
+                "奢享版-全黑内饰",
+                "奢享版-黑米内饰",
+            ],
             ["1", "132000184AA", "变速箱控制单元支架", "CPAC001", "1", "1", "1", "1"],
             ["2", "551002664AA", "TCU", "CPAC002", "1", "1", "1", "1"],
-            ["3", "5306200-ED001", "仪表板横梁总成 / Поперечная балка", "CPAC003", "1", "1", "2", "2"],
+            [
+                "3",
+                "5306200-ED001",
+                "仪表板横梁总成 / Поперечная балка",
+                "CPAC003",
+                "1",
+                "1",
+                "2",
+                "2",
+            ],
             ["4", "Q146Z0825F36", "螺栓", "CPAC004", "4", "4", "4", "4"],
             ["5", "G086A001", "卡扣", "CPAC005", "2", "0", "2", "0"],
         ]
@@ -183,13 +202,21 @@ class TestParseBomMultiConfigStyle:
 
     def test_multi_config_bom_parsed(self, multi_config_xlsx: str):
         bom = parse_bom(multi_config_xlsx)
-        assert len(bom.config_names) == 4, f"Expected 4 configs, got {len(bom.config_names)}: {bom.config_names}"
+        assert len(bom.config_names) == 4, (
+            f"Expected 4 configs, got {len(bom.config_names)}: {bom.config_names}"
+        )
         assert len(bom.parts) == 5, f"Expected 5 parts, got {len(bom.parts)}"
         assert len(bom.global_names) == 5, "All 5 parts should have names"
 
     def test_multi_config_part_numbers(self, multi_config_xlsx: str):
         bom = parse_bom(multi_config_xlsx)
-        expected_parts = {"132000184AA", "551002664AA", "5306200ED001", "Q146Z0825F36", "G086A001"}
+        expected_parts = {
+            "132000184AA",
+            "551002664AA",
+            "5306200ED001",
+            "Q146Z0825F36",
+            "G086A001",
+        }
         assert set(bom.parts.keys()) == expected_parts, f"Got {set(bom.parts.keys())}"
 
     def test_multi_config_quantities(self, multi_config_xlsx: str):
@@ -198,19 +225,26 @@ class TestParseBomMultiConfigStyle:
         # 5306200-ED001 should have qty=2 in 奢享版 configs, qty=1 in 舒享版
         for config_name in bom.config_names:
             if "奢享版" in config_name:
-                assert bom.config_quantities[config_name]["5306200ED001"] == 2.0, \
+                assert bom.config_quantities[config_name]["5306200ED001"] == 2.0, (
                     f"Expected qty=2 for 5306200ED001 in {config_name}"
+                )
             if "舒享版" in config_name:
                 if "黑米" in config_name:
-                    assert bom.config_quantities[config_name].get("G086A001") is None or \
-                           bom.config_quantities[config_name].get("G086A001", 0) == 0, \
-                        "G086A001 should not exist in 舒享版-黑米"
+                    assert (
+                        bom.config_quantities[config_name].get("G086A001") is None
+                        or bom.config_quantities[config_name].get("G086A001", 0) == 0
+                    ), "G086A001 should not exist in 舒享版-黑米"
                 else:
                     assert bom.config_quantities[config_name].get("G086A001", 0) == 2.0
 
     def test_multi_config_names(self, multi_config_xlsx: str):
         bom = parse_bom(multi_config_xlsx)
-        expected_configs = {"舒享版-全黑内饰", "舒享版-黑米内饰", "奢享版-全黑内饰", "奢享版-黑米内饰"}
+        expected_configs = {
+            "舒享版-全黑内饰",
+            "舒享版-黑米内饰",
+            "奢享版-全黑内饰",
+            "奢享版-黑米内饰",
+        }
         config_set = set(bom.config_names)
         assert config_set == expected_configs, f"Got {config_set}"
 
@@ -218,8 +252,9 @@ class TestParseBomMultiConfigStyle:
         bom = parse_bom(multi_config_xlsx)
         pn = "132000184AA"
         part = bom.parts[pn]
-        assert len(part.applicable_configs) == 4, \
+        assert len(part.applicable_configs) == 4, (
             f"Part {pn} should be in all 4 configs, got {part.applicable_configs}"
+        )
 
     def test_multi_config_global_names(self, multi_config_xlsx: str):
         bom = parse_bom(multi_config_xlsx)
@@ -231,16 +266,33 @@ class TestParseBomMultiConfigStyle:
 #  4. parse_bom — Russian G01-style BOM
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomRussianStyle:
     """Russian BOM: headers at row 1, Russian/Chinese headers."""
 
     @pytest.fixture
     def russian_xlsx(self) -> str:
         data = [
-            ["序号\nСерийный номер", "零部件件号\nКод детали",
-             "零部件名称\nНаименование", "系统\nСистема",
-             "舒享版-全黑", "舒享版-黑米", "奢享版-全黑", "奢享版-黑米"],
-            ["1", "5306200-ED001", "仪表板横梁总成 / Поперечная балка", "A", "1", "1", "2", "2"],
+            [
+                "序号\nСерийный номер",
+                "零部件件号\nКод детали",
+                "零部件名称\nНаименование",
+                "系统\nСистема",
+                "舒享版-全黑",
+                "舒享版-黑米",
+                "奢享版-全黑",
+                "奢享版-黑米",
+            ],
+            [
+                "1",
+                "5306200-ED001",
+                "仪表板横梁总成 / Поперечная балка",
+                "A",
+                "1",
+                "1",
+                "2",
+                "2",
+            ],
             ["2", "551002664AA", "TCU", "B", "1", "1", "1", "1"],
             ["3", "Q146Z0825F36", "Болт", "A", "4", "4", "4", "4"],
         ]
@@ -254,7 +306,9 @@ class TestParseBomRussianStyle:
     def test_russian_part_no_clean(self, russian_xlsx: str):
         bom = parse_bom(russian_xlsx)
         assert "5306200ED001" in bom.parts, "Part number not cleaned correctly"
-        assert "5306200-ED001" not in bom.parts, "Original part number should be cleaned"
+        assert "5306200-ED001" not in bom.parts, (
+            "Original part number should be cleaned"
+        )
 
     def test_russian_config_quantities(self, russian_xlsx: str):
         bom = parse_bom(russian_xlsx)
@@ -262,7 +316,9 @@ class TestParseBomRussianStyle:
         for cn in bom.config_names:
             pn = "5306200ED001"
             if "奢享版" in cn:
-                assert bom.config_quantities[cn][pn] == 2.0, f"{cn}: expected 2, got {bom.config_quantities[cn][pn]}"
+                assert bom.config_quantities[cn][pn] == 2.0, (
+                    f"{cn}: expected 2, got {bom.config_quantities[cn][pn]}"
+                )
             if "舒享版" in cn:
                 assert bom.config_quantities[cn][pn] == 1.0
 
@@ -270,6 +326,7 @@ class TestParseBomRussianStyle:
 # ═══════════════════════════════════════════════════════════════════════
 #  5. parse_bom — Single qty column (附件 style)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomAttachmentSheet:
     """Лист附件 (attachment) с одной qty-колонкой, без config columns.
@@ -286,8 +343,14 @@ class TestParseBomAttachmentSheet:
         """
         data = {
             "总装BOM": [
-                ["序号", "零部件件号", "零部件名称",
-                 "舒享版-全黑", "舒享版-黑米", "奢享版-全黑"],
+                [
+                    "序号",
+                    "零部件件号",
+                    "零部件名称",
+                    "舒享版-全黑",
+                    "舒享版-黑米",
+                    "奢享版-全黑",
+                ],
                 ["1", "P001", "Part One", "1", "1", "2"],
                 ["2", "P002", "Part Two", "1", "0", "1"],
                 ["3", "P003", "Part Three", "2", "2", "2"],
@@ -318,7 +381,9 @@ class TestParseBomAttachmentSheet:
         # Primary sheet has 3 config columns + attachment sheet adds 1 = 4 total
         assert len(bom.config_names) == 4, f"Expected 4 configs, got {bom.config_names}"
         # Attachment sheet creates a config from its sheet name
-        assert "零部件附件" in bom.config_names, "Attachment sheet should add its own config"
+        assert "零部件附件" in bom.config_names, (
+            "Attachment sheet should add its own config"
+        )
 
     def test_primary_parts_in_config(self, attachment_xlsx: str):
         """Primary and attachment sheet parts are in their respective configs."""
@@ -326,15 +391,20 @@ class TestParseBomAttachmentSheet:
         # Primary sheet configs
         for cn in bom.config_names:
             if cn != "零部件附件":
-                assert "P001" in bom.config_quantities[cn], "Primary part missing from config"
+                assert "P001" in bom.config_quantities[cn], (
+                    "Primary part missing from config"
+                )
         # Attachment sheet config
-        assert "P004" in bom.config_quantities["零部件附件"], "Attachment part should be in attachment config"
+        assert "P004" in bom.config_quantities["零部件附件"], (
+            "Attachment part should be in attachment config"
+        )
         assert bom.config_quantities["零部件附件"]["P004"] == 5.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  6. parse_bom — Multi-sheet: only first BOM gives configs
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomMultiSheet:
     """Multiple BOM sheets: ALL sheets contribute parts and quantities.
@@ -375,7 +445,9 @@ class TestParseBomMultiSheet:
         assert "W001" in bom.parts, "First sheet part missing"
         assert "P001" in bom.parts, "Second sheet part missing from bom.parts"
         # Total: 3 from 焊装BOM + 3 from 涂装BOM = 6 parts
-        assert len(bom.parts) == 6, f"Expected 6 parts (both sheets), got {len(bom.parts)}"
+        assert len(bom.parts) == 6, (
+            f"Expected 6 parts (both sheets), got {len(bom.parts)}"
+        )
 
     def test_second_sheet_adds_global_names(self, multi_xlsx: str):
         bom = parse_bom(multi_xlsx)
@@ -388,11 +460,13 @@ class TestParseBomMultiSheet:
         # P001 from 涂装BOM SHOULD be in config quantities (both sheets contribute)
         for cn in bom.config_names:
             if "舒享版" in cn:
-                assert bom.config_quantities[cn].get("P001") == 1.0, \
+                assert bom.config_quantities[cn].get("P001") == 1.0, (
                     f"P001 should have qty=1 in {cn} from 涂装BOM"
+                )
             if "奢享版" in cn:
-                assert bom.config_quantities[cn].get("P001") == 2.0, \
+                assert bom.config_quantities[cn].get("P001") == 2.0, (
                     f"P001 should have qty=2 in {cn} from 涂装BOM"
+                )
 
     def test_same_part_across_sheets_sums_quantities(self):
         """Same part number on two sheets: quantities should be summed."""
@@ -413,15 +487,18 @@ class TestParseBomMultiSheet:
         path = _create_xlsx(data)
         bom = parse_bom(path)
         # SH001: 焊装BOM(2,1) + 涂装BOM(3,2) = (5,3)
-        assert bom.config_quantities["舒享版"]["SH001"] == 5.0, \
+        assert bom.config_quantities["舒享版"]["SH001"] == 5.0, (
             f"Expected 5.0 (2+3), got {bom.config_quantities['舒享版']['SH001']}"
-        assert bom.config_quantities["奢享版"]["SH001"] == 3.0, \
+        )
+        assert bom.config_quantities["奢享版"]["SH001"] == 3.0, (
             f"Expected 3.0 (1+2), got {bom.config_quantities['奢享版']['SH001']}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  7. parse_bom — Service sheets are skipped
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomServiceSheets:
     """BOM with service sheets that should be ignored."""
@@ -451,7 +528,9 @@ class TestParseBomServiceSheets:
     def test_service_sheets_skipped(self, service_xlsx: str):
         bom = parse_bom(service_xlsx)
         # Only 总装BOM is a BOM candidate — EBOM/变更记录/封面 are service sheets
-        assert len(bom.parts) == 3, f"Expected 3 parts (from 总装BOM), got {len(bom.parts)}"
+        assert len(bom.parts) == 3, (
+            f"Expected 3 parts (from 总装BOM), got {len(bom.parts)}"
+        )
         assert "P001" in bom.parts
         assert len(bom.config_names) == 2
 
@@ -465,6 +544,7 @@ class TestParseBomServiceSheets:
 # ═══════════════════════════════════════════════════════════════════════
 #  8. parse_bom — Empty sheet handling
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomEmptySheet:
     @pytest.fixture
@@ -496,13 +576,13 @@ class TestParseBomEmptySheet:
 #  9. parse_bom — Config name deduplication
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomConfigDedup:
     @pytest.fixture
     def dedup_xlsx(self) -> str:
         """Config columns with duplicate names. Needs >= 3 data rows."""
         data = [
-            ["序号", "零部件件号", "零件名称",
-             "Config A", "Config A", "Config B"],
+            ["序号", "零部件件号", "零件名称", "Config A", "Config A", "Config B"],
             ["1", "P001", "Part1", "1", "2", "1"],
             ["2", "P002", "Part2", "1", "0", "2"],
             ["3", "P003", "Part3", "2", "1", "0"],
@@ -513,22 +593,28 @@ class TestParseBomConfigDedup:
         bom = parse_bom(dedup_xlsx)
         # After dedup, "Config A" should appear only once (first occurrence kept)
         config_a_count = sum(1 for c in bom.config_names if c == "Config A")
-        assert config_a_count == 1, f"Config A should be deduplicated, got {bom.config_names}"
+        assert config_a_count == 1, (
+            f"Config A should be deduplicated, got {bom.config_names}"
+        )
         assert "Config B" in bom.config_names
-        assert len(bom.config_names) == 2, f"Expected 2 configs after dedup, got {bom.config_names}"
+        assert len(bom.config_names) == 2, (
+            f"Expected 2 configs after dedup, got {bom.config_names}"
+        )
 
     def test_dedup_first_column_kept(self, dedup_xlsx: str):
         """Dedup removes duplicate columns but keeps only FIRST column's quantities."""
         bom = parse_bom(dedup_xlsx)
         # P001 in Config A: first "Config A" col has qty=1, second has qty=2
         # After dedup, only first column's data is kept (qty=1)
-        assert bom.config_quantities["Config A"]["P001"] == 1.0, \
+        assert bom.config_quantities["Config A"]["P001"] == 1.0, (
             f"Expected 1.0 (first column only), got {bom.config_quantities['Config A'].get('P001')}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  10. parse_bom — global_names fallback to parts
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomGlobalNames:
     @pytest.fixture
@@ -564,6 +650,7 @@ class TestParseBomGlobalNames:
 #  11. get_config_quantities
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestGetConfigQuantities:
     @pytest.fixture
     def bom_data(self) -> BOMData:
@@ -580,7 +667,11 @@ class TestGetConfigQuantities:
             parts=parts,
             config_names=["Config A", "Config B"],
             config_quantities=config_qty,
-            global_names={"P001": ("Part1", ""), "P002": ("Part2", ""), "P003": ("Part3", "")},
+            global_names={
+                "P001": ("Part1", ""),
+                "P002": ("Part2", ""),
+                "P003": ("Part3", ""),
+            },
         )
 
     def test_get_single_config(self, bom_data: BOMData):
@@ -636,8 +727,9 @@ class TestGetConfigQuantities:
         assert result["P001"].name_cn == "Existing Part"
         assert result["P001"].quantity == 1.0
         # P999 — НЕ в parts, должен быть взят из global_names (строки 329-330)
-        assert result["P999"].name_cn == "Fallback Part", \
+        assert result["P999"].name_cn == "Fallback Part", (
             f"Expected 'Fallback Part' from global_names, got '{result['P999'].name_cn}'"
+        )
         assert result["P999"].name_en == "Fallback EN"
         assert result["P999"].quantity == 2.0
 
@@ -646,11 +738,14 @@ class TestGetConfigQuantities:
 #  12. lookup_part_name
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestLookupPartName:
     @pytest.fixture
     def bom_data(self) -> BOMData:
         parts = {
-            "P001": PartInfo(part_number="P001", name_cn="Part1 CN", name_en="Part1 EN"),
+            "P001": PartInfo(
+                part_number="P001", name_cn="Part1 CN", name_en="Part1 EN"
+            ),
         }
         return BOMData(
             parts=parts,
@@ -692,6 +787,7 @@ class TestLookupPartName:
 # ═══════════════════════════════════════════════════════════════════════
 #  13. BOMService
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestBOMService:
     def test_initial_state(self):
@@ -745,7 +841,9 @@ class TestBOMService:
         path = _create_xlsx(data)
         svc = BOMService()
         svc.load(path)
-        assert svc.get_config_count() == 3, f"Expected 3 configs, got {svc.get_config_count()}"
+        assert svc.get_config_count() == 3, (
+            f"Expected 3 configs, got {svc.get_config_count()}"
+        )
 
     def test_get_all_part_numbers(self):
         data = {
@@ -792,6 +890,7 @@ class TestBOMService:
 #  14. parse_bom — Qty-only sheet as PRIMARY BOM (attachment style)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomQtyOnlyAsPrimary:
     """First BOM sheet is an attachment style (qty column, NO config columns).
 
@@ -820,7 +919,9 @@ class TestParseBomQtyOnlyAsPrimary:
     def test_qty_only_creates_single_config(self, qty_only_xlsx: str):
         bom = parse_bom(qty_only_xlsx)
         # Sheet name should become a config
-        assert len(bom.config_names) == 1, f"Expected 1 config (sheet name), got {bom.config_names}"
+        assert len(bom.config_names) == 1, (
+            f"Expected 1 config (sheet name), got {bom.config_names}"
+        )
         assert "零部件附件" in bom.config_names, "Config should be sheet name"
 
     def test_qty_only_parts_collected(self, qty_only_xlsx: str):
@@ -862,14 +963,20 @@ class TestParseBomQtyOnlyAsPrimary:
         path = _create_xlsx(data)
         bom = parse_bom(path)
         # В qty-only path части с qty=0 НЕ добавляются в all_parts
-        assert len(bom.parts) == 2, f"Expected 2 parts (qty=0 skipped), got {len(bom.parts)}"
+        assert len(bom.parts) == 2, (
+            f"Expected 2 parts (qty=0 skipped), got {len(bom.parts)}"
+        )
         assert "P001" in bom.parts, "P001 qty=2 should be present"
         assert "P003" in bom.parts, "P003 qty=1 should be present"
         cn = "Attachment"
         assert "P001" in bom.config_quantities[cn], "P001 qty=2 should be present"
-        assert "P002" not in bom.config_quantities[cn], "P002 qty=0 should NOT be in config"
+        assert "P002" not in bom.config_quantities[cn], (
+            "P002 qty=0 should NOT be in config"
+        )
         assert "P003" in bom.config_quantities[cn], "P003 qty=1 should be present"
-        assert "P004" not in bom.config_quantities[cn], "P004 qty=0 should NOT be in config"
+        assert "P004" not in bom.config_quantities[cn], (
+            "P004 qty=0 should NOT be in config"
+        )
 
     def test_qty_only_different_qty_column_name(self):
         """Qty column can be named differently (e.g. '单车用量')."""
@@ -892,6 +999,7 @@ class TestParseBomQtyOnlyAsPrimary:
 # ═══════════════════════════════════════════════════════════════════════
 #  15. parse_bom — Qty-only как валидный BOM-путь
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomQtyOnlyPath:
     """Дополнительные тесты для qty-only BOM-пути.
@@ -934,12 +1042,15 @@ class TestParseBomQtyOnlyPath:
         assert "P001" in bom.parts
         # Name column is English → name_en is populated
         cn, en = bom.global_names.get("P001", ("", ""))
-        assert "Bolt" in en or "Bolt" in cn, f"Expected 'Bolt' in name, got cn='{cn}' en='{en}'"
+        assert "Bolt" in en or "Bolt" in cn, (
+            f"Expected 'Bolt' in name, got cn='{cn}' en='{en}'"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  16. parse_bom — Лист без заголовков / без part_no колонки
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomSkippedSheets:
     """Листы, пропускаемые на разных этапах проверки.
@@ -1030,6 +1141,7 @@ class TestParseBomSkippedSheets:
 #  17. parse_bom — Dedup с разными форматами имён
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomDedupExtended:
     """Дедупликация имён комплектаций со сложными паттернами.
 
@@ -1039,8 +1151,14 @@ class TestParseBomDedupExtended:
     def test_dedup_with_spaces_and_hyphens(self):
         """Имена, различающиеся только пробелами/дефисами, считаются дубликатами."""
         data = [
-            ["序号", "零部件件号", "零件名称",
-             "舒享版-全黑", "舒享版 - 全黑", "舒享版全黑"],
+            [
+                "序号",
+                "零部件件号",
+                "零件名称",
+                "舒享版-全黑",
+                "舒享版 - 全黑",
+                "舒享版全黑",
+            ],
             ["1", "P001", "Part1", "1", "2", "3"],
             ["2", "P002", "Part2", "1", "1", "1"],
             ["3", "P003", "Part3", "2", "0", "0"],
@@ -1051,7 +1169,9 @@ class TestParseBomDedupExtended:
         # "舒享版 - 全黑" → "舒享版全黑" (пробел+дефис → убрано)
         # "舒享版全黑" → "舒享版全黑"
         # Все три одинаковые → только первый сохраняется
-        assert len(bom.config_names) == 1, f"Expected 1 config after dedup, got {bom.config_names}"
+        assert len(bom.config_names) == 1, (
+            f"Expected 1 config after dedup, got {bom.config_names}"
+        )
         assert bom.config_names[0] == "舒享版-全黑", "First occurrence should be kept"
 
     def test_dedup_case_insensitive(self):
@@ -1064,26 +1184,37 @@ class TestParseBomDedupExtended:
         ]
         path = _create_xlsx({"BOM": data})
         bom = parse_bom(path)
-        assert len(bom.config_names) == 1, f"Expected 1 config (case-insensitive dedup), got {bom.config_names}"
+        assert len(bom.config_names) == 1, (
+            f"Expected 1 config (case-insensitive dedup), got {bom.config_names}"
+        )
         assert bom.config_names[0] == "Luxury", "First occurrence should be kept"
 
     def test_dedup_preserves_unique_names(self):
         """Уникальные имена не затрагиваются дедупликацией."""
         data = [
-            ["序号", "零部件件号", "零件名称",
-             "舒享版-全黑", "舒享版-黑米", "奢享版-全黑"],
+            [
+                "序号",
+                "零部件件号",
+                "零件名称",
+                "舒享版-全黑",
+                "舒享版-黑米",
+                "奢享版-全黑",
+            ],
             ["1", "P001", "Part1", "1", "2", "1"],
             ["2", "P002", "Part2", "1", "1", "0"],
             ["3", "P003", "Part3", "2", "0", "0"],
         ]
         path = _create_xlsx({"BOM": data})
         bom = parse_bom(path)
-        assert len(bom.config_names) == 3, f"Expected 3 unique configs, got {bom.config_names}"
+        assert len(bom.config_names) == 3, (
+            f"Expected 3 unique configs, got {bom.config_names}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  18. parse_bom — Глобальные имена применяются к деталям
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomGlobalNamesApplied:
     """Проверка, что глобальные имена применяются к деталям БЕЗ названия.
@@ -1110,13 +1241,15 @@ class TestParseBomGlobalNamesApplied:
         path = _create_xlsx(data)
         bom = parse_bom(path)
         # PartInfo должен получить name_cn из global_names через агрегацию
-        assert bom.parts["P001"].name_cn == "Engine Mount", \
+        assert bom.parts["P001"].name_cn == "Engine Mount", (
             f"Expected 'Engine Mount', got '{bom.parts['P001'].name_cn}'"
+        )
         assert bom.parts["P002"].name_cn == "Transmission Bracket"
         assert bom.parts["P003"].name_cn == "Radiator Support"
         # global_names тоже должен содержать имена
-        assert "Engine Mount" in bom.global_names["P001"][0], \
+        assert "Engine Mount" in bom.global_names["P001"][0], (
             f"Expected 'Engine Mount' in global_names, got {bom.global_names['P001']}"
+        )
 
     def test_part_without_name_and_not_in_global_keeps_empty(self):
         """Part без name column БЕЗ global_names остаётся с пустым именем."""
@@ -1141,6 +1274,7 @@ class TestParseBomGlobalNamesApplied:
 #  19. BOMService — все методы
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestBOMServiceExtended:
     """Все оставшиеся методы BOMService с реальными данными.
 
@@ -1148,7 +1282,7 @@ class TestBOMServiceExtended:
     """
 
     @pytest.fixture
-    def svc_and_bom(self) -> Tuple[BOMService, str]:
+    def svc_and_bom(self) -> tuple[BOMService, str]:
         data = {
             "BOM": [
                 ["序号", "零部件件号", "零件名称", "Config A", "Config B"],
@@ -1162,7 +1296,7 @@ class TestBOMServiceExtended:
         svc.load(path)
         return svc, path
 
-    def test_get_parts_for_config(self, svc_and_bom: Tuple[BOMService, str]):
+    def test_get_parts_for_config(self, svc_and_bom: tuple[BOMService, str]):
         svc, _ = svc_and_bom
         parts = svc.get_parts_for_config("Config A")
         assert len(parts) == 3, f"Expected 3 parts, got {len(parts)}"
@@ -1172,12 +1306,12 @@ class TestBOMServiceExtended:
         # Names should be preserved
         assert "Part One" in parts["P001"].name_cn
 
-    def test_get_parts_for_config_not_found(self, svc_and_bom: Tuple[BOMService, str]):
+    def test_get_parts_for_config_not_found(self, svc_and_bom: tuple[BOMService, str]):
         svc, _ = svc_and_bom
         with pytest.raises(ValueError, match="не найдена"):
             svc.get_parts_for_config("NonExistent")
 
-    def test_get_all_configs(self, svc_and_bom: Tuple[BOMService, str]):
+    def test_get_all_configs(self, svc_and_bom: tuple[BOMService, str]):
         svc, _ = svc_and_bom
         all_config = svc.get_all_configs()
         assert len(all_config) == 2, f"Expected 2 configs, got {len(all_config)}"
@@ -1211,12 +1345,13 @@ class TestBOMServiceExtended:
 #  19b. BOMService — load_from_bytes, cleanup, context manager, async
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestBOMServiceServer:
     """Тесты серверной функциональности BOMService:
-      - load_from_bytes (in-memory upload)
-      - cleanup (автоудаление temp-файлов)
-      - context manager (with)
-      - async (load_async)
+    - load_from_bytes (in-memory upload)
+    - cleanup (автоудаление temp-файлов)
+    - context manager (with)
+    - async (load_async)
     """
 
     @pytest.fixture
@@ -1271,7 +1406,9 @@ class TestBOMServiceServer:
         temp_path = svc._temp_paths[0]
         assert os.path.isfile(temp_path), "Temp file should exist before cleanup"
         svc.cleanup()
-        assert not os.path.isfile(temp_path), "Temp file should be removed after cleanup"
+        assert not os.path.isfile(temp_path), (
+            "Temp file should be removed after cleanup"
+        )
         assert len(svc._temp_paths) == 0, "Temp paths list should be cleared"
 
     def test_context_manager_cleans_up(self, bom_bytes: bytes):
@@ -1282,7 +1419,9 @@ class TestBOMServiceServer:
             temp_path = svc._temp_paths[0]
             assert os.path.isfile(temp_path)
         # После выхода из with — файл должен быть удалён
-        assert not os.path.isfile(temp_path), "Temp file should be removed after context exit"
+        assert not os.path.isfile(temp_path), (
+            "Temp file should be removed after context exit"
+        )
 
     def test_load_async(self, bom_bytes: bytes):
         """Асинхронная загрузка BOM из байтов."""
@@ -1303,6 +1442,7 @@ class TestBOMServiceServer:
 # ═══════════════════════════════════════════════════════════════════════
 #  20. Edge cases — parse_bom (Extended)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomEdgeCases:
     def test_empty_workbook(self):
@@ -1339,7 +1479,9 @@ class TestParseBomEdgeCases:
         data.append(["3", "JKL-003", "Yet Another", "1", "1"])
         path = _create_xlsx({"BOM": data})
         bom = parse_bom(path)
-        assert "ABC001DEF" in bom.parts, f"Dashes should be removed. Keys: {list(bom.parts.keys())}"
+        assert "ABC001DEF" in bom.parts, (
+            f"Dashes should be removed. Keys: {list(bom.parts.keys())}"
+        )
         assert "GHI002" in bom.parts
         assert "ABC-001-DEF" not in bom.parts
 
@@ -1354,8 +1496,9 @@ class TestParseBomEdgeCases:
         path = _create_xlsx({"BOM": data})
         bom = parse_bom(path)
         cn = bom.config_names[0]
-        assert bom.config_quantities[cn]["P001"] == 2.5, \
+        assert bom.config_quantities[cn]["P001"] == 2.5, (
             f"Expected 2.5 for P001 in {cn}, got {bom.config_quantities[cn].get('P001')}"
+        )
 
     def test_zero_qty_not_added(self):
         """Parts with zero quantity should not be added to config."""
@@ -1371,9 +1514,13 @@ class TestParseBomEdgeCases:
         cn = bom.config_names[0]
         # P001 has qty=0 in all configs → should NOT be in config quantities
         for cn_name in bom.config_names:
-            assert "P001" not in bom.config_quantities[cn_name], \
+            assert "P001" not in bom.config_quantities[cn_name], (
                 f"Zero qty part should not be added to {cn_name}"
-            assert "P002" in bom.config_quantities[cn_name] or "P003" in bom.config_quantities[cn_name]
+            )
+            assert (
+                "P002" in bom.config_quantities[cn_name]
+                or "P003" in bom.config_quantities[cn_name]
+            )
 
     def test_non_header_rows_before_header(self):
         """Rows before the actual header should be ignored."""
@@ -1389,7 +1536,9 @@ class TestParseBomEdgeCases:
         # Need 2+ config columns and 3+ data rows
         path = _create_xlsx({"BOM": data})
         bom = parse_bom(path)
-        assert len(bom.parts) == 3, f"Expected 3 parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        assert len(bom.parts) == 3, (
+            f"Expected 3 parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        )
         assert bom.config_quantities[bom.config_names[0]].get("P001", 0) == 1.0
 
     def test_global_name_applied_to_part_without_name(self):
@@ -1406,7 +1555,11 @@ class TestParseBomEdgeCases:
                 ["3", "W003", "Weld Part 3", "2", "0"],
             ],
             "涂装BOM": [
-                ["序号", "零部件件号", "零件名称"],  # no config columns → not BOM candidate
+                [
+                    "序号",
+                    "零部件件号",
+                    "零件名称",
+                ],  # no config columns → not BOM candidate
                 ["1", "P001", "Painted Part"],
             ],
         }
@@ -1422,6 +1575,7 @@ class TestParseBomEdgeCases:
 # ═══════════════════════════════════════════════════════════════════════
 #  21. parse_bom — find_header_rows пуст (строки 104-105)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomHeaderRowsEmpty:
     """Лист проходит is_sheet_bom_candidate, но find_header_rows пуст.
@@ -1447,12 +1601,15 @@ class TestParseBomHeaderRowsEmpty:
         path = _create_xlsx(data)
         bom = parse_bom(path)
         # Sheet skipped due to no headers → no parts found
-        assert len(bom.parts) == 0, "Sheet with no recognizable headers should be skipped"
+        assert len(bom.parts) == 0, (
+            "Sheet with no recognizable headers should be skipped"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  22. parse_bom — global_names слияние с пустым cn (строка 129)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomGlobalNamesMergeCN:
     """Первый лист не имеет колонки name_cn, второй имеет → existing_cn = nc.
@@ -1494,6 +1651,7 @@ class TestParseBomGlobalNamesMergeCN:
 #  23. parse_bom — Qty-only edge cases (строки 155,158,160,167-168)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomQtyOnlyEdgeCases:
     """Граничные случаи qty-only пути: None/пустой/невалидный PN, плохой qty.
 
@@ -1522,7 +1680,9 @@ class TestParseBomQtyOnlyEdgeCases:
         # Only P001 and P006 should be in parts
         assert "P001" in bom.parts, "P001 should be present"
         assert "P006" in bom.parts, "P006 should be present"
-        assert len(bom.parts) == 2, f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        assert len(bom.parts) == 2, (
+            f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        )
         cn = "Attachment"
         assert bom.config_quantities[cn]["P001"] == 1.0
         assert bom.config_quantities[cn]["P006"] == 3.0
@@ -1535,7 +1695,12 @@ class TestParseBomQtyOnlyEdgeCases:
         data = {
             "Fasteners": [
                 ["序号", "零部件件号", "零件名称", "数量"],
-                ["1", "P001", "Bolt", "N/A"],  # qty="N/A" → float("N/A") → ValueError → qty=0.0
+                [
+                    "1",
+                    "P001",
+                    "Bolt",
+                    "N/A",
+                ],  # qty="N/A" → float("N/A") → ValueError → qty=0.0
                 ["2", "P002", "Nut", "8"],
                 ["3", "P003", "Washer", "16"],
             ],
@@ -1543,7 +1708,9 @@ class TestParseBomQtyOnlyEdgeCases:
         path = _create_xlsx(data)
         bom = parse_bom(path)
         # P001 has qty="N/A" → qty=0.0 → not added to parts (qty > 0 check fails)
-        assert "P001" not in bom.parts, "P001 should not be in parts (qty=0 after failed conversion)"
+        assert "P001" not in bom.parts, (
+            "P001 should not be in parts (qty=0 after failed conversion)"
+        )
         assert "P002" in bom.parts, "P002 should be in parts"
         assert "P003" in bom.parts, "P003 should be in parts"
         cn = "Fasteners"
@@ -1554,6 +1721,7 @@ class TestParseBomQtyOnlyEdgeCases:
 # ═══════════════════════════════════════════════════════════════════════
 #  24. parse_bom — Normal path edge cases (строки 223,226,228,242-245)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestParseBomNormalPathEdgeCases:
     """Граничные случаи normal (multi-config) пути:
@@ -1583,7 +1751,9 @@ class TestParseBomNormalPathEdgeCases:
         # Only P001 and P006 should be in parts
         assert "P001" in bom.parts, "P001 should be present"
         assert "P006" in bom.parts, "P006 should be present"
-        assert len(bom.parts) == 2, f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        assert len(bom.parts) == 2, (
+            f"Expected 2 valid parts, got {len(bom.parts)}: {list(bom.parts.keys())}"
+        )
 
     def test_normal_path_with_bad_qty_value(self):
         """Multi-config BOM с qty значением, вызывающим ValueError.
@@ -1610,8 +1780,9 @@ class TestParseBomNormalPathEdgeCases:
         # P004 should be in Config2 (qty=3) but NOT in Config1 (BADVAL → ValueError → 0.0)
         assert "P004" in bom.config_quantities[cn2], "P004 should be in Config2 (qty=3)"
         assert bom.config_quantities[cn2]["P004"] == 3.0
-        assert bom.config_quantities[cn1].get("P004", 0) == 0.0, \
+        assert bom.config_quantities[cn1].get("P004", 0) == 0.0, (
             "P004 should have qty=0 in Config1 (bad qty)"
+        )
         assert len(bom.parts) == 4, "All 4 parts should be present"
 
     def test_normal_path_with_none_qty(self):
@@ -1639,8 +1810,9 @@ class TestParseBomNormalPathEdgeCases:
         # P002 should be in Config2 (qty=1) but NOT in Config1 (None qty → 0.0)
         assert "P002" in bom.config_quantities[cn2], "P002 should be in Config2"
         assert bom.config_quantities[cn2]["P002"] == 1.0
-        assert bom.config_quantities[cn1].get("P002", 0) == 0.0, \
+        assert bom.config_quantities[cn1].get("P002", 0) == 0.0, (
             "P002 should have qty=0 in Config1 (None qty)"
+        )
         assert len(bom.parts) == 3, "All 3 parts should be present"
 
 
@@ -1648,11 +1820,13 @@ class TestParseBomNormalPathEdgeCases:
 #  25. parse_bom — Strikethrough (зачеркнутый шрифт) игнорирование
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestParseBomStrikethrough:
     """Проверка игнорирования зачеркнутого текста (strikethrough) в BOM-файлах."""
 
     def test_strikethrough_ignored_in_bom(self):
         from openpyxl.styles import Font
+
         # Создаем тестовый BOM-файл вручную, чтобы применить форматирование
         fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="bom_strike_test_")
         os.close(fd)
@@ -1708,4 +1882,3 @@ class TestParseBomStrikethrough:
 
         finally:
             _safe_remove(path)
-

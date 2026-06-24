@@ -1,5 +1,5 @@
-from app.db.async_repository import create_job, get_job
 from app.core.exceptions import JobCreationError
+from app.db.async_repository import create_job, get_job
 
 
 class JobCreationService:

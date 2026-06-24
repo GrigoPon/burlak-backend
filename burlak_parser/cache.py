@@ -19,7 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _file_hash(file_path: str, chunk_size: int = 8192) -> str:
     """
     h = hashlib.md5()
     try:
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             while True:
                 chunk = f.read(chunk_size)
                 if not chunk:
@@ -50,13 +50,14 @@ def _file_hash(file_path: str, chunk_size: int = 8192) -> str:
 @dataclass
 class CacheEntry:
     """Одна запись в кэше."""
+
     file_path: str
     file_hash: str
     file_size: int
     mtime: float
     processed_at: float
-    output_files: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    output_files: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ProcessingCache:
@@ -75,7 +76,7 @@ class ProcessingCache:
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
         self.index_path = os.path.join(cache_dir, "index.json")
-        self._index: Dict[str, CacheEntry] = {}
+        self._index: dict[str, CacheEntry] = {}
         self._load_index()
 
     def _load_index(self) -> None:
@@ -83,7 +84,7 @@ class ProcessingCache:
         if not os.path.isfile(self.index_path):
             return
         try:
-            with open(self.index_path, 'r', encoding='utf-8') as f:
+            with open(self.index_path, encoding="utf-8") as f:
                 data = json.load(f)
             for path, entry_data in data.items():
                 self._index[path] = CacheEntry(
@@ -115,7 +116,7 @@ class ProcessingCache:
                     "output_files": entry.output_files,
                     "metadata": entry.metadata,
                 }
-            with open(self.index_path, 'w', encoding='utf-8') as f:
+            with open(self.index_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except OSError as e:
             logger.warning("Не удалось сохранить кэш: %s", e)
@@ -155,7 +156,7 @@ class ProcessingCache:
 
         return False
 
-    def get_cached_result(self, file_path: str) -> Optional[CacheEntry]:
+    def get_cached_result(self, file_path: str) -> CacheEntry | None:
         """Получить кэшированный результат.
 
         Args:
@@ -170,8 +171,8 @@ class ProcessingCache:
     def store_result(
         self,
         file_path: str,
-        output_files: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        output_files: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Сохранить результат обработки в кэш.
 
@@ -200,7 +201,7 @@ class ProcessingCache:
         abs_path = os.path.abspath(file_path)
         self._index.pop(abs_path, None)
 
-    def get_stale_files(self, current_files: List[str]) -> List[str]:
+    def get_stale_files(self, current_files: list[str]) -> list[str]:
         """Найти файлы в кэше, которых больше нет на диске.
 
         Args:
@@ -212,7 +213,7 @@ class ProcessingCache:
         current_set = {os.path.abspath(f) for f in current_files}
         return [p for p in self._index if p not in current_set]
 
-    def cleanup_stale(self, current_files: List[str]) -> int:
+    def cleanup_stale(self, current_files: list[str]) -> int:
         """Удалить из кэша записи для несуществующих файлов.
 
         Returns:
@@ -234,7 +235,7 @@ class ProcessingCache:
         """Количество записей в кэше."""
         return len(self._index)
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Получить статистику кэша."""
         return {
             "total_entries": len(self._index),

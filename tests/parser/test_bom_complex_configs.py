@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Any, List, Optional
 
 import openpyxl
 import pytest
@@ -41,41 +40,65 @@ def _create_complex_bom_xlsx() -> str:
 
     # R3: заголовки
     headers = {
-        1: "修订", 2: "序号\nSerial NO.", 3: "CPAC编码\nCPAC Code",
-        4: "标识", 5: "发运", 6: "采购",
-        7: "零件号\nPartNo.", 8: "零件名称(中文）\nPart Name(CN)",
-        9: "零件名称(英文）\nPart Name(EN)", 10: "用量\nQty",
-        11: "度量单位\nUOM", 12: "GPC代码\nGPC", 13: "FND代码\nFND",
-        14: "FND中文", 15: "FND英文", 16: "零件成熟度",
-        17: "层级\nLevel", 18: "LOU用法\nUsage", 19: "物料状态\nMake/Buy",
-        20: "来源车间", 21: "使用工厂", 22: "目标车间",
-        23: "供应商代码", 24: "供应商名称", 25: "MWO",
-        26: "生效日期", 27: "失效日期", 28: "整车物料号",
+        1: "修订",
+        2: "序号\nSerial NO.",
+        3: "CPAC编码\nCPAC Code",
+        4: "标识",
+        5: "发运",
+        6: "采购",
+        7: "零件号\nPartNo.",
+        8: "零件名称(中文）\nPart Name(CN)",
+        9: "零件名称(英文）\nPart Name(EN)",
+        10: "用量\nQty",
+        11: "度量单位\nUOM",
+        12: "GPC代码\nGPC",
+        13: "FND代码\nFND",
+        14: "FND中文",
+        15: "FND英文",
+        16: "零件成熟度",
+        17: "层级\nLevel",
+        18: "LOU用法\nUsage",
+        19: "物料状态\nMake/Buy",
+        20: "来源车间",
+        21: "使用工厂",
+        22: "目标车间",
+        23: "供应商代码",
+        24: "供应商名称",
+        25: "MWO",
+        26: "生效日期",
+        27: "失效日期",
+        28: "整车物料号",
     }
     for col, val in headers.items():
         ws.cell(row=3, column=col, value=val)
 
     # 24 уникальных UB-конфигурации (числовые) — C29-C52
     for i in range(24):
-        ws.cell(row=3, column=29 + i, value=f"UB版二{['黑橙','灰黑','绿黑'][i%3]}内饰C{i+1:02d}座CKDUBCKD")
+        ws.cell(
+            row=3,
+            column=29 + i,
+            value=f"UB版二{['黑橙', '灰黑', '绿黑'][i % 3]}内饰C{i + 1:02d}座CKDUBCKD",
+        )
 
     # 54 уникальных S-конфигурации (S/- маркеры) — C56-C109
-    colors = ['航空银', '沙金', '新卡其白', '电镀绿', '布罗蓝', '新碳晶黑']
+    colors = ["航空银", "沙金", "新卡其白", "电镀绿", "布罗蓝", "新碳晶黑"]
     for i in range(54):
         color = colors[i % 6]
-        cfg_type = ['舒适型', '豪华型'][i % 2]
-        ws.cell(row=3, column=56 + i, value=f"S版{cfg_type}{i+1:02d}{color}内饰KM两驱1180")
+        cfg_type = ["舒适型", "豪华型"][i % 2]
+        ws.cell(
+            row=3, column=56 + i, value=f"S版{cfg_type}{i + 1:02d}{color}内饰KM两驱1180"
+        )
 
     # R4-R53: 50 строк данных
     for dr in range(4, 54):
         pi = dr - 3
-        ws.cell(row=dr, column=1, value=pi)       # 序号
+        ws.cell(row=dr, column=1, value=pi)  # 序号
         ws.cell(row=dr, column=3, value=f"20.{pi:02d}.04.99")  # CPAC
-        ws.cell(row=dr, column=7, value=f"P{pi:08d}")          # PartNo
-        ws.cell(row=dr, column=8, value=f"Деталь {pi} CN")     # Name CN
-        ws.cell(row=dr, column=9, value=f"Part {pi} EN")       # Name EN
-        ws.cell(row=dr, column=10, value=1 + (pi % 5))         # Qty: 1-5
-        ws.cell(row=dr, column=11, value="EA")                 # UOM
+        ws.cell(row=dr, column=7, value=f"P{pi:08d}")  # PartNo
+        ws.cell(row=dr, column=8, value=f"Деталь {pi} CN")  # Name CN
+        ws.cell(row=dr, column=9, value=f"Part {pi} EN")  # Name EN
+        ws.cell(row=dr, column=10, value=1 + (pi % 5))  # Qty: 1-5
+        ws.cell(row=dr, column=11, value="EA")  # UOM
 
         # Числовые колонки C29-C52: варьирующиеся количества
         for i in range(24):
@@ -135,9 +158,13 @@ class TestComplexConfigRegression:
         ws = wb.active
         header_rows = HeuristicAnalyzer.find_header_rows(ws)
         col_types = HeuristicAnalyzer.detect_column_types(ws, header_rows)
-        config_cols = HeuristicAnalyzer.detect_config_columns(ws, header_rows, col_types)
+        config_cols = HeuristicAnalyzer.detect_config_columns(
+            ws, header_rows, col_types
+        )
 
-        assert len(config_cols) == 78, f"Expected 78, got {len(config_cols)}: {config_cols}"
+        assert len(config_cols) == 78, (
+            f"Expected 78, got {len(config_cols)}: {config_cols}"
+        )
 
         # Все числовые колонки C29-C52
         for c in range(29, 53):

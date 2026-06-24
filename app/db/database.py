@@ -1,5 +1,6 @@
-import aiosqlite
 from collections.abc import AsyncGenerator, Generator
+
+import aiosqlite
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 

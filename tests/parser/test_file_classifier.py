@@ -12,24 +12,21 @@
 
 from __future__ import annotations
 
-import os
-import pytest
-
 from burlak_parser.file_classifier import (
     FileClassification,
+    _contains_service_keywords,
+    _extract_operation_number,
+    _find_card_number_in_name,
     classify_file,
     filter_operational_cards,
     get_parseable_files,
     get_splittable_files,
-    _contains_service_keywords,
-    _extract_operation_number,
-    _find_card_number_in_name,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  1. FileClassification dataclass
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFileClassification:
     def test_default_operation_number(self):
@@ -86,6 +83,7 @@ class TestFileClassification:
 # ═══════════════════════════════════════════════════════════════════════
 #  2. classify_file — operational cards by operation number
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestClassifyOperational:
     def test_as_pattern_sqrt(self):
@@ -164,6 +162,7 @@ class TestClassifyOperational:
 # ═══════════════════════════════════════════════════════════════════════
 #  3. classify_file — service files (keywords)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestClassifyServiceFile:
     def test_chinese_cover(self):
@@ -248,6 +247,7 @@ class TestClassifyServiceFile:
 #  4. classify_file — heuristic (extract_card_number_from_filepath)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestClassifyHeuristic:
     def test_sqrt_extracted(self):
         """SQRT1L-17-AS-04001 in filename -> heuristic match."""
@@ -264,7 +264,7 @@ class TestClassifyHeuristic:
         assert fc.operation_number == "G01"
 
     def test_tp_number(self):
-        """TP-0123[копия] -> TP matched by CARD_NUMBER_RE (stops at non-\w char)."""
+        r"""TP-0123[копия] -> TP matched by CARD_NUMBER_RE (stops at non-\w char)."""
         # extract_card_number_from_filepath returns "TP-0123" which != "TP-0123[копия]"
         fc = classify_file("TP-0123[копия].xlsx")
         assert fc.is_operational_card is True
@@ -295,6 +295,7 @@ class TestClassifyHeuristic:
 #  6. classify_file — alt heuristic (garbled filenames)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestClassifyAltHeuristic:
     def test_swm_garbled_filename(self):
         """SWM card with garbled encoding -> alt heuristic finds G01P."""
@@ -319,6 +320,7 @@ class TestClassifyAltHeuristic:
 # ═══════════════════════════════════════════════════════════════════════
 #  7. classify_file — unknown format
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestClassifyUnknown:
     def test_random_text(self):
@@ -358,6 +360,7 @@ class TestClassifyUnknown:
 # ═══════════════════════════════════════════════════════════════════════
 #  8. _find_card_number_in_name
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestFindCardNumberInName:
     def test_g01p_found(self):
@@ -413,10 +416,14 @@ class TestFindCardNumberInName:
 #  9. _extract_operation_number
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExtractOperationNumber:
     def test_prefix_as_sqrt(self):
         """SQRT1L-A-AS-04001 -> AS pattern."""
-        assert _extract_operation_number("SQRT1L-A-AS-04001-20点扫描") == "SQRT1L-A-AS-04001"
+        assert (
+            _extract_operation_number("SQRT1L-A-AS-04001-20点扫描")
+            == "SQRT1L-A-AS-04001"
+        )
 
     def test_prefix_as_g01(self):
         """G01-A-AS-05001 -> AS pattern."""
@@ -471,6 +478,7 @@ class TestExtractOperationNumber:
 #  10. filter_operational_cards, get_parseable_files, get_splittable_files
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestFilterFunctions:
     def test_filter_operational_cards_mixed(self):
         """Filter classifies a mix of operational/service files."""
@@ -492,9 +500,33 @@ class TestFilterFunctions:
     def test_get_parseable_files(self):
         """Filter classifications for parseable files."""
         classifications = [
-            FileClassification("op1.xlsx", "op1", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
-            FileClassification("service.xlsx", "service", ".", is_operational_card=False, is_service_file=True, should_split=False, should_parse_parts=False),
-            FileClassification("op2.xlsx", "op2", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
+            FileClassification(
+                "op1.xlsx",
+                "op1",
+                ".",
+                is_operational_card=True,
+                is_service_file=False,
+                should_split=True,
+                should_parse_parts=True,
+            ),
+            FileClassification(
+                "service.xlsx",
+                "service",
+                ".",
+                is_operational_card=False,
+                is_service_file=True,
+                should_split=False,
+                should_parse_parts=False,
+            ),
+            FileClassification(
+                "op2.xlsx",
+                "op2",
+                ".",
+                is_operational_card=True,
+                is_service_file=False,
+                should_split=True,
+                should_parse_parts=True,
+            ),
         ]
         parseable = get_parseable_files(classifications)
         assert parseable == ["op1.xlsx", "op2.xlsx"]
@@ -506,9 +538,33 @@ class TestFilterFunctions:
     def test_get_splittable_files(self):
         """Filter classifications for splittable files."""
         classifications = [
-            FileClassification("op.xlsx", "op", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
-            FileClassification("service.xlsx", "service", ".", is_operational_card=False, is_service_file=True, should_split=False, should_parse_parts=False),
-            FileClassification("unknown.xlsx", "unknown", ".", is_operational_card=False, is_service_file=False, should_split=True, should_parse_parts=False),
+            FileClassification(
+                "op.xlsx",
+                "op",
+                ".",
+                is_operational_card=True,
+                is_service_file=False,
+                should_split=True,
+                should_parse_parts=True,
+            ),
+            FileClassification(
+                "service.xlsx",
+                "service",
+                ".",
+                is_operational_card=False,
+                is_service_file=True,
+                should_split=False,
+                should_parse_parts=False,
+            ),
+            FileClassification(
+                "unknown.xlsx",
+                "unknown",
+                ".",
+                is_operational_card=False,
+                is_service_file=False,
+                should_split=True,
+                should_parse_parts=False,
+            ),
         ]
         splittable = get_splittable_files(classifications)
         assert len(splittable) == 2
@@ -518,7 +574,15 @@ class TestFilterFunctions:
     def test_get_splittable_files_returns_classifications(self):
         """get_splittable_files returns FileClassification objects, not paths."""
         classifications = [
-            FileClassification("op.xlsx", "op", ".", is_operational_card=True, is_service_file=False, should_split=True, should_parse_parts=True),
+            FileClassification(
+                "op.xlsx",
+                "op",
+                ".",
+                is_operational_card=True,
+                is_service_file=False,
+                should_split=True,
+                should_parse_parts=True,
+            ),
         ]
         result = get_splittable_files(classifications)
         assert isinstance(result[0], FileClassification)
@@ -532,6 +596,7 @@ class TestFilterFunctions:
 # ═══════════════════════════════════════════════════════════════════════
 #  11. _contains_service_keywords (direct tests)
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestContainsServiceKeywords:
     def test_chinese_cover(self):

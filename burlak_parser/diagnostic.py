@@ -19,7 +19,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,44 +27,48 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SheetSchema:
     """Схема одного листа Excel (результат эвристического анализа)."""
+
     sheet_name: str
-    header_rows: List[int]
-    column_types: Dict[str, int]
-    config_columns: List[int]
+    header_rows: list[int]
+    column_types: dict[str, int]
+    config_columns: list[int]
     data_start_row: int
     total_rows: int
     total_columns: int
     is_bom_candidate: bool
     is_service_sheet: bool
     graphic_number_column: int = 0
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class FileSchema:
     """Схема одного Excel-файла (результат эвристического анализа)."""
+
     file_path: str
     file_name: str
     file_type: str  # "bom", "operational_card", "unknown"
-    sheets: List[SheetSchema]
+    sheets: list[SheetSchema]
     detected_card_number: str = ""
-    processing_notes: List[str] = field(default_factory=list)
+    processing_notes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BOMDumpEntry:
     """Одна деталь из BOM-дампа."""
+
     part_number: str
     part_number_original: str
     name_cn: str
     name_en: str
-    applicable_configs: List[str]
-    quantities: Dict[str, float]
+    applicable_configs: list[str]
+    quantities: dict[str, float]
 
 
 @dataclass
 class CardDumpEntry:
     """Одна деталь из операционной карты (дамп)."""
+
     part_number: str
     part_number_original: str
     quantity: float
@@ -77,12 +81,13 @@ class CardDumpEntry:
 @dataclass
 class CardFileDump:
     """Дамп одного файла операционной карты."""
+
     file_path: str
     file_name: str
     card_number: str
-    sheets: List[Dict[str, Any]]
-    parts: List[CardDumpEntry]
-    aggregated_parts: Dict[str, float]
+    sheets: list[dict[str, Any]]
+    parts: list[CardDumpEntry]
+    aggregated_parts: dict[str, float]
     is_service_file: bool = False
 
 
@@ -101,17 +106,17 @@ class DiagnosticDumper:
         """
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-        self._schema_data: List[FileSchema] = []
-        self._bom_data: List[BOMDumpEntry] = []
-        self._card_data: List[CardFileDump] = []
+        self._schema_data: list[FileSchema] = []
+        self._bom_data: list[BOMDumpEntry] = []
+        self._card_data: list[CardFileDump] = []
 
     def dump_file_schema(
         self,
         file_path: str,
         file_type: str,
-        sheets_info: List[Dict[str, Any]],
+        sheets_info: list[dict[str, Any]],
         card_number: str = "",
-        notes: Optional[List[str]] = None,
+        notes: list[str] | None = None,
     ) -> None:
         """Сохранить схему файла.
 
@@ -154,8 +159,8 @@ class DiagnosticDumper:
         part_number_original: str,
         name_cn: str = "",
         name_en: str = "",
-        applicable_configs: Optional[List[str]] = None,
-        quantities: Optional[Dict[str, float]] = None,
+        applicable_configs: list[str] | None = None,
+        quantities: dict[str, float] | None = None,
     ) -> None:
         """Добавить запись в BOM-дамп.
 
@@ -181,9 +186,9 @@ class DiagnosticDumper:
         self,
         file_path: str,
         card_number: str,
-        sheets_info: List[Dict[str, Any]],
-        parts: List[Dict[str, Any]],
-        aggregated: Dict[str, float],
+        sheets_info: list[dict[str, Any]],
+        parts: list[dict[str, Any]],
+        aggregated: dict[str, float],
         is_service: bool = False,
     ) -> None:
         """Сохранить дамп файла операционной карты.
@@ -219,42 +224,51 @@ class DiagnosticDumper:
         self._card_data.append(card_dump)
         logger.debug("Card dump recorded for: %s", os.path.basename(file_path))
 
-    def save_all(self) -> Dict[str, str]:
+    def save_all(self) -> dict[str, str]:
         """Сохранить все дампы в JSON-файлы.
 
         Returns:
             Словарь {тип_дампа: путь_к_файлу}.
         """
-        outputs: Dict[str, str] = {}
+        outputs: dict[str, str] = {}
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # 1. Schema dump
         schema_path = os.path.join(self.output_dir, "schema_detection.json")
-        self._save_json(schema_path, {
-            "generated_at": timestamp,
-            "total_files": len(self._schema_data),
-            "files": [self._to_dict(s) for s in self._schema_data],
-        })
+        self._save_json(
+            schema_path,
+            {
+                "generated_at": timestamp,
+                "total_files": len(self._schema_data),
+                "files": [self._to_dict(s) for s in self._schema_data],
+            },
+        )
         outputs["schema"] = schema_path
         logger.info("Schema dump saved: %s", schema_path)
 
         # 2. BOM dump
         bom_path = os.path.join(self.output_dir, "BOM_parsed_dump.json")
-        self._save_json(bom_path, {
-            "generated_at": timestamp,
-            "total_parts": len(self._bom_data),
-            "parts": [self._to_dict(e) for e in self._bom_data],
-        })
+        self._save_json(
+            bom_path,
+            {
+                "generated_at": timestamp,
+                "total_parts": len(self._bom_data),
+                "parts": [self._to_dict(e) for e in self._bom_data],
+            },
+        )
         outputs["bom"] = bom_path
         logger.info("BOM dump saved: %s (%d parts)", bom_path, len(self._bom_data))
 
         # 3. OC (operational cards) dump
         oc_path = os.path.join(self.output_dir, "OC_parsed_dump.json")
-        self._save_json(oc_path, {
-            "generated_at": timestamp,
-            "total_files": len(self._card_data),
-            "files": [self._to_dict(f) for f in self._card_data],
-        })
+        self._save_json(
+            oc_path,
+            {
+                "generated_at": timestamp,
+                "total_files": len(self._card_data),
+                "files": [self._to_dict(f) for f in self._card_data],
+            },
+        )
         outputs["oc"] = oc_path
         logger.info("OC dump saved: %s (%d files)", oc_path, len(self._card_data))
 
@@ -316,7 +330,7 @@ def create_diagnostic_from_bom(
 
     # Добавляем config_names и config_quantities в дамп
     if bom_path and os.path.exists(bom_path):
-        with open(bom_path, "r", encoding="utf-8") as f:
+        with open(bom_path, encoding="utf-8") as f:
             bom_json = json.load(f)
         bom_json["config_names"] = bom_data.config_names
         bom_json["config_quantities"] = {
@@ -346,25 +360,29 @@ def create_diagnostic_from_cards(
     for result in cards_data.card_results:
         parts_list = []
         for cp in result.parts:
-            parts_list.append({
-                "part_number": cp.part_number,
-                "part_number_original": cp.part_number,
-                "quantity": cp.quantity,
-                "source_card": cp.source_card,
-                "source_sheet": cp.source_sheet,
-                "operation_name": "",
-                "graphic_number": "",
-            })
+            parts_list.append(
+                {
+                    "part_number": cp.part_number,
+                    "part_number_original": cp.part_number,
+                    "quantity": cp.quantity,
+                    "source_card": cp.source_card,
+                    "source_sheet": cp.source_sheet,
+                    "operation_name": "",
+                    "graphic_number": "",
+                }
+            )
 
         sheets_info = []
         for si in result.sheets:
-            sheets_info.append({
-                "name": si.sheet_name,
-                "card_number": si.card_number,
-                "operation_name": si.operation_name,
-                "is_valid": si.is_valid,
-                "has_data": si.has_data,
-            })
+            sheets_info.append(
+                {
+                    "name": si.sheet_name,
+                    "card_number": si.card_number,
+                    "operation_name": si.operation_name,
+                    "is_valid": si.is_valid,
+                    "has_data": si.has_data,
+                }
+            )
 
         dumper.dump_card_file(
             file_path=result.file_path,

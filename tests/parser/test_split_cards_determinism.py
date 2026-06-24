@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
-from typing import List
 
 import openpyxl
 import pytest
@@ -26,6 +24,7 @@ from burlak_parser.card_parser import (
     parse_cards,
     split_cards_to_files,
 )
+
 
 def _create_multi_sheet_card(dir_path: str, prefix: str, sheets: int) -> str:
     """Создать .xlsx с несколькими листами, имитирующими операционные карты.
@@ -78,7 +77,7 @@ def cards_data(card_dir: str) -> CardsData:
 def _run_split_and_get_basenames(
     cards_data: CardsData,
     output_dir: str,
-) -> List[str]:
+) -> list[str]:
     """Запустить split_cards_to_files и вернуть отсортированные имена файлов."""
     created = split_cards_to_files(cards_data, output_dir, max_workers=1)
     return sorted(os.path.basename(f) for f in created)
@@ -89,7 +88,7 @@ class TestSplitCardsDeterminism:
 
     def test_files_count_identical_across_runs(self, cards_data: CardsData, tmp_path):
         """Количество созданных файлов одинаково во всех 3 запусках."""
-        runs: List[List[str]] = []
+        runs: list[list[str]] = []
 
         for i in range(3):
             out_dir = os.path.join(str(tmp_path), f"run_{i}")
@@ -105,7 +104,7 @@ class TestSplitCardsDeterminism:
 
     def test_file_names_identical_across_runs(self, cards_data: CardsData, tmp_path):
         """Имена созданных файлов идентичны во всех 3 запусках."""
-        runs: List[List[str]] = []
+        runs: list[list[str]] = []
 
         for i in range(3):
             out_dir = os.path.join(str(tmp_path), f"names_{i}")
@@ -151,7 +150,5 @@ class TestSplitCardsDeterminism:
             )
             ws = wb.active
             # Должны быть заголовки
-            assert ws.cell(1, 1).value is not None, (
-                f"Нет данных в ячейке A1: {fpath}"
-            )
+            assert ws.cell(1, 1).value is not None, f"Нет данных в ячейке A1: {fpath}"
             wb.close()

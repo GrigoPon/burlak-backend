@@ -1,4 +1,3 @@
-import os
 import shutil
 from pathlib import Path
 
@@ -57,7 +56,9 @@ def write_chunk(job_id: int, role: str, n: int, data: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     except OSError as e:
-        raise StorageError(f"Failed to write chunk {role}_{n} for job {job_id}: {e}") from e
+        raise StorageError(
+            f"Failed to write chunk {role}_{n} for job {job_id}: {e}"
+        ) from e
 
 
 def assemble_chunks(job_id: int, role: str, total_chunks: int) -> Path:
@@ -73,7 +74,9 @@ def assemble_chunks(job_id: int, role: str, total_chunks: int) -> Path:
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        raise StorageError(f"Failed to create output directory for job {job_id}: {e}") from e
+        raise StorageError(
+            f"Failed to create output directory for job {job_id}: {e}"
+        ) from e
 
     # Stream chunks into the final file (never load entire file in memory)
     try:

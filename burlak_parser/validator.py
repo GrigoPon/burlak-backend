@@ -16,7 +16,7 @@ import os
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,9 @@ NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 @dataclass
 class ValidationIssue:
     """Одна проблема, обнаруженная при валидации."""
-    level: str        # "structural", "schema", "content", "semantic"
-    severity: str     # "error", "warning"
+
+    level: str  # "structural", "schema", "content", "semantic"
+    severity: str  # "error", "warning"
     message: str
     file_path: str = ""
     sheet_name: str = ""
@@ -37,32 +38,41 @@ class ValidationIssue:
 @dataclass
 class ValidationResult:
     """Результат валидации одного файла."""
+
     file_path: str
     is_valid: bool = True
-    issues: List[ValidationIssue] = field(default_factory=list)
+    issues: list[ValidationIssue] = field(default_factory=list)
 
     @property
-    def errors(self) -> List[ValidationIssue]:
+    def errors(self) -> list[ValidationIssue]:
         return [i for i in self.issues if i.severity == "error"]
 
     @property
-    def warnings(self) -> List[ValidationIssue]:
+    def warnings(self) -> list[ValidationIssue]:
         return [i for i in self.issues if i.severity == "warning"]
 
     def add_error(self, level: str, message: str, **kwargs: Any) -> None:
-        self.issues.append(ValidationIssue(
-            level=level, severity="error", message=message,
-            file_path=kwargs.get("file_path", self.file_path),
-            sheet_name=kwargs.get("sheet_name", ""),
-        ))
+        self.issues.append(
+            ValidationIssue(
+                level=level,
+                severity="error",
+                message=message,
+                file_path=kwargs.get("file_path", self.file_path),
+                sheet_name=kwargs.get("sheet_name", ""),
+            )
+        )
         self.is_valid = False
 
     def add_warning(self, level: str, message: str, **kwargs: Any) -> None:
-        self.issues.append(ValidationIssue(
-            level=level, severity="warning", message=message,
-            file_path=kwargs.get("file_path", self.file_path),
-            sheet_name=kwargs.get("sheet_name", ""),
-        ))
+        self.issues.append(
+            ValidationIssue(
+                level=level,
+                severity="warning",
+                message=message,
+                file_path=kwargs.get("file_path", self.file_path),
+                sheet_name=kwargs.get("sheet_name", ""),
+            )
+        )
 
 
 class ValidationPipeline:
@@ -139,7 +149,7 @@ class ValidationPipeline:
 
         return result
 
-    def validate_batch(self, file_paths: List[str]) -> List[ValidationResult]:
+    def validate_batch(self, file_paths: list[str]) -> list[ValidationResult]:
         """Валидировать список файлов.
 
         Returns:
@@ -172,15 +182,15 @@ class ValidationPipeline:
 
         # ZIP целостность
         try:
-            with zipfile.ZipFile(file_path, 'r') as zf:
+            with zipfile.ZipFile(file_path, "r") as zf:
                 names = set(zf.namelist())
 
                 # Обязательные файлы
                 required = [
-                    '[Content_Types].xml',
-                    'xl/workbook.xml',
-                    'xl/_rels/workbook.xml.rels',
-                    '_rels/.rels',
+                    "[Content_Types].xml",
+                    "xl/workbook.xml",
+                    "xl/_rels/workbook.xml.rels",
+                    "_rels/.rels",
                 ]
                 for req in required:
                     if req not in names:
@@ -191,13 +201,13 @@ class ValidationPipeline:
 
                 # Хотя бы один sheet XML
                 if not any(
-                    n.endswith('.xml') and 'sheet' in n.lower() and '_rels' not in n
+                    n.endswith(".xml") and "sheet" in n.lower() and "_rels" not in n
                     for n in names
                 ):
                     result.add_error("structural", "Нет sheet XML файлов")
 
                 # XML well-formed для критических файлов
-                critical_xmls = ['xl/workbook.xml', '[Content_Types].xml']
+                critical_xmls = ["xl/workbook.xml", "[Content_Types].xml"]
                 for cx in critical_xmls:
                     if cx in names:
                         try:
@@ -237,15 +247,17 @@ class ValidationPipeline:
           - Количество строк > 0
         """
         try:
-            with zipfile.ZipFile(file_path, 'r') as zf:
+            with zipfile.ZipFile(file_path, "r") as zf:
                 for name in zf.namelist():
-                    if (name.endswith('.xml')
-                            and 'sheet' in name.lower()
-                            and '_rels' not in name):
+                    if (
+                        name.endswith(".xml")
+                        and "sheet" in name.lower()
+                        and "_rels" not in name
+                    ):
                         try:
                             data = zf.read(name)
                             root = ET.fromstring(data)
-                            ns = f'{{{NS_MAIN}}}sheetData'
+                            ns = f"{{{NS_MAIN}}}sheetData"
                             sheet_data = root.find(ns)
                             if sheet_data is None:
                                 result.add_error(
@@ -255,7 +267,7 @@ class ValidationPipeline:
                                 continue
 
                             # Подсчёт строк
-                            row_count = len(sheet_data.findall(f'{{{NS_MAIN}}}row'))
+                            row_count = len(sheet_data.findall(f"{{{NS_MAIN}}}row"))
                             if row_count == 0:
                                 result.add_warning(
                                     "schema",
@@ -277,9 +289,9 @@ class ValidationPipeline:
           - Drawing XML references существуют
         """
         try:
-            with zipfile.ZipFile(file_path, 'r') as zf:
+            with zipfile.ZipFile(file_path, "r") as zf:
                 names = set(zf.namelist())
-                media_files = [n for n in names if n.startswith('xl/media/')]
+                media_files = [n for n in names if n.startswith("xl/media/")]
 
                 # Проверяем что все media файлы непустые
                 for mf in media_files:
@@ -298,25 +310,25 @@ class ValidationPipeline:
 
                 # Проверяем что drawing rels ссылки существуют
                 for name in names:
-                    if 'drawing' in name and name.endswith('.rels'):
+                    if "drawing" in name and name.endswith(".rels"):
                         try:
                             data = zf.read(name)
                             root = ET.fromstring(data)
                             drawing_dir = os.path.dirname(
-                                name.replace('_rels/', '').replace('.rels', '')
+                                name.replace("_rels/", "").replace(".rels", "")
                             )
                             for rel in root:
-                                target = rel.get('Target', '')
+                                target = rel.get("Target", "")
                                 if target:
                                     resolved = os.path.normpath(
                                         os.path.join(drawing_dir, target)
-                                    ).replace(os.sep, '/')
-                                    if not resolved.startswith('/'):
+                                    ).replace(os.sep, "/")
+                                    if not resolved.startswith("/"):
                                         resolved_check = resolved
                                     else:
                                         resolved_check = resolved[1:]
                                     # Проверяем только media references
-                                    if 'media' in resolved_check.lower():
+                                    if "media" in resolved_check.lower():
                                         if resolved_check not in names:
                                             result.add_warning(
                                                 "content",
@@ -337,13 +349,16 @@ class ValidationPipeline:
           - Количества являются числами
           - Нет дубликатов part-номеров
         """
-        from burlak_parser.normalizer import is_valid_part_number, normalize_quantity
 
         try:
-            import openpyxl
             import warnings
+
+            import openpyxl
+
             with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+                warnings.filterwarnings(
+                    "ignore", category=UserWarning, module="openpyxl"
+                )
                 wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
 
             for sheet_name in wb.sheetnames:
@@ -373,12 +388,12 @@ class ValidationPipeline:
           - Размер файла не слишком мал (признак пустого/битого файла)
         """
         try:
-            with zipfile.ZipFile(file_path, 'r') as zf:
+            with zipfile.ZipFile(file_path, "r") as zf:
                 names = set(zf.namelist())
 
                 # Проверка 1: изображения (если в оригинале были)
                 if self.has_images_in_original:
-                    media_files = [n for n in names if n.startswith('xl/media/')]
+                    media_files = [n for n in names if n.startswith("xl/media/")]
                     if not media_files:
                         result.add_warning(
                             "split-quality",
@@ -388,26 +403,32 @@ class ValidationPipeline:
                 # Проверка 2: количество строк
                 if self.expected_min_rows > 0 or self.expected_max_rows > 0:
                     for name in names:
-                        if (name.endswith('.xml')
-                                and 'sheet' in name.lower()
-                                and '_rels' not in name):
+                        if (
+                            name.endswith(".xml")
+                            and "sheet" in name.lower()
+                            and "_rels" not in name
+                        ):
                             try:
                                 data = zf.read(name)
                                 root = ET.fromstring(data)
-                                ns = f'{{{NS_MAIN}}}sheetData'
+                                ns = f"{{{NS_MAIN}}}sheetData"
                                 sheet_data = root.find(ns)
                                 if sheet_data is not None:
                                     row_count = len(
-                                        sheet_data.findall(f'{{{NS_MAIN}}}row')
+                                        sheet_data.findall(f"{{{NS_MAIN}}}row")
                                     )
-                                    if (self.expected_min_rows > 0
-                                            and row_count < self.expected_min_rows):
+                                    if (
+                                        self.expected_min_rows > 0
+                                        and row_count < self.expected_min_rows
+                                    ):
                                         result.add_warning(
                                             "split-quality",
                                             f"Мало строк: {row_count} < {self.expected_min_rows}",
                                         )
-                                    if (self.expected_max_rows > 0
-                                            and row_count > self.expected_max_rows * 1.5):
+                                    if (
+                                        self.expected_max_rows > 0
+                                        and row_count > self.expected_max_rows * 1.5
+                                    ):
                                         result.add_warning(
                                             "split-quality",
                                             f"Много строк: {row_count} > {self.expected_max_rows * 1.5:.0f}",
@@ -473,10 +494,12 @@ def validate_split_file_lenient(file_path: str) -> ValidationResult:
     """
     result = ValidationResult(file_path=file_path)
     try:
-        import openpyxl
         import warnings
+
+        import openpyxl
+
         with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+            warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             _ = wb.sheetnames
             wb.close()
@@ -507,6 +530,7 @@ def validate_and_quarantine(
         try:
             os.makedirs(quarantine_dir, exist_ok=True)
             import shutil
+
             dest = os.path.join(quarantine_dir, os.path.basename(file_path))
             shutil.copy2(file_path, dest)
 
@@ -518,7 +542,8 @@ def validate_and_quarantine(
 
             logger.warning(
                 "Файл перемещён в quarantine: %s (%d ошибок)",
-                os.path.basename(file_path), len(result.errors),
+                os.path.basename(file_path),
+                len(result.errors),
             )
         except Exception as e:
             logger.error("Не удалось переместить в quarantine: %s", e)

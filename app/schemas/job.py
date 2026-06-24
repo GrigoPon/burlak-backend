@@ -17,7 +17,9 @@ class JobStatusResponse(BaseModel):
 
     id: int
     status: str  # awaiting_upload | processing | done | error
-    stage: str | None  # unpacking | analyzing_mapping | processing_cards | aggregating | packaging
+    stage: (
+        str | None
+    )  # unpacking | analyzing_mapping | processing_cards | aggregating | packaging
     total: int
     processed: int
     failed: int
