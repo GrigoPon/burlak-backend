@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, status
 from app.core.exceptions import JobNotFoundError
 from app.db.async_repository import get_job
 from app.db.database import get_async_db
-from app.schemas.job import JobCreateResponse, JobStatusResponse
+from app.schemas.job import JobCreateResponse, JobStartResponse, JobStatusResponse
 from app.services.job_creation_service import JobCreationService
 from app.services.job_processing_service import JobProcessingService
 
@@ -59,7 +59,7 @@ async def get_job_status(
 async def start_job_processing(
     job_id: int,
     db: aiosqlite.Connection = Depends(get_async_db),
-) -> dict:
+) -> JobStartResponse:
     """Start processing a job.
 
     Validates preconditions, transitions state, and dispatches async work.
@@ -68,8 +68,9 @@ async def start_job_processing(
     state = await JobProcessingService.transition_to_processing(db, job_id)
     JobProcessingService.dispatch_processing(job_id)
 
-    return {
-        "message": "Job processing started",
-        "job_id": job_id,
-        **state,
-    }
+    return JobStartResponse(
+        message="Job processing started",
+        job_id=job_id,
+        status=state["status"],
+        stage=state.get("stage"),
+    )

@@ -29,6 +29,15 @@ class JobStatusResponse(BaseModel):
     updated_at: datetime
 
 
+class JobStartResponse(BaseModel):
+    """Response for POST /api/v1/jobs/{job_id}/start"""
+
+    message: str
+    job_id: int
+    status: str
+    stage: str | None = None
+
+
 class ErrorResponse(BaseModel):
     """Uniform error response format"""
 

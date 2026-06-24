@@ -49,7 +49,7 @@ class JobProcessingService:
     async def transition_to_processing(
         db: aiosqlite.Connection,
         job_id: int,
-    ) -> dict:
+    ) -> dict[str, str]:
         """Persist the status transition to 'processing' with stage 'unpacking'.
 
         This is a pure state-mutation operation with no validation or side effects.
