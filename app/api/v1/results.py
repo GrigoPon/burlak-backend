@@ -29,7 +29,8 @@ async def download_diff(
     Job must be in 'done' or 'error' status.
     Returns a streaming binary response.
     """
-    diff_path = await ResultService.validate_and_get_path(db, job_id, "diff")
+    await ResultService.validate_job_ready(db, job_id)
+    diff_path = ResultService.get_result_path(job_id, "diff")
 
     return StreamingResponse(
         _file_streamer(str(diff_path)),
@@ -51,7 +52,8 @@ async def download_cards(
     Job must be in 'done' or 'error' status.
     Returns a streaming binary response.
     """
-    cards_path = await ResultService.validate_and_get_path(db, job_id, "cards")
+    await ResultService.validate_job_ready(db, job_id)
+    cards_path = ResultService.get_result_path(job_id, "cards")
 
     return StreamingResponse(
         _file_streamer(str(cards_path)),

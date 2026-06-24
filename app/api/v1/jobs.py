@@ -59,11 +59,16 @@ async def start_job_processing(
     job_id: int,
     db: aiosqlite.Connection = Depends(get_async_db),
 ) -> dict:
-    """Start processing a job."""
-    
-    result = await JobProcessingService.validate_and_start_processing(db, job_id)
+    """Start processing a job.
+
+    Validates preconditions, transitions state, and dispatches async work.
+    """
+    await JobProcessingService.validate_can_start(db, job_id)
+    state = await JobProcessingService.transition_to_processing(db, job_id)
+    JobProcessingService.dispatch_processing(job_id)
+
     return {
         "message": "Job processing started",
         "job_id": job_id,
-        **result,
+        **state,
     }
