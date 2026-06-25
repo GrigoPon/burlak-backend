@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 
 # Устанавливаем зависимости в системный Python (без виртуального окружения)
-RUN uv pip install --no-cache --system -r pyproject.toml
+RUN uv pip install --no-cache --system -e .
 
 # Копируем весь код
 COPY . .
