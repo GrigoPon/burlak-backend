@@ -37,6 +37,23 @@ async def get_job(db: aiosqlite.Connection, job_id: int) -> dict[str, Any] | Non
         return None
 
 
+async def try_start_processing(db: aiosqlite.Connection, job_id: int) -> bool:
+    """Atomically change status to 'processing' if all conditions are met.
+    Returns Ture if status has changed.
+    """
+    now = datetime.now(UTC).isoformat()
+    async with db.execute(
+        """
+        UPDATE jobs
+        SET status = 'processing', stage = 'unpacking', updated_at = ?
+        WHERE id = ? AND status = 'awaiting_upload' AND bom_uploaded = 1 AND archive_uploaded = 1
+        """,
+        (now, job_id),
+    ) as cursor:
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def update_job_status(
     db: aiosqlite.Connection, job_id: int, status: str, stage: str | None = None
 ) -> None:

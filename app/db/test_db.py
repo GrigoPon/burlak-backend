@@ -5,7 +5,7 @@ from collections.abc import Generator
 
 import aiosqlite
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from app.core.config import get_settings
 from app.db import (
@@ -13,7 +13,7 @@ from app.db import (
     models,  # noqa: F401
     sync_repository,
 )
-from app.db.database import Base
+from app.db.database import Base, get_async_db, get_db
 
 
 @pytest.fixture
@@ -63,6 +63,13 @@ async def test_async_flow(test_db: str) -> None:
         assert job["processed"] == 0
         assert job["failed"] == 0
 
+        # Update job status and stage
+        await async_repository.update_job_status(db, job_id, "processing", "unpacking")
+        job = await async_repository.get_job(db, job_id)
+        assert job is not None
+        assert job["status"] == "processing"
+        assert job["stage"] == "unpacking"
+
         # Update file upload status
         await async_repository.update_file_upload(
             db, job_id, "bom", "/data/bom.xlsx", True
@@ -77,6 +84,19 @@ async def test_async_flow(test_db: str) -> None:
         assert job["archive_uploaded"] is True
         assert job["bom_path"] == "/data/bom.xlsx"
         assert job["archive_path"] == "/data/archive.zip"
+
+        # Test try_start_processing error path (already processing)
+        started = await async_repository.try_start_processing(db, job_id)
+        assert started is False
+
+        # Reset job state to test happy path try_start_processing
+        await async_repository.update_job_status(db, job_id, "awaiting_upload", None)
+        started = await async_repository.try_start_processing(db, job_id)
+        assert started is True
+        job = await async_repository.get_job(db, job_id)
+        assert job is not None
+        assert job["status"] == "processing"
+        assert job["stage"] == "unpacking"
 
         # Update mapping config
         mapping = {"keys": ["Part Number", "Description"], "mappings": {}}
@@ -93,6 +113,22 @@ async def test_async_flow(test_db: str) -> None:
         job = await async_repository.get_job(db, job_id)
         assert job is not None
         assert job["total"] == 10
+
+        # Empty cards list is a no-op
+        await async_repository.create_cards(db, job_id, [])
+
+        # Retrieve failed cards (initially none)
+        failed = await async_repository.get_failed_cards(db, job_id)
+        assert len(failed) == 0
+
+        # Retrieve non-existent job
+        assert await async_repository.get_job(db, 999999) is None
+
+        # Invalid file role raise exception
+        with pytest.raises(ValueError):
+            await async_repository.update_file_upload(
+                db, job_id, "invalid_role", "path", True
+            )
 
 
 def test_sync_concurrency(test_db: str) -> None:
@@ -183,3 +219,55 @@ def test_sync_concurrency(test_db: str) -> None:
     assert res.processed == 7
     assert res.failed == 3
     conn.close()
+
+
+def test_sync_repository_not_found_errors(test_db: str) -> None:
+    """Test ValueError is raised when card or job is missing in sync_repository."""
+    # Job not found
+    with pytest.raises(ValueError):
+        sync_repository.increment_progress(9999, "card.xlsx", success=True)
+
+    # Job exists but card is missing
+    conn = sqlite3.connect(test_db)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO jobs (status, total, processed, failed, bom_uploaded, archive_uploaded, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("processing", 1, 0, 0, 1, 1, "2026-06-22", "2026-06-22"),
+    )
+    job_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    assert job_id is not None
+    with pytest.raises(ValueError):
+        sync_repository.increment_progress(
+            job_id, "non_existent_card.xlsx", success=True
+        )
+
+
+def test_get_db(test_db: str) -> None:
+    """Test sync get_db yields session and closes it."""
+    generator = get_db()
+    session = next(generator)
+    assert session is not None
+    res = session.execute(text("SELECT 1")).scalar()
+    assert res == 1
+    with pytest.raises(StopIteration):
+        next(generator)
+
+
+@pytest.mark.asyncio
+async def test_get_async_db(test_db: str) -> None:
+    """Test async get_async_db yields connection and closes it."""
+    generator = get_async_db()
+    connection = await generator.__anext__()
+    assert connection is not None
+    async with connection.execute("SELECT 1") as cursor:
+        res = await cursor.fetchone()
+        assert res is not None
+        assert res[0] == 1
+    with pytest.raises(StopAsyncIteration):
+        await generator.__anext__()
