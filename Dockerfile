@@ -1,5 +1,6 @@
 # ============================================
 # Dockerfile для Burlak Backend (FastAPI + Celery)
+# Используем uv sync --no-dev
 # ============================================
 
 FROM python:3.12-slim
@@ -12,14 +13,19 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Копируем зависимости
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Устанавливаем uv
+RUN pip install --no-cache-dir uv
+
+# Копируем файлы проекта
+COPY pyproject.toml uv.lock ./
+
+# Устанавливаем зависимости в системный Python (без виртуального окружения)
+RUN uv pip install --no-cache --system -r pyproject.toml
 
 # Копируем весь код
 COPY . .
 
-# Создаем необходимые директории
+# Создаем директории
 RUN mkdir -p /app/data /app/storage /app/reports /app/output
 
 # Переменные окружения
@@ -29,8 +35,8 @@ ENV PYTHONUNBUFFERED=1 \
     SQLITE_DB_PATH=/app/data/tasks.db \
     STORAGE_PATH=/app/storage
 
-# Открываем порт для API
+# Открываем порт
 EXPOSE 8000
 
-# Команда запуска (переопределяется для Celery)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Команда запуска
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
