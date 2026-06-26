@@ -130,3 +130,12 @@ All files must fully comply with mypy strict type hinting guidelines.
 
 
 * **Response Streaming:** Download endpoints for results must stream binary data using `StreamingResponse` or `FileResponse` to avoid loading massive archives into memory.
+
+## 🐳 Локальная разработка с Docker
+
+```bash
+# Запустить инфраструктуру (Redis, ML-Mock, Celery)
+docker compose -f docker-compose.dev.yml up -d
+
+# Запустить бэкенд локально
+uv run uvicorn app.main:app --reload

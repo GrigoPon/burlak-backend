@@ -1,0 +1,47 @@
+# ============================================
+# docker-compose.dev.yml — для локальной разработки бэкенда
+# Запускает только инфраструктуру (Redis, ML-Mock)
+# Бэкенд запускается отдельно через uvicorn
+# ============================================
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: dev-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ml-mock:
+    build:
+      context: ../devops-infrastructure/ml-mock
+      dockerfile: Dockerfile
+    container_name: dev-ml-mock
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  # Опционально: Celery worker для отладки
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dev-celery-worker
+    command: python -m celery -A app.tasks worker --loglevel=info --concurrency=2
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DB_URL: ./data/jobs.db
+      STORAGE_PATH: ./data
+      ML_API_URL: http://ml-mock:5000
+    volumes:
+      - ./data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
