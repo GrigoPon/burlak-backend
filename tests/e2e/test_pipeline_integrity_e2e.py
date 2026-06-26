@@ -1,6 +1,7 @@
-import pytest
-import aiosqlite
 from pathlib import Path
+
+import aiosqlite
+import pytest
 
 from app.db import async_repository
 from app.services.result_service import ResultService
@@ -13,8 +14,12 @@ async def test_pipeline_happy_path(temp_db_path: str, mock_storage_path: Path):
         job_id = await async_repository.create_job(db)
 
         # Имитируем успешную загрузку файлов
-        await async_repository.update_file_upload(db, job_id, "bom", "/tmp/bom.xlsx", True)
-        await async_repository.update_file_upload(db, job_id, "archive", "/tmp/archive.zip", True)
+        await async_repository.update_file_upload(
+            db, job_id, "bom", "/tmp/bom.xlsx", True
+        )
+        await async_repository.update_file_upload(
+            db, job_id, "archive", "/tmp/archive.zip", True
+        )
         await async_repository.update_job_status(db, job_id, "done")
 
         # Создаём фейковые результаты

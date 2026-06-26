@@ -1,11 +1,9 @@
-import pytest
 from fastapi.testclient import TestClient
 
-from app.services.file_service import FileService
-from app.db.async_repository import create_job
 
-
-def test_chunk_upload_idempotency(api_client: TestClient, temp_db_path: str, mock_storage_path):
+def test_chunk_upload_idempotency(
+    api_client: TestClient, temp_db_path: str, mock_storage_path
+):
     """Тест idempotency чанковой загрузки (повторная отправка того же чанка)."""
     # Создаём задачу
     response = api_client.post("/api/v1/jobs")
@@ -17,7 +15,7 @@ def test_chunk_upload_idempotency(api_client: TestClient, temp_db_path: str, moc
     resp1 = api_client.put(
         f"/api/v1/jobs/{job_id}/files/bom/chunks/0",
         content=chunk_data,
-        headers={"X-Total-Chunks": "2"}
+        headers={"X-Total-Chunks": "2"},
     )
     assert resp1.status_code == 200
 
@@ -25,7 +23,7 @@ def test_chunk_upload_idempotency(api_client: TestClient, temp_db_path: str, moc
     resp2 = api_client.put(
         f"/api/v1/jobs/{job_id}/files/bom/chunks/0",
         content=chunk_data,
-        headers={"X-Total-Chunks": "2"}
+        headers={"X-Total-Chunks": "2"},
     )
     assert resp2.status_code == 200
 
@@ -33,7 +31,7 @@ def test_chunk_upload_idempotency(api_client: TestClient, temp_db_path: str, moc
     resp3 = api_client.put(
         f"/api/v1/jobs/{job_id}/files/bom/chunks/0",
         content=chunk_data + b"extra",
-        headers={"X-Total-Chunks": "2"}
+        headers={"X-Total-Chunks": "2"},
     )
     assert resp3.status_code == 422
     assert resp3.json()["error"]["code"] == "CHUNK_CORRUPTED"
