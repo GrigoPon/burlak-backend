@@ -24,3 +24,6 @@ output_*/
 *.db
 *.db-wal
 *.db-shm
+
+# IDE files
+.idea/
