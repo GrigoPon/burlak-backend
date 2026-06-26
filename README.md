@@ -2,6 +2,8 @@
 
 BOM parsing and comparison system for automotive manufacturing.# burlak-backend
 =======
+=======
+>>>>>>> main
 # BOM Verification System Backend (Burlak Backend)
 
 This is the backend repository for the BOM Verification System. The system matches Bill of Materials (BOM) spreadsheets against assembly operational cards for automotive manufacturing, translates Chinese material names and card text into Russian, and generates discrepancy reports.
@@ -126,3 +128,5 @@ All files must fully comply with mypy strict type hinting guidelines.
 * **SQLite WAL Writes:** All database writes inside Celery tasks must use the synchronous repository and the `BEGIN IMMEDIATE` transaction block to avoid locking/concurrency errors.
 * **Response Streaming:** Download endpoints for results must stream binary data using `StreamingResponse` or `FileResponse` to avoid loading massive archives into memory.
 
+
+* **Response Streaming:** Download endpoints for results must stream binary data using `StreamingResponse` or `FileResponse` to avoid loading massive archives into memory.
