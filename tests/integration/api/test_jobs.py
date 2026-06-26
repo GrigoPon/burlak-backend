@@ -1,7 +1,7 @@
-import pytest
 import sqlite3
-from fastapi.testclient import TestClient
 from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from app.db.database import Base
@@ -13,7 +13,9 @@ from app.db.database import Base
 # зависимости (как было раньше) — и есть причина "no such table: jobs".
 
 
-def test_full_job_lifecycle(api_client: TestClient, temp_db_path: str, mock_storage_path):
+def test_full_job_lifecycle(
+    api_client: TestClient, temp_db_path: str, mock_storage_path
+):
     """E2E тест создания задачи с явным созданием таблиц."""
 
     # === ЯВНОЕ СОЗДАНИЕ ТАБЛИЦ В ТОЙ ЖЕ БД, КОТОРУЮ ИСПОЛЬЗУЕТ ТЕСТ ===
@@ -22,9 +24,12 @@ def test_full_job_lifecycle(api_client: TestClient, temp_db_path: str, mock_stor
 
     # Проверка, что таблицы реально созданы
     conn = sqlite3.connect(temp_db_path)
-    tables = [row[0] for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
+    tables = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    ]
     conn.close()
 
     assert "jobs" in tables, f"Таблица 'jobs' не найдена! Найдены: {tables}"
@@ -40,7 +45,7 @@ def test_full_job_lifecycle(api_client: TestClient, temp_db_path: str, mock_stor
     api_client.put(
         f"/api/v1/jobs/{job_id}/files/bom/chunks/0",
         content=b"bom content",
-        headers={"X-Total-Chunks": "1"}
+        headers={"X-Total-Chunks": "1"},
     )
     resp = api_client.post(f"/api/v1/jobs/{job_id}/files/bom/complete")
     assert resp.status_code == 200
@@ -49,13 +54,15 @@ def test_full_job_lifecycle(api_client: TestClient, temp_db_path: str, mock_stor
     api_client.put(
         f"/api/v1/jobs/{job_id}/files/archive/chunks/0",
         content=b"archive content",
-        headers={"X-Total-Chunks": "1"}
+        headers={"X-Total-Chunks": "1"},
     )
     resp = api_client.post(f"/api/v1/jobs/{job_id}/files/archive/complete")
     assert resp.status_code == 200
 
     # 4. Запуск обработки
-    with patch("app.services.job_processing_service.JobProcessingService.dispatch_processing"):
+    with patch(
+        "app.services.job_processing_service.JobProcessingService.dispatch_processing"
+    ):
         resp = api_client.post(f"/api/v1/jobs/{job_id}/start")
         assert resp.status_code == 202
 

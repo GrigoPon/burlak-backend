@@ -1,13 +1,14 @@
-import pytest
 import sqlite3
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, text
 
-# Явно импортируем модели
-from app.db.models import Jobs, Cards  # noqa: F401
-from app.db.database import Base
 from app.core.config import get_settings
+from app.db.database import Base
+
+# Явно импортируем модели
+from app.db.models import Cards, Jobs  # noqa: F401
 
 
 @pytest.fixture(scope="function")
@@ -32,9 +33,12 @@ def temp_db_path(tmp_path: Path):
     # Принудительная проверка и создание, если что-то пропущено
     with engine.connect() as con:
         con.execute(text("PRAGMA foreign_keys=ON"))
-        tables = [row[0] for row in con.execute(text(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )).fetchall()]
+        tables = [
+            row[0]
+            for row in con.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            ).fetchall()
+        ]
 
         if "jobs" not in tables:
             print("⚠️ Таблицы не найдены, создаём вручную...")
@@ -79,5 +83,7 @@ def api_client(temp_db_path: str):
     переключён на тестовую БД ДО того, как приложение начнёт обрабатывать запросы.
     """
     from fastapi.testclient import TestClient
+
     from app.main import app
+
     return TestClient(app)
